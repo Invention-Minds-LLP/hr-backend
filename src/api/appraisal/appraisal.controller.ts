@@ -163,32 +163,54 @@ export const getAllAppraisalsWithManagerReview = async (req: Request, res: Respo
 
 export const saveManagerReview = async (req: Request, res: Response) => {
   try {
-    const { appraisalId, communication, teamwork, problemSolving, initiative, reliability, comments, recommendations, overallScore, finalDecision, finalComments } = req.body;
 
-    const review = await prisma.managerAppraisal.upsert({
+    const {
+      appraisalId,
+      qualityOfWorkRating, qualityOfWorkComments,
+      knowledgeOfJobRating, knowledgeOfJobComments,
+      teamworkRating, teamworkComments,
+      independenceRating, independenceComments,
+      recordsRating, recordsComments,
+      guestServiceRating, guestServiceComments,
+      safetyRating, safetyComments,
+      attendanceRating, attendanceComments,
+      leadershipRating, leadershipComments,
+      overallScore,
+      comments,
+      recommendations,
+      finalDecision,
+      finalComments
+    } = req.body;
+    
+    await prisma.managerAppraisal.upsert({
       where: { appraisalFormId: appraisalId },
       update: {
-        communication,
-        teamwork,
-        problemSolving,
-        initiative,
-        reliability,
-        comments,
-        recommendations,
-        overallScore
+        qualityOfWorkRating, qualityOfWorkComments,
+        knowledgeOfJobRating, knowledgeOfJobComments,
+        teamworkRating, teamworkComments,
+        independenceRating, independenceComments,
+        recordsRating, recordsComments,
+        guestServiceRating, guestServiceComments,
+        safetyRating, safetyComments,
+        attendanceRating, attendanceComments,
+        leadershipRating, leadershipComments,
+        overallScore, comments, recommendations
       },
       create: {
         appraisalFormId: appraisalId,
-        communication,
-        teamwork,
-        problemSolving,
-        initiative,
-        reliability,
-        comments,
-        recommendations,
-        overallScore
+        qualityOfWorkRating, qualityOfWorkComments,
+        knowledgeOfJobRating, knowledgeOfJobComments,
+        teamworkRating, teamworkComments,
+        independenceRating, independenceComments,
+        recordsRating, recordsComments,
+        guestServiceRating, guestServiceComments,
+        safetyRating, safetyComments,
+        attendanceRating, attendanceComments,
+        leadershipRating, leadershipComments,
+        overallScore, comments, recommendations
       }
     });
+    
 
     // Update final decision in AppraisalForm
     await prisma.appraisalForm.update({
@@ -201,7 +223,7 @@ export const saveManagerReview = async (req: Request, res: Response) => {
       }
     });
 
-    res.json({ message: 'Manager review saved successfully', review });
+    res.json({ message: 'Manager review saved successfully' });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to save manager review' });

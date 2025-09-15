@@ -23,13 +23,18 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getActiveEmployees = exports.getSpecificRoles = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
+exports.getEmployeeRequests = exports.getActiveEmployees = exports.getSpecificRoles = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
+exports.getAccruals = getAccruals;
+exports.getEmployeeAccrualsController = getEmployeeAccrualsController;
+exports.getTodayCelebrants = getTodayCelebrants;
+exports.listMentors = listMentors;
 const client_1 = require("@prisma/client");
 const prisma = new client_1.PrismaClient();
 const formidable_1 = __importDefault(require("formidable"));
 const fs_1 = __importDefault(require("fs"));
 const basic_ftp_1 = require("basic-ftp");
 const path_1 = __importDefault(require("path"));
+const client_2 = require("@prisma/client");
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu", // Your FTP hostname
     user: "u948610439.hrproindia.in", // Your FTP username
@@ -43,7 +48,11 @@ if (!fs_1.default.existsSync(TEMP_FOLDER)) {
 // CREATE Employee (with emergency contacts & qualifications)
 const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const { employeeCode, referenceCode, firstName, lastName, gender, dob, photoUrl, phone, email, designation, departmentId, branchId, dateOfJoining, employmentType, probationEndDate, employmentStatus, emergencyContacts, qualifications, addresses, roleId, bloodGroup, reportingManager, } = req.body;
+        const { employeeCode, referenceCode, firstName, lastName, gender, dob, photoUrl, phone, email, designation, departmentId, branchId, dateOfJoining, employmentType, probationEndDate, employmentStatus, emergencyContacts, qualifications, addresses, roleId, bloodGroup, reportingManager, age, shiftMode, // 'FIXED' | 'ROTATIONAL' (optional)
+        fixedShiftId, // optional
+        rotationPatternId, // optional
+        rotationStartDate // optional
+         } = req.body;
         const newEmployee = yield prisma.employee.create({
             data: {
                 employeeCode,
@@ -61,6 +70,7 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
                 employmentStatus,
                 bloodGroup,
+                age,
                 reportingManager,
                 // Connect relations
                 Department: { connect: { id: departmentId } },
@@ -102,6 +112,28 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 Address: true,
             }
         });
+        // NEW: persist shift assignment mode
+        if (shiftMode === 'FIXED' && fixedShiftId) {
+            yield prisma.employeeShiftSetting.create({
+                data: {
+                    employeeId: newEmployee.id,
+                    mode: 'FIXED',
+                    fixedShiftId,
+                    startDate: new Date()
+                }
+            });
+        }
+        else if (shiftMode === 'ROTATIONAL' && rotationPatternId) {
+            yield prisma.employeeShiftSetting.create({
+                data: {
+                    employeeId: newEmployee.id,
+                    mode: 'ROTATIONAL',
+                    rotationPatternId,
+                    startDate: rotationStartDate ? new Date(rotationStartDate) : new Date()
+                }
+            });
+            // (Optional) generate daily ShiftAssignment rows for the next N days here.
+        }
         return res.status(201).json(newEmployee);
     }
     catch (error) {
@@ -119,6 +151,7 @@ const getEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 emergencyContacts: true,
                 qualifications: true,
                 documents: true,
+                EmployeeShiftSetting: true,
                 shifts: {
                     orderBy: { date: 'desc' }, // Most recent first
                     take: 1, // Only 1 record
@@ -144,23 +177,46 @@ const getEmployeeById = (req, res) => __awaiter(void 0, void 0, void 0, function
             where: { id: Number(id) },
             include: {
                 emergencyContacts: true,
-                qualifications: true
+                qualifications: true,
+                documents: true,
+                Address: true,
+                EmployeeShiftSetting: true,
+                shifts: {
+                    orderBy: { date: 'desc' }, // Most recent first
+                    take: 1, // Only 1 record
+                    include: {
+                        shift: true // Include shift template details
+                    }
+                }
             }
         });
-        if (!employee)
+        if (!employee) {
             return res.status(404).json({ error: "Employee not found" });
-        res.json(employee);
+        }
+        // Attach the latest shift assignment
+        const formatted = Object.assign(Object.assign({}, employee), { latestShiftAssignment: employee.shifts[0] || null });
+        res.json(formatted);
     }
     catch (error) {
+        console.error(error);
         res.status(500).json({ error: "Failed to fetch employee" });
     }
 });
 exports.getEmployeeById = getEmployeeById;
 const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     try {
         const { id } = req.params;
         const data = req.body;
-        const { addresses, emergencyContacts, qualifications, departmentId, branchId, roleId } = data, employeeFields = __rest(data, ["addresses", "emergencyContacts", "qualifications", "departmentId", "branchId", "roleId"]);
+        const { addresses, emergencyContacts, qualifications, departmentId, branchId, roleId, shiftMode, // 'FIXED' | 'ROTATIONAL' | undefined
+        fixedShiftId, // number | undefined
+        rotationPatternId, // number | undefined
+        rotationStartDate, // ISO string | undefined
+        dob, dateOfJoining, probationEndDate } = data, employeeFields = __rest(data, ["addresses", "emergencyContacts", "qualifications", "departmentId", "branchId", "roleId", "shiftMode", "fixedShiftId", "rotationPatternId", "rotationStartDate", "dob", "dateOfJoining", "probationEndDate"]);
+        const toDate = (v) => (v ? new Date(v) : null);
+        employeeFields.dob = (_a = toDate(dob)) !== null && _a !== void 0 ? _a : undefined;
+        employeeFields.dateOfJoining = (_b = toDate(dateOfJoining)) !== null && _b !== void 0 ? _b : undefined;
+        employeeFields.probationEndDate = toDate(probationEndDate);
         const updatedEmployee = yield prisma.employee.update({
             where: { id: Number(id) },
             data: Object.assign(Object.assign({}, employeeFields), { Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, Address: {
@@ -192,9 +248,42 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
             include: {
                 Address: true,
                 emergencyContacts: true,
-                qualifications: true
+                qualifications: true,
+                EmployeeShiftSetting: true,
             }
         });
+        // 2) upsert EmployeeShiftSetting (simple & type-safe)
+        // map 'FIXED' | 'ROTATIONAL' -> Prisma enum
+        const mode = shiftMode === 'FIXED'
+            ? client_2.$Enums.ShiftAssignMode.FIXED
+            : shiftMode === 'ROTATIONAL'
+                ? client_2.$Enums.ShiftAssignMode.ROTATIONAL
+                : undefined;
+        if (mode) {
+            const fixedId = fixedShiftId !== undefined && fixedShiftId !== null && fixedShiftId !== ''
+                ? Number(fixedShiftId)
+                : null;
+            const rotId = rotationPatternId !== undefined && rotationPatternId !== null && rotationPatternId !== ''
+                ? Number(rotationPatternId)
+                : null;
+            const start = rotationStartDate ? new Date(rotationStartDate) : new Date();
+            yield prisma.employeeShiftSetting.upsert({
+                where: { employeeId: updatedEmployee.id }, // unique on employeeId
+                create: {
+                    employeeId: updatedEmployee.id,
+                    mode,
+                    fixedShiftId: mode === client_2.$Enums.ShiftAssignMode.FIXED ? fixedId : null,
+                    rotationPatternId: mode === client_2.$Enums.ShiftAssignMode.ROTATIONAL ? rotId : null,
+                    startDate: start,
+                },
+                update: {
+                    mode,
+                    fixedShiftId: mode === client_2.$Enums.ShiftAssignMode.FIXED ? fixedId : null,
+                    rotationPatternId: mode === client_2.$Enums.ShiftAssignMode.ROTATIONAL ? rotId : null,
+                    startDate: start,
+                },
+            });
+        }
         res.json(updatedEmployee);
     }
     catch (error) {
@@ -335,3 +424,259 @@ const getActiveEmployees = (req, res) => __awaiter(void 0, void 0, void 0, funct
     }
 });
 exports.getActiveEmployees = getActiveEmployees;
+function getAccruals(employeeId_1) {
+    return __awaiter(this, arguments, void 0, function* (employeeId, asOf = new Date()) {
+        // 1) employee & policy
+        const employee = yield prisma.employee.findUnique({
+            where: { id: employeeId },
+            select: { dateOfJoining: true },
+        });
+        if (!employee)
+            throw new Error('Employee not found');
+        const year = asOf.getFullYear();
+        const policy = yield prisma.entitlementPolicy.findFirst({
+            where: { year },
+            select: { leaveEntitlement: true, wfhEntitlement: true, permissionEntitlement: true },
+        });
+        if (!policy)
+            throw new Error(`EntitlementPolicy not found for ${year}`);
+        // 2) date window (local-friendly, clamp to year)
+        const yearStart = new Date(Date.UTC(year, 0, 1, 0, 0, 0));
+        const yearEnd = new Date(Date.UTC(year, 11, 31, 23, 59, 59));
+        const startAccrual = new Date(Math.max(yearStart.getTime(), new Date(employee.dateOfJoining).setUTCHours(0, 0, 0, 0)));
+        const endAccrual = new Date(Math.min(asOf.getTime(), yearEnd.getTime()));
+        // 3) prorate months (to mid-month precision)
+        const monthsProrated = proratedMonths(startAccrual, endAccrual); // e.g., 6.45
+        const leaveAccrued = round(policy.leaveEntitlement / 12 * monthsProrated, 2);
+        const wfhAccrued = round(policy.wfhEntitlement / 12 * monthsProrated, 2);
+        const permissionAccrued = round(policy.permissionEntitlement / 12 * monthsProrated, 2); // hours
+        // 4) usage (only APPROVED within year)
+        const [leaves, wfhs, perms] = yield Promise.all([
+            prisma.leaveRequest.findMany({
+                where: {
+                    employeeId,
+                    status: 'APPROVED',
+                    // overlap with year
+                    AND: [
+                        { endDate: { gte: yearStart } },
+                        { startDate: { lte: yearEnd } },
+                    ],
+                },
+                select: { startDate: true, endDate: true },
+            }),
+            prisma.wFHRequest.findMany({
+                where: {
+                    employeeId,
+                    status: 'APPROVED',
+                    AND: [
+                        { endDate: { gte: yearStart } },
+                        { startDate: { lte: yearEnd } },
+                    ],
+                },
+                select: { startDate: true, endDate: true },
+            }),
+            prisma.permissionRequest.findMany({
+                where: {
+                    employeeId,
+                    status: 'APPROVED',
+                    AND: [
+                        { day: { gte: yearStart, lte: yearEnd } },
+                    ],
+                },
+                select: { startTime: true, endTime: true, timing: true },
+            }),
+        ]);
+        const leaveDaysUsed = leaves.reduce((sum, r) => sum + daysInclusive(clampRangeToYear(r.startDate, r.endDate, yearStart, yearEnd)), 0);
+        const wfhDaysUsed = wfhs.reduce((sum, r) => sum + daysInclusive(clampRangeToYear(r.startDate, r.endDate, yearStart, yearEnd)), 0);
+        const permissionHoursUsed = perms.reduce((sum, r) => sum + permissionHours(r.startTime, r.endTime, r.timing), 0);
+        // 5) rows
+        const rows = [
+            row('Leave', policy.leaveEntitlement, leaveAccrued, leaveDaysUsed),
+            row('WFH', policy.wfhEntitlement, wfhAccrued, wfhDaysUsed),
+            row('Permission', policy.permissionEntitlement, permissionAccrued, permissionHoursUsed),
+        ];
+        return rows;
+    });
+}
+/* ---------- helpers ---------- */
+function proratedMonths(from, to) {
+    if (to < from)
+        return 0;
+    const yf = from.getUTCFullYear(), yt = to.getUTCFullYear();
+    const mf = from.getUTCMonth(), mt = to.getUTCMonth();
+    const df = from.getUTCDate(), dt = to.getUTCDate();
+    let months = (yt - yf) * 12 + (mt - mf);
+    if (dt >= df) {
+        // add fractional month
+        const daysInMonth = new Date(to.getUTCFullYear(), to.getUTCMonth() + 1, 0).getUTCDate();
+        months += (dt - df + 1) / daysInMonth;
+    }
+    else {
+        // go back one month and add fraction
+        months -= 1;
+        const anchor = new Date(to.getUTCFullYear(), to.getUTCMonth(), 0).getUTCDate(); // prev month length
+        months += (anchor - df + 1 + dt) / anchor;
+    }
+    return Math.max(0, months);
+}
+function clampRangeToYear(start, end, yearStart, yearEnd) {
+    const s = new Date(Math.max(start.getTime(), yearStart.getTime()));
+    const e = new Date(Math.min(end.getTime(), yearEnd.getTime()));
+    if (e < s)
+        return { s, e: s }; // zero
+    return { s, e };
+}
+function daysInclusive(range) {
+    const s = new Date(range.s);
+    s.setUTCHours(0, 0, 0, 0);
+    const e = new Date(range.e);
+    e.setUTCHours(0, 0, 0, 0);
+    return Math.floor((e.getTime() - s.getTime()) / 86400000) + 1;
+}
+function permissionHours(start, end, timing) {
+    if (start && end) {
+        const ms = new Date(end).getTime() - new Date(start).getTime();
+        return Math.max(0, ms / 36e5);
+    }
+    if (!timing)
+        return 0;
+    switch (timing) {
+        case 'FULLDAY': return 8;
+        case 'HALFDAY': return 4;
+        case 'HOURLY': return 1;
+        default: return 0;
+    }
+}
+function row(category, entitlement, accruedToDate, used) {
+    const balance = round(Math.max(0, Math.min(accruedToDate, entitlement) - used), 2);
+    return { category, entitlement, accruedToDate: round(Math.min(accruedToDate, entitlement), 2), used: round(used, 2), balance };
+}
+function round(n, p = 2) { return Math.round(n * 10 ** p) / 10 ** p; }
+function getEmployeeAccrualsController(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const id = Number(req.params.id);
+            if (Number.isNaN(id)) {
+                return res.status(400).json({ error: 'Invalid employee id' });
+            }
+            const data = yield getAccruals(id);
+            return res.json(data);
+        }
+        catch (e) {
+            console.error('getEmployeeAccrualsController error:', e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || 'Internal Server Error' });
+        }
+    });
+}
+const getEmployeeRequests = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const employeeId = Number(req.params.employeeId);
+        if (!employeeId)
+            return res.status(400).json({ error: "employeeId must be a number" });
+        const [leaves, permissions, wfh] = yield Promise.all([
+            prisma.leaveRequest.findMany({
+                where: { employeeId }, orderBy: { createdAt: "desc" }, include: {
+                    leaveType: {
+                        select: { name: true }
+                    }
+                }
+            }),
+            prisma.permissionRequest.findMany({ where: { employeeId }, orderBy: { createdAt: "desc" } }),
+            prisma.wFHRequest.findMany({ where: { employeeId }, orderBy: { createdAt: "desc" } })
+        ]);
+        res.json({ leaves, permissions, wfh });
+    }
+    catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Failed to fetch requests" });
+    }
+});
+exports.getEmployeeRequests = getEmployeeRequests;
+function todayInIST() {
+    // Make a Date that represents "now" in IST (Asia/Kolkata)
+    return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+}
+function getTodayCelebrants(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b;
+        try {
+            const nowIST = todayInIST();
+            const mm = nowIST.getMonth(); // 0..11
+            const dd = nowIST.getDate(); // 1..31
+            // Pull only what we need
+            const employees = yield prisma.employee.findMany({
+                where: { employmentStatus: "ACTIVE" },
+                select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    dob: true,
+                    dateOfJoining: true,
+                    Department: { select: { name: true } },
+                },
+            });
+            const birthdays = [];
+            const anniversaries = [];
+            for (const e of employees) {
+                const name = [e.firstName, e.lastName].filter(Boolean).join(" ");
+                const dept = (_b = (_a = e.Department) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : "";
+                // Birthday (month/day match in IST)
+                if (e.dob) {
+                    const dob = new Date(e.dob);
+                    if (dob.getMonth() === mm && dob.getDate() === dd) {
+                        birthdays.push({ employeeId: e.id, employeeName: name, departmentName: dept });
+                    }
+                }
+                // Work anniversary (join date month/day match in IST)
+                // Work anniversary (join date month/day match in IST)
+                if (e.dateOfJoining) {
+                    const doj = new Date(e.dateOfJoining);
+                    if (doj.getMonth() === mm && doj.getDate() === dd) {
+                        const years = nowIST.getFullYear() - doj.getFullYear();
+                        if (years >= 1) { // ✅ only after completing 1 year
+                            anniversaries.push({
+                                employeeId: e.id,
+                                employeeName: name,
+                                departmentName: dept,
+                                years
+                            });
+                        }
+                    }
+                }
+            }
+            return res.json({ birthdays, anniversaries });
+        }
+        catch (err) {
+            console.error("celebrants/today failed:", err);
+            return res.status(500).json({ error: "Failed to fetch today's celebrants" });
+        }
+    });
+}
+function listMentors(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const departmentId = Number(req.query.departmentId);
+            const q = req.query.q || '';
+            if (!departmentId) {
+                return res.status(400).json({ error: 'departmentId is required' });
+            }
+            const rows = yield prisma.employee.findMany({
+                where: Object.assign({ employmentStatus: 'ACTIVE', departmentId }, (q ? {
+                    OR: [
+                        { firstName: { contains: q } },
+                        { lastName: { contains: q } },
+                        { employeeCode: { contains: q } },
+                    ],
+                } : {})),
+                select: { id: true, firstName: true, lastName: true, employeeCode: true },
+                orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+                take: 200,
+            });
+            res.json(rows);
+        }
+        catch (err) {
+            console.error(err);
+            res.status(500).json({ error: 'Failed to load mentors' });
+        }
+    });
+}

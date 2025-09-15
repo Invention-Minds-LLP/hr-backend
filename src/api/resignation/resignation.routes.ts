@@ -16,13 +16,17 @@ import {
   setFinalSettlement,
   markCompleted,
   hrHold,
-  generateClearanceCertificate
+  generateClearanceCertificate,
+  listExitInterviews,
+  getExitInterview,
+  createExitInterview
 } from './resignation.controller'
 
 const router = Router();
 
 // Create + list + view
 router.post('/', createResignation);
+router.get("/exit-interview", listExitInterviews);                 
 router.get('/', listResignations);
 router.get('/:id', getResignationById);
 
@@ -43,6 +47,11 @@ router.patch('/:id/handover-tasks/:taskId', updateTask);
 
 router.post('/:id/clearance', upsertClearance);
 router.post('/:id/exit-interview', scheduleExitInterview);
+router.post("/exit-interview", createExitInterview);   // submit responses
+router.get("/exit-interview/:id", getExitInterview);                // get one
+            // list all
+
+
 router.post('/:id/final-settlement', setFinalSettlement);
 
 router.post('/:id/complete', markCompleted);

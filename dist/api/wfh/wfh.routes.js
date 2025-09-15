@@ -8,5 +8,6 @@ const wfh_controller_1 = require("./wfh.controller");
 const router = express_1.default.Router();
 router.post("/", wfh_controller_1.createWFHRequest);
 router.get("/", wfh_controller_1.getWFHRequests);
+router.get('/wfh-buckets', wfh_controller_1.getWhoIsOnWFHBuckets);
 router.patch("/:id/status", wfh_controller_1.updateWFHStatus);
 exports.default = router;

@@ -154,18 +154,24 @@ model Employee {
   evaluations   EvaluationAttempt[]
   appraisals    AppraisalForm[]
 
-  createdAt            DateTime              @default(now())
-  updatedAt            DateTime              @default(now()) @updatedAt
-  Department           Department            @relation(fields: [departmentId], references: [id])
-  Branch               Branch                @relation(fields: [branchId], references: [id])
-  User                 User?
-  Address              Address[]
-  WFHRequest           WFHRequest[]
-  AssignedTest         AssignedTest[]
-  EmployeeShiftSetting EmployeeShiftSetting?
-  ResignationRequest   ResignationRequest[]
-  AnnouncementAck      AnnouncementAck[]
-  Internship           Internship[]
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @default(now()) @updatedAt
+  Department             Department               @relation(fields: [departmentId], references: [id])
+  Branch                 Branch                   @relation(fields: [branchId], references: [id])
+  User                   User?
+  Address                Address[]
+  WFHRequest             WFHRequest[]
+  AssignedTest           AssignedTest[]
+  EmployeeShiftSetting   EmployeeShiftSetting?
+  ResignationRequest     ResignationRequest[]
+  AnnouncementAck        AnnouncementAck[]
+  Internship             Internship[]
+  OvertimeApproval       OvertimeApproval[]
+  EmployeeSurvey         EmployeeSurvey[]
+  ExitInterview          ExitInterview[]
+  PerformanceResponse    PerformanceResponse[]
+  PerformanceSummary     PerformanceSummary[]
+  PerformanceFinalReview PerformanceFinalReview[]
 }
 
 model EmergencyContact {
@@ -228,10 +234,14 @@ model Department {
   name      String     @unique
   employees Employee[]
 
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @default(now()) @updatedAt
-  Job        Job[]
-  Internship Internship[]
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @default(now()) @updatedAt
+  Job                     Job[]
+  Internship              Internship[]
+  PerformanceFormTemplate PerformanceFormTemplate[]
+  PerformanceResponse     PerformanceResponse[]
+  PerformanceSummary      PerformanceSummary[]
+  PerformanceFinalReview  PerformanceFinalReview[]
 }
 
 model Branch {
@@ -290,22 +300,29 @@ model LeaveType {
 }
 
 model LeaveRequest {
-  id            Int         @id @default(autoincrement())
+  id            Int              @id @default(autoincrement())
   employeeId    Int
   leaveTypeId   Int
   startDate     DateTime
   endDate       DateTime
   reason        String
-  status        LeaveStatus @default(PENDING)
+  status        LeaveStatus      @default(PENDING)
   approvedBy    Int?
   declinedBy    Int?
   declineReason String?
   approvedDate  DateTime?
   declinedDate  DateTime?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @default(now()) @updatedAt
-  employee      Employee    @relation(fields: [employeeId], references: [id])
-  leaveType     LeaveType   @relation(fields: [leaveTypeId], references: [id])
+  hodDecision   ApprovalDecision @default(PENDING)
+  hodDecidedAt  DateTime?
+  hodNote       String?
+
+  hrDecision  ApprovalDecision @default(PENDING)
+  hrDecidedAt DateTime?
+  hrNote      String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @default(now()) @updatedAt
+  employee    Employee         @relation(fields: [employeeId], references: [id])
+  leaveType   LeaveType        @relation(fields: [leaveTypeId], references: [id])
 }
 
 // ----------------------
@@ -356,7 +373,14 @@ model PermissionRequest {
   declineReason  String?
   approvedDate   DateTime?
   declinedDate   DateTime?
-  employee       Employee          @relation(fields: [employeeId], references: [id])
+  hodDecision    ApprovalDecision  @default(PENDING)
+  hodDecidedAt   DateTime?
+  hodNote        String?
+
+  hrDecision  ApprovalDecision @default(PENDING)
+  hrDecidedAt DateTime?
+  hrNote      String?
+  employee    Employee         @relation(fields: [employeeId], references: [id])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -540,6 +564,34 @@ model ManagerAppraisal {
   reliability    Float?
   overallScore   Float?
 
+  // Section-wise rating + comments
+  qualityOfWorkRating   Float?
+  qualityOfWorkComments String?
+
+  knowledgeOfJobRating   Float?
+  knowledgeOfJobComments String?
+
+  teamworkRating   Float?
+  teamworkComments String?
+
+  independenceRating   Float?
+  independenceComments String?
+
+  recordsRating   Float?
+  recordsComments String?
+
+  guestServiceRating   Float?
+  guestServiceComments String?
+
+  safetyRating   Float?
+  safetyComments String?
+
+  attendanceRating   Float?
+  attendanceComments String?
+
+  leadershipRating   Float?
+  leadershipComments String?
+
   appraisalForm AppraisalForm @relation(fields: [appraisalFormId], references: [id])
 
   createdAt DateTime @default(now())
@@ -619,6 +671,14 @@ model WFHRequest {
   declineReason String?
   approvedDate  DateTime?
   declinedDate  DateTime?
+
+  hodDecision  ApprovalDecision @default(PENDING)
+  hodDecidedAt DateTime?
+  hodNote      String?
+
+  hrDecision  ApprovalDecision @default(PENDING)
+  hrDecidedAt DateTime?
+  hrNote      String?
 
   employee Employee @relation(fields: [employeeId], references: [id])
 
@@ -822,7 +882,65 @@ model ExitInterview {
   notes         String?
   outcome       String?
   completedAt   DateTime?
+  employeeId    Int?
 
+  nextOrgName     String?
+  nextOrgPosition String?
+  nextOrgCategory String? // Govt/Public/Private
+  nextOrgLocation String? // India/Abroad
+  nextOrgIndustry String? // Hospital/Manufacturing/Others
+
+  // SECTION C: Academic Qualification
+  academicQualification String? // JSON string
+
+  // SECTION D: Vacancy Source
+  vacancySource String? // JSON string
+
+  // SECTION E: Recruitment Mode
+  recruitmentMode String? // JSON string
+
+  // SECTION F: Reasons for Leaving
+  reasonForLeaving String?
+  triggerReason    String?
+  mostSatisfying   String?
+  leastSatisfying  String?
+  supportReceived  String?
+  newJobOffers     String?
+
+  // SECTION G: Expectations & Skills
+  expectationsMet  String?
+  skillUtilization String?
+
+  // SECTION H: Influencing Factors
+  influencedFactors String? // JSON string
+
+  // SECTION I: Dissatisfaction Factors
+  dissatisfaction String? // JSON string
+
+  // SECTION J: Job/Dept Opinions
+  jobOpinion String? // JSON string
+
+  // SECTION K: Attitude of Superiors
+  attitudeSuperiors String? // JSON string
+
+  // SECTION L: Opinion on Company
+  companyOpinion String? // JSON string
+
+  // SECTION M: Pay in New Job
+  newJobSalaryComparison String? // More / Same / Less
+
+  // SECTION N: Discrimination
+  discrimination Boolean?
+
+  // SECTION O: Open-ended
+  likedMost         String?
+  stayEncouragement String?
+  recommendCompany  Boolean?
+  recommendReason   String?
+
+  demotivating String? // JSON string (unionism, leadership, etc.)
+
+  employee    Employee?          @relation(fields: [employeeId], references: [id])
   resignation ResignationRequest @relation(fields: [resignationId], references: [id])
 
   createdAt DateTime @default(now())
@@ -902,8 +1020,9 @@ model Job {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  department   Department    @relation(fields: [departmentId], references: [id])
-  applications Application[]
+  department          Department           @relation(fields: [departmentId], references: [id])
+  applications        Application[]
+  ManpowerRequisition ManpowerRequisition?
 
   @@index([status])
   @@index([departmentId])
@@ -916,6 +1035,7 @@ model Candidate {
   phone         String?
   source        String? // Referral, LinkedIn, Agency, etc.
   resumeUrl     String?
+  address       String?
   passwordHash  String?
   lastLogin     DateTime?
   qualification String?
@@ -1024,13 +1144,19 @@ model Offer {
 // ANNOUNCEMENTS + ACKS
 // ======================
 model Announcement {
-  id        Int       @id @default(autoincrement())
-  title     String
-  body      String
-  audience  String? // JSON filter e.g. {"departmentId":[2,3]}
-  startsAt  DateTime  @default(now())
-  endsAt    DateTime?
-  createdBy Int
+  id           Int     @id @default(autoincrement())
+  title        String
+  circularCode String? @unique
+  body         String
+  type         String?
+
+  audience    String? // JSON filter e.g. {"departmentId":[2,3]}
+  startsAt    DateTime  @default(now())
+  endsAt      DateTime?
+  createdBy   Int
+  requireAck  Boolean   @default(false)
+  isPinned    Boolean   @default(false)
+  attachments String? // JSON string: '[{ "name": "...", "url": "..." }]'
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -1172,8 +1298,237 @@ model InterviewHRReview {
   reviewerUserId Int?
   reviewedAt     DateTime?
 
+  expectedDoj  DateTime? // expected joining date
+  noticePeriod Int? // in days
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
   interview Interview @relation(fields: [interviewId], references: [id])
+}
+
+model OvertimeApproval {
+  id           Int       @id @default(autoincrement())
+  employeeId   Int
+  date         DateTime // the day the OT was worked
+  minutes      Int
+  scheduledEnd DateTime? // original shift end time
+  checkOut     DateTime?
+  status       String // PENDING | APPROVED | REJECTED
+  createdAt    DateTime  @default(now())
+  approvedAt   DateTime?
+  employee     Employee  @relation(fields: [employeeId], references: [id])
+
+  @@unique([employeeId, date], name: "employeeId_date")
+}
+
+model EmployeeSurvey {
+  id         Int      @id @default(autoincrement())
+  employeeId Int
+  date       DateTime
+  createdAt  DateTime @default(now())
+
+  employee  Employee         @relation(fields: [employeeId], references: [id])
+  responses SurveyResponse[]
+}
+
+model SurveyQuestion {
+  id           Int              @id @default(autoincrement())
+  section      String
+  questionText String
+  orderNo      Int
+  responses    SurveyResponse[]
+}
+
+model SurveyResponse {
+  id         Int    @id @default(autoincrement())
+  surveyId   Int
+  questionId Int
+  answer     String
+
+  survey   EmployeeSurvey @relation(fields: [surveyId], references: [id])
+  question SurveyQuestion @relation(fields: [questionId], references: [id])
+}
+
+enum EvaluationPeriod {
+  MONTH_1
+  MONTH_3
+  MONTH_6
+  YEAR_1
+  YEAR_2
+}
+
+model PerformanceFormTemplate {
+  id           Int                   @id @default(autoincrement())
+  departmentId Int
+  cycle        String // e.g., "APR-2024 TO MAR-2025"
+  questions    PerformanceQuestion[]
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @default(now()) @updatedAt
+
+  department Department @relation(fields: [departmentId], references: [id])
+
+  @@unique([departmentId, cycle])
+}
+
+model PerformanceQuestion {
+  id         Int      @id @default(autoincrement())
+  templateId Int
+  category   String
+  text       String
+  orderNo    Int
+  weight     Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  template  PerformanceFormTemplate @relation(fields: [templateId], references: [id])
+  responses PerformanceResponse[]
+}
+
+model PerformanceResponse {
+  id           Int              @id @default(autoincrement())
+  employeeId   Int
+  departmentId Int
+  cycle        String
+  questionId   Int
+  period       EvaluationPeriod
+  score        Int? // 1–5
+  reviewerId   Int?
+  comments     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  employee   Employee            @relation(fields: [employeeId], references: [id])
+  question   PerformanceQuestion @relation(fields: [questionId], references: [id])
+  department Department          @relation(fields: [departmentId], references: [id])
+}
+
+model PerformanceSummary {
+  id            Int              @id @default(autoincrement())
+  employeeId    Int
+  departmentId  Int
+  cycle         String
+  period        EvaluationPeriod
+  marksScored   Int?
+  overallPerf   String? // "Outstanding", "Commendable", etc.
+  employeeSig   String?          @db.Text
+  supervisorSig String?          @db.Text
+  hodSig        String?          @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  employee   Employee   @relation(fields: [employeeId], references: [id])
+  department Department @relation(fields: [departmentId], references: [id])
+}
+
+model PerformanceFinalReview {
+  id              Int     @id @default(autoincrement())
+  employeeId      Int
+  departmentId    Int
+  cycle           String
+  appreciations   String?
+  talents         String?
+  overallComments String?
+
+  employeeSig   String? @db.Text
+  supervisorSig String? @db.Text
+  hrSig         String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  employee   Employee   @relation(fields: [employeeId], references: [id])
+  department Department @relation(fields: [departmentId], references: [id])
+}
+
+model ManpowerRequisition {
+  id            Int      @id @default(autoincrement())
+  jobId         Int?     @unique
+  requestDate   DateTime
+  designation   String?
+  departmentId  Int?
+  reasonType    String
+  title         String?
+  reasonDetails String?
+  vacancies     Int?
+  minExperience Int?
+  maxExperience Int?
+  skills        String?
+  education     String?
+  training      String?
+
+  reasonBreakdown Json?
+
+  // Education preferences
+  eduSSC         Boolean?
+  eduDiploma     Boolean?
+  eduBachelor    Boolean?
+  eduMaster      Boolean?
+  eduOther       String?
+  eduOtherDetail Boolean?
+
+  eduSSCDetail      String?
+  eduDiplomaDetail  String?
+  eduBachelorDetail String?
+  eduMasterDetail   String?
+
+  urgent      Boolean? @default(false)
+  duration    String?
+  reportingTo String?
+
+  // Approvals - Raised By
+  raisedBy         String?
+  raisedBySign     String?   @db.LongText
+  raisedByDate     DateTime?
+  raisedByComments String?
+
+  // Approvals - HoD
+  approvedByHoD         String?
+  hodSign               String?   @db.LongText
+  approvedByHoDDate     DateTime?
+  approvedByHoDComments String?
+
+  // Approvals - SMO
+  approvedBySMO         String?
+  smoSign               String?   @db.LongText
+  approvedBySMODate     DateTime?
+  approvedBySMOComments String?
+
+  // Approvals - HR
+  receivedByHR         String?
+  hrSign               String?   @db.LongText
+  receivedByHRDate     DateTime?
+  receivedByHRComments String?
+
+  // HR Use Only
+  hrReferenceNo String?
+  salaryRange   String?
+  source        String?
+  actionTaken   String?
+  closedOn      DateTime?
+  hrRemarks     String?
+
+  // Status (workflow step)
+  status String @default("RAISED")
+  // possible values: PENDING, RAISED, HOD_APPROVED, SMO_APPROVED, HR_RECEIVED, CLOSED, REJECTED
+
+  // Rejections
+  hodRejectedBy       String?
+  hodRejectedDate     DateTime?
+  hodRejectedComments String?
+
+  smoRejectedBy       String?
+  smoRejectedDate     DateTime?
+  smoRejectedComments String?
+
+  hrRejectedBy       String?
+  hrRejectedDate     DateTime?
+  hrRejectedComments String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  job Job? @relation(fields: [jobId], references: [id])
 }

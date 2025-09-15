@@ -101,11 +101,17 @@ export const loginUser = async (req: Request, res: Response) => {
     if (!validPassword) return res.status(401).json({ error: "Invalid password" });
 
     // Generate JWT
-    const token = jwt.sign(
-      { userId: user.id, role: user.role },
-      process.env.JWT_SECRET as string,
-      { expiresIn: "1d" }
-    );
+    const payload = {
+      userId: user.id,
+      role: user.role,
+      empId: employee.id,
+      deptId: employee.departmentId,
+      employeeCode: user.employeeCode,
+      username: user.username,
+    };
+    
+    const token = jwt.sign(payload, process.env.JWT_SECRET as string, { expiresIn: "1d" });
+
 
     // Update last login
     await prisma.user.update({

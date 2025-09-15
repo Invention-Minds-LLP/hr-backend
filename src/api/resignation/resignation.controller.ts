@@ -348,6 +348,127 @@ export async function scheduleExitInterview(req: Request, res: Response) {
     res.status(500).json({ error: 'Exit interview scheduling failed' });
   }
 }
+export async function createExitInterview(req: Request, res: Response) {
+  try {
+    const d = req.body;
+    const interview = await prisma.exitInterview.update({
+      where: { resignationId: d.resignationId },
+      data: {
+        employeeId: Number(d.employeeId),
+        interviewerId: d.interviewerId,
+        outcome: d.outcome,
+        completedAt: new Date(),
+
+        nextOrgName: d.nextOrgName,
+        nextOrgPosition: d.nextOrgPosition,
+        nextOrgCategory: d.nextOrgCategory,
+        nextOrgLocation: d.nextOrgLocation,
+        nextOrgIndustry: d.nextOrgIndustry,
+
+        academicQualification: JSON.stringify(d.academicQualification || {}),
+        vacancySource: JSON.stringify(d.vacancySource || {}),
+        recruitmentMode: JSON.stringify(d.recruitmentMode || {}),
+
+        reasonForLeaving: d.reasonForLeaving,
+        triggerReason: d.triggerReason,
+        mostSatisfying: d.mostSatisfying,
+        leastSatisfying: d.leastSatisfying,
+        supportReceived: d.supportReceived,
+        newJobOffers: d.newJobOffers,
+
+        expectationsMet: d.expectationsMet,
+        skillUtilization: d.skillUtilization,
+
+        influencedFactors: JSON.stringify(d.influencedFactors || {}),
+        dissatisfaction: JSON.stringify(d.dissatisfaction || {}),
+        jobOpinion: JSON.stringify(d.jobOpinion || {}),
+        attitudeSuperiors: JSON.stringify(d.attitudeSuperiors || {}),
+        companyOpinion: JSON.stringify(d.companyOpinion || {}),
+
+        newJobSalaryComparison: d.newJobSalaryComparison,
+        discrimination: d.discrimination,
+        likedMost: d.likedMost,
+        stayEncouragement: d.stayEncouragement,
+        recommendCompany: d.recommendCompany,
+        recommendReason: d.recommendReason,
+        demotivating: JSON.stringify(d.demotivating || {}),
+      },
+    });
+    return res.json(interview);
+  } catch (e: any) {
+    console.error("createExitInterview error:", e);
+    return res.status(500).json({ error: e?.message || "Failed to save exit interview" });
+  }
+}
+
+
+// GET one Exit Interview
+export async function getExitInterview(req: Request, res: Response) {
+  try {
+    const id = Number(req.params.id);
+    const interview = await prisma.exitInterview.findUnique({
+      where: { id },
+      include: { employee: true },
+    });
+    if (!interview) return res.status(404).json({ error: "Not found" });
+
+    const parsed = {
+      ...interview,
+      academicQualification: interview.academicQualification ? JSON.parse(interview.academicQualification) : {},
+      vacancySource: interview.vacancySource ? JSON.parse(interview.vacancySource) : {},
+      recruitmentMode: interview.recruitmentMode ? JSON.parse(interview.recruitmentMode) : {},
+      influencedFactors: interview.influencedFactors ? JSON.parse(interview.influencedFactors) : {},
+      dissatisfaction: interview.dissatisfaction ? JSON.parse(interview.dissatisfaction) : {},
+      jobOpinion: interview.jobOpinion ? JSON.parse(interview.jobOpinion) : {},
+      attitudeSuperiors: interview.attitudeSuperiors ? JSON.parse(interview.attitudeSuperiors) : {},
+      companyOpinion: interview.companyOpinion ? JSON.parse(interview.companyOpinion) : {},
+      demotivating: interview.demotivating ? JSON.parse(interview.demotivating) : {},
+    };
+
+    return res.json(parsed);
+  } catch (e: any) {
+    console.error("getExitInterview error:", e);
+    return res.status(500).json({ error: e?.message || "Failed to fetch exit interview" });
+  }
+}
+
+// LIST all Exit Interviews
+export async function listExitInterviews(_req: Request, res: Response) {
+  try {
+    const all = await prisma.exitInterview.findMany({
+      where: { completedAt: { not: null } },
+      include: { employee: true }, // get employee
+      orderBy: { createdAt: "desc" },
+    });
+
+    // Map through interviews and fetch interviewer name
+    const withInterviewer = await Promise.all(
+      all.map(async (interview) => {
+        let interviewerName = null;
+        if (interview.interviewerId) {
+          const interviewer = await prisma.employee.findUnique({
+            where: { id: interview.interviewerId },
+            select: { firstName: true, lastName: true },
+          });
+          if (interviewer) {
+            interviewerName = `${interviewer.firstName} ${interviewer.lastName}`;
+          }
+        }
+
+        return {
+          ...interview,
+          interviewerName, // add computed field
+        };
+      })
+    );
+
+    return res.json(withInterviewer);
+  } catch (e: any) {
+    console.error("listExitInterviews error:", e);
+    return res.status(500).json({ error: e?.message || "Failed to fetch exit interviews" });
+  }
+}
+
 
 /** Final settlement status */
 export async function setFinalSettlement(req: Request, res: Response) {

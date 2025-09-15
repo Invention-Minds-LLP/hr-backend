@@ -1,0 +1,13 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const performance_controller_1 = require("./performance.controller");
+const router = (0, express_1.Router)();
+router.post("/template", performance_controller_1.createTemplate);
+router.get("/template/:departmentId", performance_controller_1.getTemplateByDept);
+router.post("/responses", performance_controller_1.submitResponses);
+router.post("/summary", performance_controller_1.submitSummary);
+router.post("/final-review", performance_controller_1.submitFinalReview);
+router.get("/form/:employeeId/:departmentId", performance_controller_1.getEmployeeForm);
+router.post("/full-form", performance_controller_1.submitFullForm);
+exports.default = router;

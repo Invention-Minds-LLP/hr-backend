@@ -1,0 +1,205 @@
+"use strict";
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.submitFullForm = exports.getEmployeeForm = exports.submitFinalReview = exports.submitSummary = exports.submitResponses = exports.getTemplateByDept = exports.createTemplate = void 0;
+const client_1 = require("@prisma/client");
+const prisma = new client_1.PrismaClient();
+// Create a template
+const createTemplate = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { departmentId, cycle, questions } = req.body;
+        const template = yield prisma.performanceFormTemplate.create({
+            data: {
+                departmentId,
+                cycle,
+                questions: { create: questions }
+            },
+            include: { questions: true }
+        });
+        res.json(template);
+    }
+    catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.createTemplate = createTemplate;
+// Fetch template
+const getTemplateByDept = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { departmentId, cycle } = req.params; // or req.query if you switched
+        const template = yield prisma.performanceFormTemplate.findFirst({
+            where: { departmentId: Number(departmentId), cycle },
+            include: {
+                questions: true,
+                department: true // 👈 include department details
+            }
+        });
+        res.json(template);
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getTemplateByDept = getTemplateByDept;
+// Submit per-question responses
+const submitResponses = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeId, departmentId, cycle, responses } = req.body;
+        yield prisma.performanceResponse.createMany({
+            data: responses.map((r) => ({
+                employeeId,
+                departmentId,
+                cycle,
+                questionId: r.questionId,
+                period: r.period,
+                score: r.score,
+                reviewerId: r.reviewerId,
+                comments: r.comments
+            }))
+        });
+        res.json({ success: true });
+    }
+    catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.submitResponses = submitResponses;
+// Submit summary
+const submitSummary = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeId, departmentId, cycle, summaries } = req.body;
+        yield prisma.performanceSummary.createMany({
+            data: summaries.map((s) => ({
+                employeeId,
+                departmentId,
+                cycle,
+                period: s.period,
+                marksScored: s.marksScored,
+                overallPerf: s.overallPerf,
+                employeeSig: s.employeeSig,
+                supervisorSig: s.supervisorSig,
+                hodSig: s.hodSig
+            }))
+        });
+        res.json({ success: true });
+    }
+    catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.submitSummary = submitSummary;
+// Submit final review
+const submitFinalReview = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeId, departmentId, cycle, appreciations, talents, overallComments, employeeSig, supervisorSig, hrSig } = req.body;
+        const review = yield prisma.performanceFinalReview.create({
+            data: { employeeId, departmentId, cycle, appreciations, talents, overallComments, employeeSig, supervisorSig, hrSig }
+        });
+        res.json(review);
+    }
+    catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.submitFinalReview = submitFinalReview;
+const getEmployeeForm = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeId, departmentId, cycle } = req.params;
+        const template = yield prisma.performanceFormTemplate.findFirst({
+            where: { departmentId: Number(departmentId), cycle },
+            include: { questions: true, department: true }
+        });
+        if (!template)
+            return res.status(404).json({ error: "Template not found" });
+        const employee = yield prisma.employee.findUnique({
+            where: { id: Number(employeeId) },
+            include: { Department: true }
+        });
+        const responses = yield prisma.performanceResponse.findMany({
+            where: { employeeId: Number(employeeId), departmentId: Number(departmentId), cycle }
+        });
+        const summaries = yield prisma.performanceSummary.findMany({
+            where: { employeeId: Number(employeeId), departmentId: Number(departmentId), cycle }
+        });
+        const finalReview = yield prisma.performanceFinalReview.findFirst({
+            where: { employeeId: Number(employeeId), departmentId: Number(departmentId), cycle }
+        });
+        res.json({
+            template,
+            employee, // 👈 added
+            responses,
+            summaries,
+            finalReview
+        });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getEmployeeForm = getEmployeeForm;
+const submitFullForm = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const data = req.body;
+        // 1) Save question responses
+        if ((_a = data.responses) === null || _a === void 0 ? void 0 : _a.length) {
+            yield prisma.performanceResponse.createMany({
+                data: data.responses.map((r) => ({
+                    employeeId: data.employeeId,
+                    departmentId: data.departmentId,
+                    cycle: data.cycle,
+                    questionId: r.questionId,
+                    period: r.period,
+                    score: r.score,
+                    reviewerId: r.reviewerId,
+                    comments: r.comments
+                }))
+            });
+        }
+        // 2) Save overall summaries
+        if ((_b = data.summaries) === null || _b === void 0 ? void 0 : _b.length) {
+            yield prisma.performanceSummary.createMany({
+                data: data.summaries.map((s) => ({
+                    employeeId: data.employeeId,
+                    departmentId: data.departmentId,
+                    cycle: data.cycle,
+                    period: s.period,
+                    marksScored: s.marksScored,
+                    overallPerf: s.overallPerf,
+                    employeeSig: s.employeeSig,
+                    supervisorSig: s.supervisorSig,
+                    hodSig: s.hodSig
+                }))
+            });
+        }
+        // 3) Save final review
+        if (data.finalReview) {
+            yield prisma.performanceFinalReview.create({
+                data: {
+                    employeeId: data.employeeId,
+                    departmentId: data.departmentId,
+                    cycle: data.cycle,
+                    appreciations: data.finalReview.appreciations,
+                    talents: data.finalReview.talents,
+                    overallComments: data.finalReview.overallComments,
+                    employeeSig: data.finalReview.employeeSig,
+                    supervisorSig: data.finalReview.supervisorSig,
+                    hrSig: data.finalReview.hrSig
+                }
+            });
+        }
+        res.json({ success: true });
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.submitFullForm = submitFullForm;

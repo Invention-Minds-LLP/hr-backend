@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import expressListRoutes from 'express-list-routes';
 
 import employeeRoutes from "./api/employee/employee.routes";
 import userRoutes from "./api/user/user.routes";
@@ -23,7 +24,10 @@ import dashboardRoutes from "./api/dashboard/dashboard.routes";
 import recruitingRouter from "./api/recruiting/recruiting.routes";
 import announcementRouter from "./api/announcement/announcement.routes";
 import internshipRouter from "./api/internship/internship.routes";
-
+import surveyRouter from "./api/survey/survery.routes";
+import performanceRouter from "./api/performance/performance.routes";
+import requisitionRouter from "./api/requisition/requisition.routes";
+console.log("✅ requisitionRouter:", requisitionRouter);
 
 
 
@@ -61,21 +65,39 @@ app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/recruiting', recruitingRouter);
 app.use('/api/announcement', announcementRouter);
 app.use('/api/internships', internshipRouter);
+app.use('/api/survey', surveyRouter);
+app.use('/api/performance', performanceRouter);
+app.use('/api/requisitions', requisitionRouter);
+console.log("✅ Mounted requisition routes at /api/requisitions", requisitionRouter);
 
 
 
 
+expressListRoutes(app);
 
 // Default route
 app.get("/", (req, res) => {
     res.send("✅ HR Management API is running!");
   });
+  app.use((req, res, next) => {
+    console.log("❌ No route matched:", req.method, req.url);
+    next();
+  });
+  
   
   // Error handler middleware (optional, but good practice)
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     console.error(err.stack);
     res.status(500).json({ error: "Internal Server Error" });
   });
+
+  
+  // app._router.stack.forEach((r: any) => {
+  //   if (r.route && r.route.path) {
+  //     console.log(r.route.path, r.route.methods);
+  //   }
+  // });
+  
   
   // Start the server
   app.listen(port, '0.0.0.0',() => {

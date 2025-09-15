@@ -1,8 +1,35 @@
 // recruiting.controller.ts
 import { Request, Response, NextFunction } from 'express';
 import { PrismaClient, JobStatus, ApplicationStatus, OfferStatus, JoinOutcome, RejectReason } from '@prisma/client';
+import formidable, { File as FormidableFile } from "formidable";
+import fs from "fs";
+import { Client } from 'basic-ftp';
 
 const prisma = new PrismaClient();
+
+const FTP_CONFIG = {
+  host: "srv680.main-hosting.eu", // Your FTP hostname
+  user: "u948610439.hrproindia.in", // Your FTP username
+  password: "Bsrenuk@1993", // Your FTP password
+  secure: false // Set to true if using FTPS
+};
+async function uploadToFTP(localFilePath: string, remoteFileName: string): Promise<any> {
+  const client = new Client();
+  client.ftp.verbose = false;
+  try {
+    await client.access(FTP_CONFIG);
+    const remoteDir = "/public_html/resume";
+    await client.ensureDir(remoteDir); // Change folder for HR docs
+    console.log(remoteFileName)
+    await client.uploadFrom(localFilePath, remoteFileName);
+    await client.close();
+
+    // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
+  } catch (error) {
+    console.error("FTP Upload Error:", error);
+    throw new Error("FTP upload failed");
+  }
+}
 
 /** Small helper to catch async errors */
 const asyncHandler =
@@ -117,39 +144,148 @@ export class RecruitingController {
 
   /** POST /candidates (raw) */
   createCandidate = asyncHandler(async (req, res) => {
-    const { name, email, phone, source, resumeUrl } = req.body || {};
+    const { name, email, phone, source, resumeUrl,address } = req.body || {};
     if (!name || !email) return bad(res, 'name and email are required');
-    const cand = await prisma.candidate.create({ data: { name, email, phone, source, resumeUrl } });
+    const cand = await prisma.candidate.create({ data: { name, email, phone, source, resumeUrl, address } });
     res.status(201).json(cand);
   });
 
   /** POST /applications  { jobId, candidate: { name, email, ... } } OR { jobId, candidateId } */
+  // createApplication = asyncHandler(async (req, res) => {
+  //   const { jobId, candidateId, candidate } = req.body || {};
+  //   if (!jobId) return bad(res, 'jobId is required');
+
+  //   const app = await prisma.$transaction(async (tx) => {
+  //     let candId = candidateId ? Number(candidateId) : undefined;
+
+  //     if (!candId) {
+  //       if (!candidate?.name || !candidate?.email) throw new Error('candidate.name and candidate.email are required');
+  //       // upsert by email
+  //       const cand = await tx.candidate.upsert({
+  //         where: { email: candidate.email },
+  //         update: { name: candidate.name, phone: candidate.phone, source: candidate.source, resumeUrl: candidate.resumeUrl, experience: candidate.experience.toString(), qualification: candidate.qualification },
+  //         create: { name: candidate.name, email: candidate.email, phone: candidate.phone, source: candidate.source, resumeUrl: candidate.resumeUrl, experience: candidate.experience.toString(), qualification: candidate.qualification },
+  //       });
+  //       candId = cand.id;
+  //     }
+
+  //     return tx.application.create({
+  //       data: { jobId: Number(jobId), candidateId: candId, status: ApplicationStatus.APPLIED },
+  //       include: { candidate: true, job: true },
+  //     });
+  //   });
+
+  //   res.status(201).json(app);
+  // });
+
+  
   createApplication = asyncHandler(async (req, res) => {
-    const { jobId, candidateId, candidate } = req.body || {};
-    if (!jobId) return bad(res, 'jobId is required');
-
-    const app = await prisma.$transaction(async (tx) => {
-      let candId = candidateId ? Number(candidateId) : undefined;
-
-      if (!candId) {
-        if (!candidate?.name || !candidate?.email) throw new Error('candidate.name and candidate.email are required');
-        // upsert by email
-        const cand = await tx.candidate.upsert({
-          where: { email: candidate.email },
-          update: { name: candidate.name, phone: candidate.phone, source: candidate.source, resumeUrl: candidate.resumeUrl, experience: candidate.experience.toString(), qualification: candidate.qualification },
-          create: { name: candidate.name, email: candidate.email, phone: candidate.phone, source: candidate.source, resumeUrl: candidate.resumeUrl, experience: candidate.experience.toString(), qualification: candidate.qualification },
-        });
-        candId = cand.id;
+    const form = formidable({ multiples: false });
+  
+    form.parse(req, async (err, fields, files) => {
+      if (err) {
+        console.error("Form parse error:", err);
+        return res.status(400).json({ error: "File upload failed" });
       }
-
-      return tx.application.create({
-        data: { jobId: Number(jobId), candidateId: candId, status: ApplicationStatus.APPLIED },
-        include: { candidate: true, job: true },
-      });
+  
+      try {
+        // fields can be string | string[] | undefined
+        const jobId = fields.jobId
+          ? Number(Array.isArray(fields.jobId) ? fields.jobId[0] : fields.jobId)
+          : undefined;
+  
+        const candidateId = fields.candidateId
+          ? Number(Array.isArray(fields.candidateId) ? fields.candidateId[0] : fields.candidateId)
+          : undefined;
+  
+        const candidateRaw = fields.candidate
+          ? Array.isArray(fields.candidate)
+            ? fields.candidate[0]
+            : fields.candidate
+          : "{}";
+  
+        const candidate = JSON.parse(candidateRaw);
+  
+        if (!jobId) return res.status(400).json({ error: "jobId is required" });
+  
+        const resumeField = files.resume as FormidableFile | FormidableFile[] | undefined;
+        let resumeUrl: string | undefined;
+        let resumeFile: FormidableFile | undefined;
+        if (Array.isArray(resumeField)) {
+          resumeFile = resumeField[0]; // take the first file if multiple
+        } else {
+          resumeFile = resumeField;
+        }
+        
+        if (resumeFile) {
+          const filePath = resumeFile.filepath;
+          const fileName = `${Date.now()}_${resumeFile.originalFilename}`;
+          const remoteFilePath = `/public_html/resume/${fileName}`;
+        
+          await uploadToFTP(filePath, remoteFilePath);
+          resumeUrl = `https://hrproindia.in/resume/${fileName}`;
+          console.log("Uploaded resume URL:", resumeUrl);
+        
+          fs.unlinkSync(filePath);
+        }
+        
+        console.log("Resume URL to save:", resumeUrl);
+        
+  
+        // --- Transaction ---
+        const app = await prisma.$transaction(async (tx) => {
+          let candId = candidateId;
+  
+          if (!candId) {
+            if (!candidate?.name || !candidate?.email) {
+              throw new Error("candidate.name and candidate.email are required");
+            }
+  
+            // Upsert by email
+            const cand = await tx.candidate.upsert({
+              where: { email: candidate.email },
+              update: {
+                name: candidate.name,
+                phone: candidate.phone,
+                source: candidate.source,
+                resumeUrl: resumeUrl || candidate.resumeUrl,
+                experience: candidate.experience?.toString(),
+                qualification: candidate.qualification,
+                address: candidate.address,
+              },
+              create: {
+                name: candidate.name,
+                email: candidate.email,
+                phone: candidate.phone,
+                source: candidate.source,
+                resumeUrl: resumeUrl || candidate.resumeUrl,
+                experience: candidate.experience?.toString(),
+                qualification: candidate.qualification,
+                address: candidate.address,
+              },
+            });
+  
+            candId = cand.id;
+          }
+  
+          return tx.application.create({
+            data: {
+              jobId,
+              candidateId: candId,
+              status: ApplicationStatus.APPLIED,
+            },
+            include: { candidate: true, job: true },
+          });
+        });
+  
+        res.status(201).json(app);
+      } catch (error) {
+        console.error("Error creating application:", error);
+        res.status(500).json({ error: "Internal server error" });
+      }
     });
-
-    res.status(201).json(app);
   });
+  
 
   /** GET /applications?jobId=..&status=..&q=.. */
   listApplications = asyncHandler(async (req, res) => {
@@ -706,16 +842,16 @@ export class RecruitingController {
       include: { application: true },
     });
 
-    // Optional: add an "audit" interview row with pending review
-    await prisma.interview.create({
-      data: {
-        applicationId: updated.applicationId,
-        stage: 'Test — Submitted',
-        startTime: updated.startedAt ?? new Date(),
-        endTime: new Date(),
-        result: 'Pending review',
-      },
-    }).catch(() => { });
+    // // Optional: add an "audit" interview row with pending review
+    // await prisma.interview.create({
+    //   data: {
+    //     applicationId: updated.applicationId,
+    //     stage: 'Test — Submitted',
+    //     startTime: updated.startedAt ?? new Date(),
+    //     endTime: new Date(),
+    //     result: 'Pending review',
+    //   },
+    // }).catch(() => { });
 
     // Notify HR / job owner to review
     const hrUserId = assigned.application.job.createdBy ?? 0;
@@ -882,7 +1018,7 @@ export const upsertFeedback = asyncHandler(async (req, res) => {
 // POST /api/interviews/:id/hr-review
 export const saveHrReview = asyncHandler(async (req, res) => {
   const interviewId = Number(req.params.id);
-  const { presentSalary, payslip, expectedSalary, grossOffer, conclusion, remarks, reviewerUserId } = req.body;
+  const { presentSalary, payslip, expectedSalary, grossOffer, conclusion, remarks, reviewerUserId,expectedDoj, noticePeriod} = req.body;
 
   const review = await prisma.interviewHRReview.upsert({
     where: { interviewId },
@@ -891,6 +1027,8 @@ export const saveHrReview = asyncHandler(async (req, res) => {
       conclusion, remarks,
       reviewerUserId: reviewerUserId,
       reviewedAt: new Date(),
+      expectedDoj, noticePeriod
+
     },
     create: {
       interviewId,
@@ -898,6 +1036,7 @@ export const saveHrReview = asyncHandler(async (req, res) => {
       conclusion, remarks,
       reviewerUserId: reviewerUserId,
       reviewedAt: new Date(),
+      expectedDoj, noticePeriod
     },
   });
 
@@ -952,6 +1091,17 @@ export const listInterviews = asyncHandler(async (req, res) => {
           id: true,
           candidate: { select: { id: true, name: true, email: true, phone: true, experience:true, qualification: true } },
           job: { select: { id: true, title: true, department: { select: { id: true, name: true } } } }
+        }
+      },
+      candidateAssignedTest: {   // ✅ add this
+        select: {
+          id: true,
+          status: true,
+          score: true,
+          reviewedAt: true,
+          reviewDecision: true,
+          completedAt: true,
+          test: { select: { id: true, name: true } }
         }
       },
 

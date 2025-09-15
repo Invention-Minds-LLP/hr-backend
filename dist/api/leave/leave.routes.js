@@ -8,4 +8,6 @@ router.get("/", leave_controller_1.getLeaveRequests);
 router.post("/types", leave_controller_1.createLeaveType);
 router.get("/types", leave_controller_1.getLeaveTypes);
 router.patch("/:id/status", leave_controller_1.updateLeaveStatus);
+router.get('/:id/dashboard', leave_controller_1.getLeaveDashboard);
+router.get('/leave-today', leave_controller_1.getWhoIsOnLeaveBuckets);
 exports.default = router;

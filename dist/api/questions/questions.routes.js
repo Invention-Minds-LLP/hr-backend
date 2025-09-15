@@ -1,0 +1,10 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const questions_controller_1 = require("./questions.controller");
+const router = (0, express_1.Router)();
+router.get('/bank/:bankId', questions_controller_1.getQuestionsByBank);
+router.post('/', questions_controller_1.createQuestion);
+router.put('/:id', questions_controller_1.updateQuestion);
+router.delete('/:id', questions_controller_1.deleteQuestion);
+exports.default = router;

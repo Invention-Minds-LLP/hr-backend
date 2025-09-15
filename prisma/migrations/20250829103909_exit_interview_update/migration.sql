@@ -1,0 +1,33 @@
+-- AlterTable
+ALTER TABLE `exitinterview` ADD COLUMN `academicQualification` VARCHAR(191) NULL,
+    ADD COLUMN `attitudeSuperiors` VARCHAR(191) NULL,
+    ADD COLUMN `companyOpinion` VARCHAR(191) NULL,
+    ADD COLUMN `demotivating` VARCHAR(191) NULL,
+    ADD COLUMN `discrimination` BOOLEAN NULL,
+    ADD COLUMN `dissatisfaction` VARCHAR(191) NULL,
+    ADD COLUMN `employeeId` INTEGER NULL,
+    ADD COLUMN `expectationsMet` VARCHAR(191) NULL,
+    ADD COLUMN `influencedFactors` VARCHAR(191) NULL,
+    ADD COLUMN `jobOpinion` VARCHAR(191) NULL,
+    ADD COLUMN `leastSatisfying` VARCHAR(191) NULL,
+    ADD COLUMN `likedMost` VARCHAR(191) NULL,
+    ADD COLUMN `mostSatisfying` VARCHAR(191) NULL,
+    ADD COLUMN `newJobOffers` VARCHAR(191) NULL,
+    ADD COLUMN `newJobSalaryComparison` VARCHAR(191) NULL,
+    ADD COLUMN `nextOrgCategory` VARCHAR(191) NULL,
+    ADD COLUMN `nextOrgIndustry` VARCHAR(191) NULL,
+    ADD COLUMN `nextOrgLocation` VARCHAR(191) NULL,
+    ADD COLUMN `nextOrgName` VARCHAR(191) NULL,
+    ADD COLUMN `nextOrgPosition` VARCHAR(191) NULL,
+    ADD COLUMN `reasonForLeaving` VARCHAR(191) NULL,
+    ADD COLUMN `recommendCompany` BOOLEAN NULL,
+    ADD COLUMN `recommendReason` VARCHAR(191) NULL,
+    ADD COLUMN `recruitmentMode` VARCHAR(191) NULL,
+    ADD COLUMN `skillUtilization` VARCHAR(191) NULL,
+    ADD COLUMN `stayEncouragement` VARCHAR(191) NULL,
+    ADD COLUMN `supportReceived` VARCHAR(191) NULL,
+    ADD COLUMN `triggerReason` VARCHAR(191) NULL,
+    ADD COLUMN `vacancySource` VARCHAR(191) NULL;
+
+-- AddForeignKey
+ALTER TABLE `ExitInterview` ADD CONSTRAINT `ExitInterview_employeeId_fkey` FOREIGN KEY (`employeeId`) REFERENCES `Employee`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;

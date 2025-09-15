@@ -12,10 +12,25 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.saveManagerReview = exports.getAllAppraisalsWithManagerReview = exports.createAppraisalsForEmployees = exports.bulkCreateAppraisals = void 0;
+exports.sendAppraisalCountReminders = exports.saveManagerReview = exports.getAllAppraisalsWithManagerReview = exports.createAppraisalsForEmployees = exports.bulkCreateAppraisals = void 0;
 const client_1 = require("@prisma/client");
 const node_cron_1 = __importDefault(require("node-cron"));
 const prisma = new client_1.PrismaClient();
+const leave_controller_1 = require("../leave/leave.controller");
+const APPRAISAL_REMINDER_COUNT_TEMPLATE_ID = '';
+const APPRAISAL_CREATED_TEMPLATE_ID = "888277";
+function formatPhoneNumber(raw) {
+    const digits = raw.replace(/[^\d]/g, "");
+    if (digits.startsWith("91"))
+        return `+${digits}`;
+    if (digits.startsWith("0"))
+        return `+91${digits.slice(1)}`;
+    if (digits.length === 10)
+        return `+91${digits}`;
+    if (digits.startsWith("+"))
+        return digits;
+    return `+${digits}`;
+}
 const bulkCreateAppraisals = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { cycle, employeeIds } = req.body;
@@ -43,7 +58,7 @@ const createAppraisalsForEmployees = (employeeIds_1, cycle_1, ...args_1) => __aw
             id: { in: employeeIds },
             employmentStatus: 'ACTIVE'
         },
-        select: { id: true, reportingManager: true }
+        select: { id: true, reportingManager: true, firstName: true, lastName: true }
     });
     const data = employees.map(emp => ({
         employeeId: emp.id,
@@ -53,7 +68,32 @@ const createAppraisalsForEmployees = (employeeIds_1, cycle_1, ...args_1) => __aw
         finalDecision: null,
         finalComments: null
     }));
-    return prisma.appraisalForm.createMany({ data });
+    const created = yield prisma.appraisalForm.createMany({ data });
+    const managerIds = Array.from(new Set(employees.map(e => e.reportingManager).filter((id) => !!id)));
+    const managers = yield prisma.employee.findMany({
+        where: { id: { in: managerIds } },
+        select: { id: true, phone: true, firstName: true, lastName: true }
+    });
+    const mgrById = new Map(managers.map(m => [m.id, m]));
+    // Fire-and-forget WhatsApp notifications; don't block/throw the API
+    yield Promise.all(employees.map((emp) => __awaiter(void 0, void 0, void 0, function* () {
+        const mgr = emp.reportingManager ? mgrById.get(emp.reportingManager) : undefined;
+        const mgrPhone = formatPhoneNumber((mgr === null || mgr === void 0 ? void 0 : mgr.phone) || "");
+        if (!mgrPhone)
+            return;
+        const employeeName = [emp.firstName, emp.lastName].filter(Boolean).join(" ");
+        try {
+            yield (0, leave_controller_1.sendWhatsAppTemplate)({
+                to: mgrPhone,
+                templateId: APPRAISAL_CREATED_TEMPLATE_ID,
+                placeholders: [employeeName] // add cycle if your template expects it
+            });
+        }
+        catch (e) {
+            console.error("Appraisal create WA (manager) failed:", e);
+        }
+    })));
+    return created;
 });
 exports.createAppraisalsForEmployees = createAppraisalsForEmployees;
 node_cron_1.default.schedule('0 0 1 */3 *', () => __awaiter(void 0, void 0, void 0, function* () {
@@ -83,6 +123,7 @@ const getAllAppraisalsWithManagerReview = (req, res) => __awaiter(void 0, void 0
                         departmentId: true,
                         email: true,
                         dateOfJoining: true,
+                        reportingManager: true,
                     }
                 },
                 managerReview: true // include ONLY ManagerAppraisal
@@ -153,3 +194,53 @@ const saveManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, functi
     }
 });
 exports.saveManagerReview = saveManagerReview;
+const sendAppraisalCountReminders = (cycles) => __awaiter(void 0, void 0, void 0, function* () {
+    // 1) Get pending forms with managerId + cycle
+    const forms = yield prisma.appraisalForm.findMany({
+        where: Object.assign(Object.assign({ managerId: { not: null } }, (cycles ? { cycle: { in: cycles } } : {})), { status: { in: ["Draft", "InReview", "PendingManager"] } // adjust to your statuses
+         }),
+        select: { managerId: true, cycle: true }
+    });
+    const buckets = new Map();
+    const managerIds = new Set();
+    for (const f of forms) {
+        if (!f.managerId)
+            continue;
+        const key = `${f.managerId}::${f.cycle}`;
+        const b = buckets.get(key);
+        if (b)
+            b.count += 1;
+        else {
+            buckets.set(key, { managerId: f.managerId, cycle: f.cycle, count: 1 });
+            managerIds.add(f.managerId);
+        }
+    }
+    if (managerIds.size === 0)
+        return { messagesSent: 0, managerCyclesCovered: 0 };
+    // 3) Fetch manager phones from Employee
+    const managers = yield prisma.employee.findMany({
+        where: { id: { in: Array.from(managerIds) } },
+        select: { id: true, phone: true }
+    });
+    const phoneById = new Map(managers.map(m => [m.id, formatPhoneNumber(m.phone || "")]));
+    // 4) Send one WA per manager-cycle
+    let sent = 0;
+    yield Promise.all(Array.from(buckets.values()).map((b) => __awaiter(void 0, void 0, void 0, function* () {
+        const phone = phoneById.get(b.managerId);
+        if (!phone)
+            return;
+        try {
+            yield (0, leave_controller_1.sendWhatsAppTemplate)({
+                to: phone,
+                templateId: APPRAISAL_REMINDER_COUNT_TEMPLATE_ID,
+                placeholders: [String(b.count), b.cycle] // {{1}}=count, {{2}}=cycle
+            });
+            sent++;
+        }
+        catch (e) {
+            console.error("Appraisal count reminder WA failed:", e);
+        }
+    })));
+    return { messagesSent: sent, managerCyclesCovered: buckets.size };
+});
+exports.sendAppraisalCountReminders = sendAppraisalCountReminders;
