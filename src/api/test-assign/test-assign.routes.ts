@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import { assignTestToEmployees, getAssignedTestOverview, getAssignedTests } from './test-assign.controller';
+import { authenticateToken } from '../../middleware/authMiddleware';
 
 const router = Router();
 
-router.post('/', assignTestToEmployees);
-router.get('/', getAssignedTests);
-router.get('/:id/overview', getAssignedTestOverview);
+router.post('/',authenticateToken, assignTestToEmployees);
+router.get('/',authenticateToken, getAssignedTests);
+router.get('/:id/overview',authenticateToken, getAssignedTestOverview);
 
 
 export default router;

@@ -20,6 +20,20 @@ if (!fs.existsSync(TEMP_FOLDER)) {
 }
 
 
+async function generateEmployeeCode() {
+  const lastEmployee = await prisma.employee.findFirst({
+    orderBy: { employeeCode: 'desc' },
+    select: { employeeCode: true }
+  });
+
+  let newCode = 'EMP001';
+  if (lastEmployee?.employeeCode) {
+    const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
+    newCode = `EMP${String(lastNumber + 1).padStart(3, '0')}`;
+  }
+  return newCode;
+}
+
 
 
 // CREATE Employee (with emergency contacts & qualifications)
@@ -52,68 +66,186 @@ export const createEmployee = async (req: Request, res: Response) => {
       shiftMode,            // 'FIXED' | 'ROTATIONAL' (optional)
       fixedShiftId,         // optional
       rotationPatternId,    // optional
-      rotationStartDate     // optional
+      rotationStartDate,     // optional
+      employeeType,
+      sameAsPermanent
     } = req.body;
+    const data = req.body;
+    let finalCode = employeeCode;
+    console.log(finalCode)
 
-    const newEmployee = await prisma.employee.create({
-      data: {
-        employeeCode,
-        referenceCode,
-        firstName,
-        lastName,
-        gender,
-        dob: new Date(dob),
-        photoUrl,
-        phone,
-        email,
-        designation,
-        dateOfJoining: new Date(dateOfJoining),
-        employmentType,
-        probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
-        employmentStatus,
-        bloodGroup,
-        age,
-        reportingManager,
-        // Connect relations
-        Department: { connect: { id: departmentId } },
-        Branch: { connect: { id: branchId } },
-        role: { connect: { id: roleId } },
-        Address: {
-          create: addresses?.map((a: any) => ({
-            type: a.type,
-            line1: a.line1,
-            line2: a.line2,
-            city: a.city,
-            state: a.state,
-            zipCode: a.zipCode,
-            country: a.country
-          }))
+    if (!finalCode) {
+      finalCode = await generateEmployeeCode();
+      console.log("Generated employeeCode:", finalCode);
+    }
+
+    let newEmployee;
+    try {
+
+      newEmployee = await prisma.employee.create({
+        data: {
+          employeeCode: finalCode,
+          referenceCode,
+          firstName,
+          lastName,
+          gender,
+          dob: new Date(dob),
+          photoUrl,
+          phone,
+          email,
+          designation,
+          dateOfJoining: new Date(dateOfJoining),
+          employmentType,
+          probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
+          employmentStatus,
+          bloodGroup,
+          age,
+          reportingManager,
+          employeeType,
+          sameAsPermanent,
+          // Health & Wellness fields
+        preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
+        height: data.height ? parseFloat(data.height) : null,
+        weight: data.weight ? parseFloat(data.weight) : null,
+        bmi: data.bmi ? parseFloat(data.bmi) : null,
+        bloodPressure: data.bloodPressure,
+        bloodSugar: data.bloodSugar,
+        cholesterol: data.cholesterol,
+
+        allergies: data.allergies,
+        chronicConditions: data.chronicConditions,
+
+        smoking: data.smoking,
+        alcohol: data.alcohol,
+        visionType:              data.visionType,          // e.g., 'NEAR', 'DISTANT', 'COLOR_BLIND'
+        usesGlasses:             data.usesGlasses,
+        visionRemarks:           data.visionRemarks,
+        hasDisability:          data.hasDisability,
+        disabilityType:          data.disabilityType,        // e.g., 'PHYSICAL', 'HEARING', 'MENTAL', etc.
+        disabilityDescription:   data.disabilityDescription,
+        disabilityProofFile:     data.disabilityProofFile,   // original file name
+        disabilityProofFileName: data.disabilityProofFileName, // sanitized file name on server
+        disabilityProofUrl:      data.disabilityProofUrl,      // URL to access the file
+
+        preferredHospital: data.preferredHospital,
+        primaryPhysician: data.primaryPhysician,
+        emergencyNotes: data.emergencyNotes,
+
+        healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined,
+        vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined,
+          // Connect relations
+          Department: { connect: { id: departmentId } },
+          Branch: { connect: { id: branchId } },
+          role: { connect: { id: roleId } },
+          Address: {
+            create: addresses?.map((a: any) => ({
+              type: a.type,
+              line1: a.line1,
+              line2: a.line2,
+              city: a.city,
+              state: a.state,
+              zipCode: a.zipCode,
+              country: a.country
+            }))
+          },
+          // Nested creates
+          emergencyContacts: {
+            create: emergencyContacts?.map((ec: any) => ({
+              name: ec.name,
+              phone: ec.phone,
+              relationship: ec.relationship
+            }))
+          },
+          qualifications: {
+            create: qualifications?.map((q: any) => ({
+              degree: q.degree,
+              institution: q.institution,
+              year: q.year,
+              grade: q.grade,
+              degreeName: q.degreeName,
+            }))
+          },
         },
-        // Nested creates
-        emergencyContacts: {
-          create: emergencyContacts?.map((ec: any) => ({
-            name: ec.name,
-            phone: ec.phone,
-            relationship: ec.relationship
-          }))
-        },
-        qualifications: {
-          create: qualifications?.map((q: any) => ({
-            degree: q.degree,
-            institution: q.institution,
-            year: q.year
-          }))
-        },
-      },
-      include: {
-        emergencyContacts: true,
-        qualifications: true,
-        Department: true,
-        Branch: true,
-        role: true,
-        Address: true,
+        include: {
+          emergencyContacts: true,
+          qualifications: true,
+          Department: true,
+          Branch: true,
+          role: true,
+          Address: true,
+        }
+      });
+    }
+    catch (err: any) {
+      if (err.code === 'P2002' && err.meta?.target?.includes('employeeCode')) {
+        // Regenerate a fresh code and retry
+
+        finalCode = await generateEmployeeCode();
+        newEmployee = await prisma.employee.create({
+          data: {
+            employeeCode: finalCode,
+            referenceCode,
+            firstName,
+            lastName,
+            gender,
+            dob: new Date(dob),
+            photoUrl,
+            phone,
+            email,
+            designation,
+            dateOfJoining: new Date(dateOfJoining),
+            employmentType,
+            probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
+            employmentStatus,
+            bloodGroup,
+            age,
+            reportingManager,
+            employeeType,
+            sameAsPermanent,
+            // Connect relations
+            Department: { connect: { id: departmentId } },
+            Branch: { connect: { id: branchId } },
+            role: { connect: { id: roleId } },
+            Address: {
+              create: addresses?.map((a: any) => ({
+                type: a.type,
+                line1: a.line1,
+                line2: a.line2,
+                city: a.city,
+                state: a.state,
+                zipCode: a.zipCode,
+                country: a.country
+              }))
+            },
+            // Nested creates
+            emergencyContacts: {
+              create: emergencyContacts?.map((ec: any) => ({
+                name: ec.name,
+                phone: ec.phone,
+                relationship: ec.relationship
+              }))
+            },
+            qualifications: {
+              create: qualifications?.map((q: any) => ({
+                degree: q.degree,
+                institution: q.institution,
+                year: q.year
+              }))
+            },
+          },
+          include: {
+            emergencyContacts: true,
+            qualifications: true,
+            Department: true,
+            Branch: true,
+            role: true,
+            Address: true,
+          }
+        });
+      } else {
+        throw err;
       }
-    });
+    }
     // NEW: persist shift assignment mode
     if (shiftMode === 'FIXED' && fixedShiftId) {
       await prisma.employeeShiftSetting.create({
@@ -152,6 +284,7 @@ export const getEmployees = async (req: Request, res: Response) => {
         emergencyContacts: true,
         qualifications: true,
         documents: true,
+        Department: true,
         EmployeeShiftSetting: true,
         shifts: {
           orderBy: { date: 'desc' }, // Most recent first
@@ -164,7 +297,8 @@ export const getEmployees = async (req: Request, res: Response) => {
     });
     const formatted = employees.map(emp => ({
       ...emp,
-      latestShiftAssignment: emp.shifts[0] || null
+      latestShiftAssignment: emp.shifts[0] || null,
+      departmentName: emp.Department?.name || null, // ✅ extract department name
     }));
     res.json(formatted);
   } catch (error) {
@@ -185,6 +319,7 @@ export const getEmployeeById = async (req: Request, res: Response) => {
         documents: true,
         Address: true,
         EmployeeShiftSetting: true,
+        Department: true,
         shifts: {
           orderBy: { date: 'desc' }, // Most recent first
           take: 1,                   // Only 1 record
@@ -202,7 +337,8 @@ export const getEmployeeById = async (req: Request, res: Response) => {
     // Attach the latest shift assignment
     const formatted = {
       ...employee,
-      latestShiftAssignment: employee.shifts[0] || null
+      latestShiftAssignment: employee.shifts[0] || null,
+      departmentName: employee.Department?.name || null, // ✅ extract department name
     };
 
     res.json(formatted);
@@ -246,6 +382,38 @@ export const updateEmployee = async (req: Request, res: Response) => {
       where: { id: Number(id) },
       data: {
         ...employeeFields,
+        // Health & Wellness fields
+        preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
+        height: data.height ? parseFloat(data.height) : null,
+        weight: data.weight ? parseFloat(data.weight) : null,
+        bmi: data.bmi ? parseFloat(data.bmi) : null,
+        bloodPressure: data.bloodPressure,
+        bloodSugar: data.bloodSugar,
+        cholesterol: data.cholesterol,
+        sameAsPermanent: data.sameAsPermanent,
+
+        allergies: data.allergies,
+        chronicConditions: data.chronicConditions,
+
+        smoking: data.smoking,
+        alcohol: data.alcohol,
+        
+        visionType:              data.visionType,          // e.g., 'NEAR', 'DISTANT', 'COLOR_BLIND'
+        usesGlasses:             data.usesGlasses,
+        visionRemarks:           data.visionRemarks,
+        hasDisability:          data.hasDisability,
+        disabilityType:          data.disabilityType,        // e.g., 'PHYSICAL', 'HEARING', 'MENTAL', etc.
+        disabilityDescription:   data.disabilityDescription,
+        disabilityProofFile:     data.disabilityProofFile,   // original file name
+        disabilityProofFileName: data.disabilityProofFileName, // sanitized file name on server
+        disabilityProofUrl:      data.disabilityProofUrl,  
+
+        preferredHospital: data.preferredHospital,
+        primaryPhysician: data.primaryPhysician,
+        emergencyNotes: data.emergencyNotes,
+
+        healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined,
+        vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined,
         Department: { connect: { id: departmentId } },
         Branch: { connect: { id: branchId } },
         role: { connect: { id: roleId } },
@@ -357,7 +525,8 @@ async function uploadToFTP(localFilePath: string, remoteFileName: string): Promi
   client.ftp.verbose = false;
   try {
     await client.access(FTP_CONFIG);
-    await client.ensureDir("/documents"); // Change folder for HR docs
+    const folder = path.dirname(remoteFileName);
+    await client.ensureDir(folder);
     console.log(remoteFileName)
     await client.uploadFrom(localFilePath, remoteFileName);
     await client.close();
@@ -437,6 +606,109 @@ export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
 
 
 };
+export const uploadEmployeePhoto = async (req: Request, res: Response) => {
+  try {
+    const { employeeId } = req.params;
+
+    const form = formidable({
+      uploadDir: TEMP_FOLDER,
+      keepExtensions: true,
+      multiples: false, // only one file
+    });
+
+    form.parse(req, async (err, fields, files) => {
+      if (err) {
+        console.error("Formidable Parse Error:", err);
+        return res.status(500).json({ error: err.message });
+      }
+
+      if (!files.file) {
+        return res.status(400).json({ error: "No photo uploaded" });
+      }
+
+      const file = Array.isArray(files.file) ? files.file[0] : files.file;
+      const tempFilePath = file.filepath;
+      const fileName = sanitizeFileName(
+        file.originalFilename || `photo_${employeeId}_${Date.now()}.png`
+      );
+
+      const remoteFilePath = `/public_html/photos/${fileName}`;
+      await uploadToFTP(tempFilePath, remoteFilePath);
+      const fileUrl = `https://hrproindia.in/photos/${fileName}`;
+
+      fs.unlinkSync(tempFilePath); // cleanup temp file
+
+      // Update employee record with new photoUrl
+      const updatedEmployee = await prisma.employee.update({
+        where: { id: Number(employeeId) },
+        data: { photoUrl: fileUrl },
+      });
+
+      return res.status(200).json({ photoUrl: fileUrl, employee: updatedEmployee });
+    });
+  } catch (error) {
+    console.error("Upload Photo Error:", error);
+    return res.status(500).json({ error: "Failed to upload profile photo" });
+  }
+};
+
+export const uploadEmployeeDisabilityProof = async (req: Request, res: Response) => {
+  try {
+    const { employeeId } = req.params;
+
+    if (!employeeId) {
+      return res.status(400).json({ error: "Employee code is required" });
+    }
+
+    const form = formidable({
+      uploadDir: TEMP_FOLDER,
+      keepExtensions: true,
+      multiples: false, // only one disability certificate
+    });
+
+    form.parse(req, async (err, fields, files) => {
+      if (err) {
+        console.error("Formidable Parse Error:", err);
+        return res.status(500).json({ error: err.message });
+      }
+
+      if (!files.file) {
+        return res.status(400).json({ error: "No disability proof file uploaded" });
+      }
+
+      const file = Array.isArray(files.file) ? files.file[0] : files.file;
+      const tempFilePath = file.filepath;
+
+      const fileName = sanitizeFileName(
+        file.originalFilename || `disability_${employeeId}_${Date.now()}${path.extname(file.filepath)}`
+      );
+
+      const remoteFilePath = `/public_html/disability/${fileName}`;
+      await uploadToFTP(tempFilePath, remoteFilePath);
+      const fileUrl = `https://hrproindia.in/disability/${fileName}`;
+
+      // cleanup local temp file
+      fs.unlinkSync(tempFilePath);
+
+      // Update employee record
+      const updatedEmployee = await prisma.employee.update({
+        where: { id: Number(employeeId) },
+        data: { disabilityProofUrl: fileUrl },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Disability certificate uploaded successfully",
+        fileUrl,
+        employee: updatedEmployee,
+      });
+    });
+  } catch (error: any) {
+    console.error("Upload Disability Proof Error:", error);
+    return res.status(500).json({ error: "Failed to upload disability certificate" });
+  }
+};
+
 
 export const getSpecificRoles = async (req: Request, res: Response) => {
   try {
@@ -451,7 +723,8 @@ export const getSpecificRoles = async (req: Request, res: Response) => {
       select: {
         id: true,
         firstName: true,
-        lastName: true
+        lastName: true,
+        employeeCode: true,
       }
     });
 
@@ -473,7 +746,7 @@ export const getActiveEmployees = async (req: Request, res: Response) => {
       where: {
         employmentStatus: 'ACTIVE'
       },
-      select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true }
+      select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true, employeeCode: true }
     });
     res.json(employees);
   } catch (error) {
@@ -767,3 +1040,110 @@ export async function listMentors(req: Request, res: Response) {
     res.status(500).json({ error: 'Failed to load mentors' });
   }
 }
+export const uploadVaccineProof = async (req: Request, res: Response) => {
+  try {
+    const { employeeId, vaccineIndex } = req.params;
+
+    const form = formidable({
+      uploadDir: TEMP_FOLDER,
+      keepExtensions: true,
+      multiples: false,
+    });
+    form.parse(req, async (err, fields, files) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+    
+      console.log("FILES:", files);
+    
+      // Dynamically pick first key
+      const fileKey = Object.keys(files)[0];
+      if (!fileKey) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+    
+      const uploaded = files[fileKey];
+      if (!uploaded) {
+        return res.status(400).json({ error: "File not found in request" });
+      }
+    
+      const file = Array.isArray(uploaded) ? uploaded[0] : uploaded;
+      if (!file) {
+        return res.status(400).json({ error: "Invalid file upload" });
+      }
+    
+      // Now TS knows "file" is defined ✅
+      const tempFilePath = file.filepath;
+      const fileName = sanitizeFileName(
+        file.originalFilename || `vaccine_${employeeId}_${Date.now()}.pdf`
+      );
+    
+      const remoteFilePath = `/public_html/vaccine-proofs/${fileName}`;
+      await uploadToFTP(tempFilePath, remoteFilePath);
+      const fileUrl = `https://hrproindia.in/vaccine-proofs/${fileName}`;
+    
+      fs.unlinkSync(tempFilePath);
+    
+      // update vaccinations JSON
+      const employee = await prisma.employee.findUnique({ where: { id: Number(employeeId) } });
+      let vaccinations = employee?.vaccinations ? JSON.parse(employee.vaccinations as string) : [];
+      if (vaccinations[vaccineIndex]) {
+        vaccinations[vaccineIndex].proofUrl = fileUrl;
+      }
+    
+      const updated = await prisma.employee.update({
+        where: { id: Number(employeeId) },
+        data: { vaccinations: JSON.stringify(vaccinations) },
+      });
+      console.log(updated)
+    
+      return res.status(200).json({ fileUrl, employee: updated });
+    });
+    
+  } catch (error) {
+    console.error("Upload Vaccine Proof Error:", error);
+    return res.status(500).json({ error: "Failed to upload vaccine proof" });
+  }
+};
+
+/**
+ * Get employees by multiple department IDs
+ * Example: GET /api/employees/by-departments?ids=1,2,3
+ */
+export const getEmployeesByDepartments = async (req: Request, res: Response) => {
+  try {
+    const { ids } = req.query;
+
+    if (!ids) {
+      return res.status(400).json({ error: "Department IDs are required (use ?ids=1,2,3)" });
+    }
+
+    const idsArray = (ids as string)
+      .split(",")
+      .map((id) => Number(id.trim()))
+      .filter((id) => !isNaN(id));
+
+    if (!idsArray.length) {
+      return res.status(400).json({ error: "Invalid department IDs" });
+    }
+
+    const employees = await prisma.employee.findMany({
+      where: {
+        departmentId: { in: idsArray },
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        departmentId: true,
+        Department: { select: { name: true } },
+      },
+      orderBy: { firstName: "asc" },
+    });
+
+    res.json(employees);
+  } catch (error) {
+    console.error("❌ Failed to fetch employees by departments:", error);
+    res.status(500).json({ error: "Failed to fetch employees by departments" });
+  }
+};

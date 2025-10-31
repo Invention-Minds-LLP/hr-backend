@@ -100,9 +100,12 @@ export async function getAllSurveys(_req: Request, res: Response) {
             firstName: true,
             lastName: true,
             employeeCode: true,
-            departmentId: true,
+            Department: {   // ✅ use the relation name from schema
+              select: { name: true }
+            }
           },
         },
+        
         responses: { include: { question: true } },
       },
       orderBy: { createdAt: "desc" },

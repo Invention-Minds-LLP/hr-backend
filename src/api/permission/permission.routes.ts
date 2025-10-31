@@ -4,11 +4,12 @@ import {
   getPermissionRequests,
   updatePermissionStatus
 } from "./permission.controller";
+import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = express.Router();
 
-router.post("/", createPermissionRequest);
-router.get("/", getPermissionRequests);
-router.patch("/:id/status", updatePermissionStatus);
+router.post("/", authenticateToken,createPermissionRequest);
+router.get("/", authenticateToken,getPermissionRequests);
+router.patch("/:id/status",authenticateToken, updatePermissionStatus);
 
 export default router;

@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import cron from 'node-cron';
 const prisma = new PrismaClient();
 import { sendWhatsAppTemplate } from "../leave/leave.controller";
+import { createNotification } from "../notifications/notifications.controller";
 
 const APPRAISAL_REMINDER_COUNT_TEMPLATE_ID = '';
 const APPRAISAL_CREATED_TEMPLATE_ID = "888277";
@@ -78,6 +79,7 @@ export const createAppraisalsForEmployees = async (
   await Promise.all(
     employees.map(async (emp) => {
       const mgr = emp.reportingManager ? mgrById.get(emp.reportingManager) : undefined;
+      if (!mgr) return;
       const mgrPhone = formatPhoneNumber(mgr?.phone || "");
       if (!mgrPhone) return;
 
@@ -91,6 +93,13 @@ export const createAppraisalsForEmployees = async (
         });
       } catch (e) {
         console.error("Appraisal create WA (manager) failed:", e);
+      }
+      const message = `A new appraisal has been created for ${employeeName} and assigned to you for review.\nKindly acknowledge and take appropriate action.`;
+
+      try {
+        await createNotification(mgr.id, message); // ✅ send SSE + DB notification
+      } catch (e) {
+        console.error("Appraisal in-app notification failed:", e);
       }
     })
   );

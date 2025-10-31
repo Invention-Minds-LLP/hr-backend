@@ -115,8 +115,8 @@ export async function createAnnouncement(req: Request, res: Response) {
         circularCode,
         title,
         body,
-        isPinned: isPinned || false,
-        requireAck: requireAck || false,
+        isPinned: req.body.isPinned === "true",
+        requireAck: req.body.requireAck === "true",
         type: type || 'GENERAL',
         audience: audience ? JSON.stringify(audience) : null,
         startsAt: startsAt ? new Date(startsAt) : undefined,
@@ -280,3 +280,76 @@ export async function listLiveAnnouncementsWithStats(_req: Request, res: Respons
   }
 }
 
+export async function listAllLiveForEmployee(req: Request, res: Response) {
+  try {
+    const user = (req as any).user; // from JWT/session middleware
+    const empId = user.empId;
+    const deptId = user.deptId;
+    const role = user.role;
+    const branchId = user.branchId;
+
+    console.log(`Fetching all live announcements for empId=${empId}`);
+
+    const now = new Date();
+
+    // 1️⃣ Fetch all live announcements (still valid)
+    const liveAnnouncements = await prisma.announcement.findMany({
+      where: {
+        startsAt: { lte: now },
+        OR: [{ endsAt: null }, { endsAt: { gte: now } }],
+      },
+      orderBy: { startsAt: "desc" },
+      include: {
+        acks: {
+          where: { employeeId: empId },
+          select: { id: true },
+        },
+      },
+    });
+
+    // 2️⃣ Filter based on audience (who should see this)
+    const relevant = liveAnnouncements.filter((a) => {
+      if (!a.audience) return true; // all employees can see
+
+      let audience: any;
+      try {
+        audience = JSON.parse(a.audience);
+        if (typeof audience === "string") {
+          audience = JSON.parse(audience); // handle double JSON encoding
+        }
+      } catch (err) {
+        console.error(`Invalid audience JSON for announcement ${a.id}`, a.audience);
+        return false;
+      }
+
+      if (audience.all) return true;
+      if (audience.departmentId?.some((d: any) => Number(d) === Number(deptId))) return true;
+      if (audience.branchId?.some((b: any) => Number(b) === Number(branchId))) return true;
+      if (audience.roleId?.some((r: any) => String(r) === String(role))) return true;
+      if (audience.employeeId?.some((e: any) => Number(e) === Number(empId))) return true;
+
+      return false;
+    });
+
+    // 3️⃣ Add acknowledgement status
+    const result = relevant.map((a) => ({
+      id: a.id,
+      title: a.title,
+      body: a.body,
+      type: a.type,
+      startsAt: a.startsAt,
+      endsAt: a.endsAt,
+      attachments: a.attachments,
+      isPinned: a.isPinned,
+      requireAck: a.requireAck,
+      acknowledged: a.acks && a.acks.length > 0, // 👈 flag
+    }));
+
+    console.log(`Found ${result.length} announcements for empId=${empId}`);
+
+    return res.json(result);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Failed to load announcements" });
+  }
+}

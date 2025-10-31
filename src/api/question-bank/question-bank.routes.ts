@@ -6,13 +6,14 @@ import {
   deleteQuestionBank,
   getQuestionBankById,
 } from './question-bank.controller';
+import { authenticateToken } from '../../middleware/authMiddleware';
 
 const router = Router();
 
-router.get('/', getAllQuestionBanks);
-router.post('/', createQuestionBank);
-router.get('/:id', getQuestionBankById); 
-router.put('/:id', updateQuestionBank);
-router.delete('/:id', deleteQuestionBank);
+router.get('/',authenticateToken, getAllQuestionBanks);
+router.post('/', authenticateToken,createQuestionBank);
+router.get('/:id', authenticateToken,getQuestionBankById); 
+router.put('/:id', authenticateToken,updateQuestionBank);
+router.delete('/:id',authenticateToken, deleteQuestionBank);
 
 export default router;

@@ -7,15 +7,17 @@ const router = Router();
 const upload = multer({ dest: 'uploads/' });
 
 // Create an announcement
-router.post('/', upload.array('attachments', 10), ann.createAnnouncement);
+router.post('/', upload.array('attachments', 10),authenticateToken, ann.createAnnouncement);
 
 // Acknowledge the latest/live announcement (or pass :id explicitly)
-router.post('/:id/ack', ann.ackAnnouncement);
+router.post('/:id/ack',authenticateToken, ann.ackAnnouncement);
 
 // List live + ack stats (rate, counts)
-router.get('/live', ann.listLiveAnnouncementsWithStats);
+router.get('/live',authenticateToken, ann.listLiveAnnouncementsWithStats);
 
 // List all announcements (employee)
 router.get('/live-employee',authenticateToken, ann.listLiveForEmployee);
+
+router.get('/live/all', authenticateToken, ann.listAllLiveForEmployee);
 
 export default router;

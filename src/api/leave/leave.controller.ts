@@ -2,9 +2,10 @@ import { Request, Response } from "express";
 import { PrismaClient, LeaveStatus } from "@prisma/client";
 import axios from "axios";
 const prisma = new PrismaClient();
+import { createNotification } from "../notifications/notifications.controller";
 
 const LEAVE_APPLY_TEMPLATE_ID = "890321";
-const LEAVE_STATUS_TEMPLATE_ID = "888267";
+const LEAVE_STATUS_TEMPLATE_ID = "909803";
 // Create Leave Request
 export const createLeaveRequest = async (req: Request, res: Response) => {
   try {
@@ -44,6 +45,14 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
         select: { phone: true, firstName: true, lastName: true }
       });
       mgrPhone = manager?.phone ?? undefined;
+      const name = [leaveRequest.employee.firstName, leaveRequest.employee.lastName]
+        .filter(Boolean)
+        .join(" ");
+      const message = `${name} has applied for leave for ${days} day(s), from ${fmtDate(
+        leaveRequest.startDate
+      )} to ${fmtDate(leaveRequest.endDate)}. Please review and take the necessary action.`;
+
+      await createNotification(mgrId, message);
     }
 
     if (mgrPhone) {
@@ -120,62 +129,93 @@ export const getLeaveTypes = async (_req: Request, res: Response) => {
 export const updateLeaveStatus = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { status, declineReason, userId } = req.body; // userId = logged-in admin
+    const { role, status, userId } = req.body;
+    // role = "MANAGER" or "HR"
 
-    if (!['Approved', 'Declined'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status value' });
+    if (!['MANAGER', 'HR'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
     }
 
-    const data: any = {
-      status: status === 'Approved' ? LeaveStatus.APPROVED : LeaveStatus.REJECTED,
-      approvedBy: null,
-      declinedBy: null,
-      declineReason: null
-    };
-
-    if (data.status === "APPROVED") {
-      data.approvedBy = userId;
-      data.approvedDate = new Date();
-    } else if (data.status === "REJECTED") {
-      data.declinedBy = userId;
-      data.declinedDate = new Date();
-      data.declineReason = declineReason;
+    if (!["Approved", "Declined"].includes(status)) {
+      return res.status(400).json({ error: "Invalid status value" });
     }
-    console.log(data, status)
+
+    const leave = await prisma.leaveRequest.findUnique({ where: { id: Number(id) } });
+    if (!leave) return res.status(404).json({ error: "Leave request not found" });
+
+    const data: any = {};
+
+    // --- Manager decision first ---
+    if (role === "MANAGER") {
+      if (leave.hodDecision !== "PENDING") {
+        return res.status(400).json({ error: "Manager already decided" });
+      }
+      data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+      data.hodDecidedAt = new Date();
+
+      if (data.hodDecision === "REJECTED") {
+        data.status = LeaveStatus.REJECTED;
+        data.declinedBy = userId;
+        data.declinedDate = new Date();
+      }
+    }
+
+    // --- HR decision second ---
+    else if (role === "HR") {
+      if (leave.hodDecision !== "APPROVED") {
+        return res.status(400).json({ error: "Manager approval required first" });
+      }
+      if (leave.hrDecision !== "PENDING") {
+        return res.status(400).json({ error: "HR already decided" });
+      }
+
+      data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+      data.hrDecidedAt = new Date();
+
+      if (data.hrDecision === "APPROVED") {
+        data.status = LeaveStatus.APPROVED;
+        data.approvedBy = userId;
+        data.approvedDate = new Date();
+      } else {
+        data.status = LeaveStatus.REJECTED;
+        data.declinedBy = userId;
+        data.declinedDate = new Date();
+      }
+    }
 
     const updatedLeave = await prisma.leaveRequest.update({
       where: { id: Number(id) },
       data,
-      include: {
-        employee: true,
-        leaveType: true,
-      }
+      include: { employee: true, leaveType: true },
     });
-    console.log(updatedLeave.employee)
+
+    // --- WhatsApp notify employee ---
     const employee = updatedLeave.employee;
     const employeePhone = formatPhoneNumber(employee?.phone || "");
     const employeeName = [employee?.firstName, employee?.lastName].filter(Boolean).join(" ");
     const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
     const start = fmtDate(updatedLeave.startDate);
     const end = fmtDate(updatedLeave.endDate);
-    const statusLabel = data.status === LeaveStatus.APPROVED ? "Approved" : "Declined";
+    const statusLabel =
+      updatedLeave.status === LeaveStatus.APPROVED ? "Approved" :
+        updatedLeave.status === LeaveStatus.REJECTED ? "Declined" : "Pending";
 
-    console.log(employeeName, employeePhone, statusLabel)
+    const message = `Your leave application for ${days} day(s), from ${start} to ${end}, has been ${statusLabel}. Please contact the concerned person for more details.`;
 
-    // Try to send WA; don't fail the API if this errors
-    let notification = { type: "LEAVE_STATUS_EMPLOYEE", status: "skipped" as "sent" | "skipped" | "failed", error: undefined as string | undefined };
-    if (employeePhone) {
+    if(statusLabel === "Approved" || statusLabel === "Declined") {
+      await createNotification(updatedLeave.employeeId, message);
+    }
+
+    if (employeePhone && updatedLeave.status === "APPROVED" ||
+      (updatedLeave.status === "REJECTED" && (role === "HR" || role === "MANAGER"))) {
       try {
         await sendWhatsAppTemplate({
           to: employeePhone,
           templateId: LEAVE_STATUS_TEMPLATE_ID,
-          placeholders: [employeeName, days, start, end, statusLabel]
+          placeholders: [employeeName, days, start, end, statusLabel],
         });
-        notification.status = "sent";
       } catch (e: any) {
-        console.error("Leave status WA send failed:", e);
-        notification.status = "failed";
-        notification.error = e?.message || "WhatsApp send failed";
+        console.error("Leave status WA send failed:", e?.message || e);
       }
     }
 
@@ -185,6 +225,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to update leave status" });
   }
 };
+
 
 
 const MS_PER_DAY = 86400000;

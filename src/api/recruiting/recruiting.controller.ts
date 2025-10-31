@@ -1,6 +1,6 @@
 // recruiting.controller.ts
 import { Request, Response, NextFunction } from 'express';
-import { PrismaClient, JobStatus, ApplicationStatus, OfferStatus, JoinOutcome, RejectReason } from '@prisma/client';
+import { PrismaClient, JobStatus, ApplicationStatus, OfferStatus, JoinOutcome, RejectReason, EmploymentType, EmploymentStatus, Gender } from '@prisma/client';
 import formidable, { File as FormidableFile } from "formidable";
 import fs from "fs";
 import { Client } from 'basic-ftp';
@@ -516,19 +516,89 @@ export class RecruitingController {
   });
 
   /** POST /offers/:id/mark-joined -> Application HIRED + JoinOutcome JOINED */
+  // markJoined = asyncHandler(async (req, res) => {
+  //   const id = Number(req.params.id);
+  //   const offer = await prisma.offer.findUnique({ where: { id }, include: { application: true } });
+  //   if (!offer) return bad(res, 'Offer not found', 404);
+
+  //   const updated = await prisma.$transaction(async (tx) => {
+  //     const of = await tx.offer.update({ where: { id }, data: { joinOutcome: JoinOutcome.JOINED } });
+  //     await tx.application.update({ where: { id: offer.applicationId }, data: { status: ApplicationStatus.HIRED } });
+  //     return of;
+  //   });
+
+  //   res.json(updated);
+  // });
+
+  
   markJoined = asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    const offer = await prisma.offer.findUnique({ where: { id }, include: { application: true } });
-    if (!offer) return bad(res, 'Offer not found', 404);
-
-    const updated = await prisma.$transaction(async (tx) => {
-      const of = await tx.offer.update({ where: { id }, data: { joinOutcome: JoinOutcome.JOINED } });
-      await tx.application.update({ where: { id: offer.applicationId }, data: { status: ApplicationStatus.HIRED } });
-      return of;
+  
+    const offer = await prisma.offer.findUnique({
+      where: { id },
+      include: {
+        application: {
+          include: { candidate: true, job: true }
+        }
+      }
     });
-
+    if (!offer) return bad(res, 'Offer not found', 404);
+  
+    const updated = await prisma.$transaction(async (tx) => {
+      // 1. Update offer + application
+      const of = await tx.offer.update({
+        where: { id },
+        data: { joinOutcome: JoinOutcome.JOINED }
+      });
+  
+      await tx.application.update({
+        where: { id: offer.applicationId },
+        data: { status: ApplicationStatus.HIRED }
+      });
+  
+      // 2. Auto-create Employee if not already exists
+      const { candidate, job } = offer.application;
+  
+      // // generate employeeCode e.g., EMP001, EMP002
+      // const count = await tx.employee.count();
+      // const employeeCode = `EMP${String(count + 1).padStart(3, "0")}`;
+      const employeeCode = await generateEmployeeCode();
+  
+      const employee = await tx.employee.create({
+        data: {
+          employeeCode,
+          referenceCode: null,
+          firstName: candidate.name.split(" ")[0],
+          lastName: candidate.name.split(" ").slice(1).join(" ") || "",
+          gender: Gender.OTHER, // maybe derive from candidate if stored
+          dob: new Date("2000-01-01"), // 🔹 placeholder, or collect from candidate form
+          photoUrl: null,
+  
+          phone: candidate.phone || "",
+          email: candidate.email,
+  
+          designation: job.title,
+          departmentId: job.departmentId,
+          branchId: 1, // 🔹 set default or map from job
+          dateOfJoining: offer.proposedJoinAt || new Date(),
+          employmentType: EmploymentType.PERMANENT,
+          employmentStatus: EmploymentStatus.ACTIVE,
+          employeeType: "NONCLINICAL", // or map from job/department
+  
+          roleId: 3, // 🔹 default role, e.g., "Employee"
+  
+          reportingManager: null,
+          age: null,
+          bloodGroup: null,
+        }
+      });
+  
+      return { ...of, employee };
+    });
+  
     res.json(updated);
   });
+  
 
   /** POST /offers/:id/mark-no-show  { reason? } -> Application NO_SHOW + JoinOutcome NO_SHOW */
   markNoShow = asyncHandler(async (req, res) => {
@@ -1014,6 +1084,19 @@ export const upsertFeedback = asyncHandler(async (req, res) => {
 
   res.json(fb);
 });
+async function generateEmployeeCode() {
+  const lastEmployee = await prisma.employee.findFirst({
+    orderBy: { employeeCode: 'desc' },
+    select: { employeeCode: true }
+  });
+
+  let newCode = 'EMP001';
+  if (lastEmployee?.employeeCode) {
+    const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
+    newCode = `EMP${String(lastNumber + 1).padStart(3, '0')}`;
+  }
+  return newCode;
+}
 
 // POST /api/interviews/:id/hr-review
 export const saveHrReview = asyncHandler(async (req, res) => {
@@ -1144,3 +1227,92 @@ export const listInterviews = asyncHandler(async (req, res) => {
   res.json(items);
 });
 
+export const listEmployeeInterviews = asyncHandler(async (req, res) => {
+  const { employeeId } = req.params;
+
+  if (!employeeId) {
+    res.status(400);
+    throw new Error('Employee ID is required');
+  }
+
+  const all  = await prisma.interview.findMany({
+    where: {
+      panelUserIds: {
+        contains: employeeId.toString(), // match employeeId in CSV
+      },
+    },
+    orderBy: [{ startTime: 'desc' }, { id: 'desc' }],
+    include: {
+      application: {
+        select: {
+          id: true,
+          candidate: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              phone: true,
+              experience: true,
+              qualification: true,
+            },
+          },
+          job: {
+            select: {
+              id: true,
+              title: true,
+              department: {
+                select: { id: true, name: true },
+              },
+            },
+          },
+        },
+      },
+      candidateAssignedTest: {
+        select: {
+          id: true,
+          status: true,
+          score: true,
+          reviewedAt: true,
+          reviewDecision: true,
+          completedAt: true,
+          test: { select: { id: true, name: true } },
+        },
+      },
+      InterviewHRReview: {
+        select: {
+          presentSalary: true,
+          payslip: true,
+          expectedSalary: true,
+          grossOffer: true,
+          conclusion: true,
+          remarks: true,
+          reviewerUserId: true,
+          reviewedAt: true,
+        },
+      },
+      InterviewFeedback: {
+        where: { status: 'SUBMITTED' },
+        orderBy: { submittedAt: 'desc' },
+        select: {
+          id: true,
+          panelUserId: true,
+          name: true,
+          designation: true,
+          jobSkills: true,
+          jobKnowledge: true,
+          attitude: true,
+          communication: true,
+          average: true,
+          notes: true,
+          status: true,
+          submittedAt: true,
+        },
+      },
+    },
+  });
+  const items = all.filter(i =>
+    i.panelUserIds?.split(',').map(id => id.trim()).includes(employeeId.toString())
+  );
+
+  res.json(items);
+});

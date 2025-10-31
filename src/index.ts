@@ -27,7 +27,11 @@ import internshipRouter from "./api/internship/internship.routes";
 import surveyRouter from "./api/survey/survery.routes";
 import performanceRouter from "./api/performance/performance.routes";
 import requisitionRouter from "./api/requisition/requisition.routes";
-console.log("✅ requisitionRouter:", requisitionRouter);
+import grievanceRouter from "./api/grievance/grievance.routes";
+import poshRouter from "./api/posh/posh.routes";
+import notificationRouter from "./api/notifications/notifications.routes";
+import trainingRouter from "./api/training/training.routes";
+import attendanceCalendarRoutes from "./api/attendance/attendance.routes";
 
 
 
@@ -68,21 +72,17 @@ app.use('/api/internships', internshipRouter);
 app.use('/api/survey', surveyRouter);
 app.use('/api/performance', performanceRouter);
 app.use('/api/requisitions', requisitionRouter);
-console.log("✅ Mounted requisition routes at /api/requisitions", requisitionRouter);
-
-
-
-
-expressListRoutes(app);
+app.use('/api/grievances', grievanceRouter);
+app.use('/api/posh', poshRouter);
+app.use('/api/notifications', notificationRouter);
+app.use('/api/trainings', trainingRouter);
+app.use('/api/attendance-calendar', attendanceCalendarRoutes);
 
 // Default route
 app.get("/", (req, res) => {
     res.send("✅ HR Management API is running!");
   });
-  app.use((req, res, next) => {
-    console.log("❌ No route matched:", req.method, req.url);
-    next();
-  });
+
   
   
   // Error handler middleware (optional, but good practice)
@@ -91,13 +91,6 @@ app.get("/", (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   });
 
-  
-  // app._router.stack.forEach((r: any) => {
-  //   if (r.route && r.route.path) {
-  //     console.log(r.route.path, r.route.methods);
-  //   }
-  // });
-  
   
   // Start the server
   app.listen(port, '0.0.0.0',() => {

@@ -195,3 +195,69 @@ export const getEmployeeForm = async (req: Request, res: Response) => {
       res.status(500).json({ error: err.message });
     }
   };
+
+  export const assignFormToEmployee = async (req: Request, res: Response) => {
+    try {
+      const { employeeId, employeeIds, departmentId, cycle, period } = req.body;
+  
+      const ids = employeeIds || (employeeId ? [employeeId] : []);
+      if (!ids.length) {
+        return res.status(400).json({ error: "No employees provided" });
+      }
+  
+      const results = [];
+      for (const id of ids) {
+        // check if already assigned
+        const exists = await prisma.performanceSummary.findFirst({
+          where: { employeeId: id, departmentId, cycle, period }
+        });
+  
+        if (!exists) {
+          const summary = await prisma.performanceSummary.create({
+            data: {
+              employeeId: id,
+              departmentId,
+              cycle,
+              period
+            }
+          });
+          results.push({ employeeId: id, assigned: true, summary });
+        } else {
+          results.push({ employeeId: id, assigned: false, message: "Already assigned" });
+        }
+      }
+  
+      res.json(results);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  };
+  
+
+// Get all summaries with employee & department
+export const getAllSummaries = async (req: Request, res: Response) => {
+  try {
+    const summaries = await prisma.performanceSummary.findMany({
+      include: {
+        employee: {
+          select: { 
+            id: true, 
+            employeeCode: true, 
+            firstName: true, 
+            lastName: true, 
+            email: true ,
+            dateOfJoining: true
+          }
+        },
+        department: {
+          select: { id: true, name: true }
+        }
+      },
+      orderBy: { createdAt: "desc" }
+    });
+
+    res.json(summaries);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};

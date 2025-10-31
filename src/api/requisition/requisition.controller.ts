@@ -151,6 +151,40 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
           };
         break;
 
+      // case "HR":
+      //   if (reject) {
+      //     updateData = {
+      //       hrRejectedBy: approverName,
+      //       hrRejectedDate: now,
+      //       hrRejectedComments: comments,
+      //       status: "REJECTED",
+      //     };
+      //   } else {
+      //     const requisition = await prisma.manpowerRequisition.findUnique({ where: { id: Number(id) } });
+      //     if (!requisition) return res.status(404).json({ message: "Requisition not found" });
+
+      //     await prisma.job.create({
+      //       data: {
+      //         title: title || requisition.title || "Untitled",
+      //         departmentId: requisition.departmentId ?? 0, // coerce null to undefined
+      //         location,
+      //         headcount: requisition.vacancies || 0,
+      //         createdBy: 1,
+      //       },
+      //     });
+
+
+
+
+      //     updateData = {
+      //       receivedByHR: approverName,
+      //       hrSign: signature,
+      //       receivedByHRDate: now,
+      //       receivedByHRComments: comments,
+      //       status: "HR_RECEIVED",
+      //     };
+      //   }
+      //   break;
       case "HR":
         if (reject) {
           updateData = {
@@ -160,22 +194,55 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
             status: "REJECTED",
           };
         } else {
-          const requisition = await prisma.manpowerRequisition.findUnique({ where: { id: Number(id) } });
-          if (!requisition) return res.status(404).json({ message: "Requisition not found" });
-
-          await prisma.job.create({
-            data: {
-              title: title || requisition.title || "Untitled",
-              departmentId: requisition.departmentId ?? 0, // coerce null to undefined
-              location,
-              headcount: requisition.vacancies || 0,
-              createdBy: 1,
-            },
+          const requisition = await prisma.manpowerRequisition.findUnique({
+            where: { id: Number(id) },
           });
-          
-          
-          
 
+          if (!requisition) {
+            return res.status(404).json({ message: "Requisition not found" });
+          }
+
+          // ✅ Parse reasonBreakdown JSON safely
+          let breakdown: any[] = [];
+          try {
+            breakdown = requisition.reasonBreakdown
+              ? typeof requisition.reasonBreakdown === "string"
+                ? JSON.parse(requisition.reasonBreakdown)
+                : requisition.reasonBreakdown
+              : [];
+          } catch (err) {
+            console.error("Invalid reasonBreakdown JSON:", err);
+            breakdown = [];
+          }
+
+          // ✅ If no breakdown, still create one job (fallback to old logic)
+          if (!breakdown.length) {
+            await prisma.job.create({
+              data: {
+                title: title || requisition.title || "Untitled",
+                departmentId: requisition.departmentId ?? 0,
+                location,
+                headcount: requisition.vacancies || 1,
+                createdBy: createdBy || 1,
+              },
+            });
+          } else {
+            // ✅ Create multiple jobs from breakdown
+            for (const item of breakdown) {
+              await prisma.job.create({
+                data: {
+                  title: item.designation || requisition.title || "Untitled",
+                  departmentId: requisition.departmentId ?? 0,
+                  location: location || "Not Specified",
+                  headcount: item.count || 1,
+                  createdBy: createdBy || 1,
+                  backfillForEmployeeId: null, // optional if you have that field
+                },
+              });
+            }
+          }
+
+          // ✅ Update requisition status
           updateData = {
             receivedByHR: approverName,
             hrSign: signature,
@@ -185,7 +252,8 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
           };
         }
         break;
-        case "HR_USE_ONLY": // 👈 new step for final closure
+
+      case "HR_USE_ONLY": // 👈 new step for final closure
         updateData = {
           hrReferenceNo: req.body.hrReferenceNo,
           salaryRange: req.body.salaryRange,
@@ -213,8 +281,35 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
 
 export const listRequisitions = async (req: Request, res: Response) => {
   try {
-    const requisitions = await prisma.manpowerRequisition.findMany({ include: { job: true }, });
-    return res.status(200).json(requisitions);
+    const requisitions = await prisma.manpowerRequisition.findMany({
+      include: { job: true },
+      orderBy: { requestDate: 'desc' }
+    });
+
+    // get all unique departmentIds
+    const deptIds = [...new Set(
+      requisitions
+        .map(r => r.departmentId)
+        .filter((id): id is number => id !== null)  // type guard: only numbers
+    )];
+
+
+    // fetch departments
+    const departments = await prisma.department.findMany({
+      where: { id: { in: deptIds } },
+      select: { id: true, name: true },
+    });
+
+    // map deptId → deptName
+    const deptMap = Object.fromEntries(departments.map(d => [d.id, d.name]));
+
+    // attach dept name to requisitions
+    const withDept = requisitions.map(r => ({
+      ...r,
+      departmentName: deptMap[r.departmentId!] || null,
+    }));
+
+    return res.status(200).json(withDept);
   } catch (error) {
     console.error("Error fetching requisitions:", error);
     return res.status(500).json({ message: "Internal server error" });

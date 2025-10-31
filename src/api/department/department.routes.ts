@@ -6,13 +6,14 @@ import {
   updateDepartment,
   deleteDepartment
 } from "./department.controller";
+import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
 
-router.post("/", createDepartment);
-router.get("/", getDepartments);
-router.get("/:id", getDepartmentById);
-router.put("/:id", updateDepartment);
-router.delete("/:id", deleteDepartment);
+router.post("/", authenticateToken, createDepartment);
+router.get("/", authenticateToken,getDepartments);
+router.get("/:id",authenticateToken, getDepartmentById);
+router.put("/:id",authenticateToken, updateDepartment);
+router.delete("/:id", authenticateToken,deleteDepartment);
 
 export default router;

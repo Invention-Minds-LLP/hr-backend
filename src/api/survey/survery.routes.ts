@@ -5,17 +5,18 @@ import {
   getSurveyResults,
   getAllSurveys,
 } from "./survery.controller";
+import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
 
 // employee fills survey
-router.get("/questions", getSurveyQuestions);
-router.post("/submit", submitSurvey);
+router.get("/questions",authenticateToken, getSurveyQuestions);
+router.post("/submit",authenticateToken, submitSurvey);
 
 // fetch responses
-router.get("/results/:surveyId", getSurveyResults);
+router.get("/results/:surveyId",authenticateToken, getSurveyResults);
 
 // admin fetch all
-router.get("/all", getAllSurveys);
+router.get("/all",authenticateToken, getAllSurveys);
 
 export default router;

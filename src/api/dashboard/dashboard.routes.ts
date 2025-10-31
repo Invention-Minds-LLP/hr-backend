@@ -1,15 +1,53 @@
-    import { Router } from 'express';
-    import { DashboardController } from './dashboard.controller';
+import { Router } from 'express';
+import { DashboardController } from './dashboard.controller';
+import {
+    messageUnmarked,
+    markUnmarkedException,
+    bulkApproveApprovals,
+    bulkRejectApprovals,
+    requestProbationFeedback,
+    extendProbation,
+    notifyExpiringDocs,
+    createRenewalTickets,
+    nudgePanel,
+    reassignReviewer,
+    escalateClearances,
+    assignDelegate,
+} from './dashboard.controller';
+import { authenticateToken } from '../../middleware/authMiddleware';
 
-    const router = Router();
-    const ctrl = new DashboardController();
+const router = Router();
+const ctrl = new DashboardController();
 
-    router.get('', ctrl.getDashboard);
-    router.get('/list', ctrl.getList);
-    router.get('/recruiting', ctrl.getRecruiting);
-    router.post('/ot/approve-reject', ctrl.approveOrRejectOT);
+router.get('', authenticateToken,ctrl.getDashboard);
+router.get('/list', authenticateToken,ctrl.getList);
+router.get('/recruiting', authenticateToken,ctrl.getRecruiting);
+router.post('/ot/approve-reject', authenticateToken,ctrl.approveOrRejectOT);
+// 1. Unmarked attendance
+router.post("/unmarked/message", authenticateToken,messageUnmarked);
+router.post("/unmarked/exception", authenticateToken,markUnmarkedException);
 
-    // automation: create vacancy from approved resignation
-    router.post('/recruiting/backfill-from-resignation', ctrl.createBackfillFromResignation);
+// 2. Pending approvals
+router.post("/approvals/approve", authenticateToken,bulkApproveApprovals);
+router.post("/approvals/reject", authenticateToken,bulkRejectApprovals);
 
-    export default router;
+// 3. Probation
+router.post("/probation/request-feedback", authenticateToken,requestProbationFeedback);
+router.post("/probation/extend", authenticateToken,extendProbation);
+
+// 4. Documents expiring
+router.post("/documents/notify", authenticateToken,notifyExpiringDocs);
+router.post("/documents/renewal", authenticateToken,createRenewalTickets);
+
+// 5. Interview feedback
+router.post("/feedback/nudge", authenticateToken,nudgePanel);
+router.post("/feedback/reassign", authenticateToken,reassignReviewer);
+
+// 6. Exit clearances
+router.post("/clearances/escalate", authenticateToken,escalateClearances);
+router.post("/clearances/assign", authenticateToken,assignDelegate);
+
+// automation: create vacancy from approved resignation
+router.post('/recruiting/backfill-from-resignation', authenticateToken,ctrl.createBackfillFromResignation);
+
+export default router;

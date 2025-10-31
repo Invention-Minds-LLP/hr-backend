@@ -84,7 +84,9 @@ export const loginUser = async (req: Request, res: Response) => {
         where: {employeeCode},
         select: {
           id: true,
-          departmentId: true
+          departmentId: true,
+          photoUrl: true,
+          designation: true,
         }
     })
 
@@ -127,7 +129,9 @@ export const loginUser = async (req: Request, res: Response) => {
       id: user.id,
       role: user.role,
       empId: employee.id,
-      deptId: employee.departmentId
+      deptId: employee.departmentId,
+      designation: employee.designation,
+      photoUrl: employee.photoUrl || null
     });
   } catch (error) {
     res.status(500).json({ error: "Login failed" });

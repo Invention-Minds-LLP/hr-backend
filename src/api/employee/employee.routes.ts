@@ -11,23 +11,33 @@ import {
   getEmployeeAccrualsController,
   getEmployeeRequests,
   getTodayCelebrants,
-  listMentors
+  listMentors,
+  uploadEmployeePhoto,
+  uploadVaccineProof,
+  uploadEmployeeDisabilityProof,
+  getEmployeesByDepartments
 } from "./employee.controller";
+import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
 
-router.post("/", createEmployee);
-router.get("/", getEmployees);
-router.post('/:employeeId/documents/upload', uploadEmployeeDocuments);
-router.get("/specific-roles", getSpecificRoles);
-router.get("/active", getActiveEmployees);
-router.get("/:employeeId/requests", getEmployeeRequests);
-router.get('/:id/accruals', getEmployeeAccrualsController);
-router.get('/dept', listMentors)
-router.get("/today", getTodayCelebrants);
-router.get("/:id", getEmployeeById);
-router.put("/:id", updateEmployee);
-router.delete("/:id", deleteEmployee);
+router.post("/", authenticateToken,createEmployee);
+router.get("/", authenticateToken,getEmployees);
+router.get("/by-departments", authenticateToken, getEmployeesByDepartments);
+router.post('/:employeeId/documents/upload',authenticateToken, uploadEmployeeDocuments);
+router.post('/:employeeId/photo',authenticateToken, uploadEmployeePhoto)
+router.get("/specific-roles",authenticateToken, getSpecificRoles);
+router.get("/active",authenticateToken, getActiveEmployees);
+router.get("/:employeeId/requests",authenticateToken, getEmployeeRequests);
+router.get('/:id/accruals',authenticateToken, getEmployeeAccrualsController);
+router.get('/dept',authenticateToken, listMentors)
+router.get("/today",authenticateToken, getTodayCelebrants);
+router.get("/:id",authenticateToken, getEmployeeById);
+router.put("/:id",authenticateToken, updateEmployee);
+router.delete("/:id",authenticateToken, deleteEmployee);
+router.post('/:employeeId/vaccinations/:vaccineIndex/proof',authenticateToken, uploadVaccineProof);
+router.post('/:employeeId/disability',authenticateToken, uploadEmployeeDisabilityProof);
+
 
 
 export default router;

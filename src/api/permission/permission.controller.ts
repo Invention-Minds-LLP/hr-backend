@@ -2,9 +2,10 @@ import { Request, Response } from "express";
 import { PrismaClient, PermissionStatus } from "@prisma/client";
 const prisma = new PrismaClient();
 import { sendWhatsAppTemplate } from "../leave/leave.controller";
+import { createNotification } from "../notifications/notifications.controller";
 
-const PERMISSION_APPLY_TEMPLATE_ID = '';
-const PERMISSION_STATUS_TEMPLATE_ID = '';
+const PERMISSION_APPLY_TEMPLATE_ID = '888273';
+const PERMISSION_STATUS_TEMPLATE_ID = '909821';
 const TZ = "Asia/Kolkata";
 const fmtDate = (d: Date | string | number) =>
   new Intl.DateTimeFormat("en-IN", { timeZone: TZ, day: "2-digit", month: "2-digit", year: "numeric" })
@@ -69,6 +70,8 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
         select: { phone: true }
       });
       mgrPhone = manager?.phone ?? undefined;
+      const message = `Dear Concern,\n${employeeName} has requested ${permissionType} permission on ${dayLabel} from ${startLabel} to ${endLabel}.\nKindly review and take appropriate action.\n\nRegards,\nTeam Rashtrotthana`;
+      await createNotification(mgrId, message);
     }
 
     if (mgrPhone) {
@@ -114,80 +117,185 @@ export const getPermissionRequests = async (_req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to fetch permission requests" });
   }
 };
+// export const updatePermissionStatus = async (req: Request, res: Response) => {
+//   try {
+//     const { id } = req.params;
+//     const { status, userId, declineReason } = req.body;
+
+//     if (!['APPROVED', 'Declined'].includes(status)) {
+//       return res.status(400).json({ error: 'Invalid status value' });
+//     }
+
+//     const data: any = {
+//       status: status === 'APPROVED' ? PermissionStatus.APPROVED : PermissionStatus.REJECTED,
+//       approvedBy: null,
+//       declinedBy: null,
+//       declineReason: null,
+//       approvedDate: null,
+//       declinedDate: null
+//     };
+
+//     if (data.status === 'APPROVED') {
+//       data.approvedBy = userId;
+//       data.approvedDate = new Date();
+//     } else if (data.status === 'REJECTED') {
+//       data.declinedBy = userId;
+//       data.declinedDate = new Date();
+//       data.declineReason = declineReason;
+//     }
+
+//     const updated = await prisma.permissionRequest.update({
+//       where: { id: Number(id) },
+//       data,
+//       include: { employee: true }
+//     });
+//     // ---------- WhatsApp to employee ----------
+//     const emp = updated.employee;
+//     const employeePhone = formatPhoneNumber(emp?.phone || "");
+//     const employeeName = [emp?.firstName, emp?.lastName].filter(Boolean).join(" ");
+//     const dateLabel = fmtDate(updated.day); // e.g. 15-08-2025 if your fmtDate is en-GB
+
+//     // For FULLDAY we can send "-" for times; for HOURLY/HALFDAY send actual times.
+//     const fromTime =
+//       updated.timing === "HOURLY" || updated.timing === "HALFDAY"
+//         ? fmtTime(updated.startTime)
+//         : "-";
+//     const toTime =
+//       updated.timing === "HOURLY" || updated.timing === "HALFDAY"
+//         ? fmtTime(updated.endTime)
+//         : "-";
+
+//     const statusLabel = data.status === PermissionStatus.APPROVED ? "Approved" : "Declined";
+
+//     let notification: { status: "sent" | "skipped" | "failed"; error?: string } = {
+//       status: "skipped",
+//     };
+
+//     // if (employeePhone) {
+//     //   try {
+//     //     await sendWhatsAppTemplate({
+//     //       to: employeePhone,
+//     //       templateId: PERMISSION_STATUS_TEMPLATE_ID,
+//     //       placeholders: [employeeName, dateLabel, fromTime || "-", toTime || "-", statusLabel],
+//     //     });
+//     //     notification.status = "sent";
+//     //   } catch (e: any) {
+//     //     console.error("Permission status WA send failed:", e);
+//     //     notification.status = "failed";
+//     //     notification.error = e?.message || "WhatsApp send failed";
+//     //   }
+//     // }
+
+
+//     res.json(updated);
+//   } catch (error) {
+//     console.error("Error updating permission status:", error);
+//     res.status(500).json({ error: "Failed to update permission status" });
+//   }
+
+// };
 export const updatePermissionStatus = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { status, userId, declineReason } = req.body;
+    const { status, userId, role, declineReason } = req.body; // role = MANAGER | HR
 
-    if (!['APPROVED', 'Declined'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status value' });
+    if (!["APPROVED", "REJECTED"].includes(status)) {
+      return res.status(400).json({ error: "Invalid status value" });
+    }
+    if (!["MANAGER", "HR"].includes(role)) {
+      return res.status(400).json({ error: "Invalid role" });
     }
 
-    const data: any = {
-      status: status === 'APPROVED' ? PermissionStatus.APPROVED : PermissionStatus.REJECTED,
-      approvedBy: null,
-      declinedBy: null,
-      declineReason: null,
-      approvedDate: null,
-      declinedDate: null
-    };
+    const perm = await prisma.permissionRequest.findUnique({ where: { id: Number(id) } });
+    if (!perm) return res.status(404).json({ error: "Permission request not found" });
 
-    if (data.status === 'APPROVED') {
-      data.approvedBy = userId;
-      data.approvedDate = new Date();
-    } else if (data.status === 'REJECTED') {
-      data.declinedBy = userId;
-      data.declinedDate = new Date();
-      data.declineReason = declineReason;
+    const data: any = {};
+
+    // --- Manager decision ---
+    if (role === "MANAGER") {
+      if (perm.hodDecision !== "PENDING") {
+        return res.status(400).json({ error: "Manager already decided" });
+      }
+      data.hodDecision = status;
+      data.hodDecidedAt = new Date();
+
+      if (status === "REJECTED") {
+        data.status = "REJECTED";
+        data.declinedBy = userId;
+        data.declinedDate = new Date();
+        data.declineReason = declineReason ?? null;
+      } else {
+        // manager approved → wait for HR
+        data.status = "PENDING";
+      }
+    }
+
+    // --- HR decision ---
+    if (role === "HR") {
+      if (perm.hodDecision !== "APPROVED") {
+        return res.status(400).json({ error: "Manager approval required first" });
+      }
+      if (perm.hrDecision !== "PENDING") {
+        return res.status(400).json({ error: "HR already decided" });
+      }
+      data.hrDecision = status;
+      data.hrDecidedAt = new Date();
+
+      if (status === "APPROVED") {
+        data.status = "APPROVED";
+        data.approvedBy = userId;
+        data.approvedDate = new Date();
+      } else {
+        data.status = "REJECTED";
+        data.declinedBy = userId;
+        data.declinedDate = new Date();
+        data.declineReason = declineReason ?? null;
+      }
     }
 
     const updated = await prisma.permissionRequest.update({
       where: { id: Number(id) },
       data,
-      include: { employee: true }
+      include: { employee: true },
     });
-    // ---------- WhatsApp to employee ----------
-    const emp = updated.employee;
-    const employeePhone = formatPhoneNumber(emp?.phone || "");
-    const employeeName = [emp?.firstName, emp?.lastName].filter(Boolean).join(" ");
-    const dateLabel = fmtDate(updated.day); // e.g. 15-08-2025 if your fmtDate is en-GB
+    try {
+      const employee = updated.employee;
+      const employeePhone = formatPhoneNumber(employee?.phone || "");
+      const employeeName = [employee?.firstName, employee?.lastName].filter(Boolean).join(" ");
+      const type = updated.permissionType ?? '';
+      const timing = updated.timing ?? '';
+      const day = fmtDate(updated.day);
+      const start = updated.startTime ? fmtTime(updated.startTime) : "";
+      const end = updated.endTime ? fmtTime(updated.endTime) : "";
 
-    // For FULLDAY we can send "-" for times; for HOURLY/HALFDAY send actual times.
-    const fromTime =
-      updated.timing === "HOURLY" || updated.timing === "HALFDAY"
-        ? fmtTime(updated.startTime)
-        : "-";
-    const toTime =
-      updated.timing === "HOURLY" || updated.timing === "HALFDAY"
-        ? fmtTime(updated.endTime)
-        : "-";
+      // Send only if final decision reached (HR approved/rejected OR HOD rejected)
+      if (
+        updated.status === "APPROVED" ||
+        (updated.status === "REJECTED" && (role === "HR" || role === "MANAGER"))
+      ) {
+        await sendWhatsAppTemplate({
+          to: employeePhone,
+          templateId: PERMISSION_STATUS_TEMPLATE_ID,
+          placeholders: [
+            employeeName,
+            type,
+            day,
+            start,
+            end,
+            updated.status // "APPROVED" / "REJECTED"
+          ],
+        });
+        const message = `Hello ${employeeName},\n\nYour ${type} permission request on ${day}, from ${start} to ${end}, has been ${updated.status}.\n\nPlease contact the concerned person for more details.\n\nThank you.`;
 
-    const statusLabel = data.status === PermissionStatus.APPROVED ? "Approved" : "Declined";
-
-    let notification: { status: "sent" | "skipped" | "failed"; error?: string } = {
-      status: "skipped",
-    };
-
-    // if (employeePhone) {
-    //   try {
-    //     await sendWhatsAppTemplate({
-    //       to: employeePhone,
-    //       templateId: PERMISSION_STATUS_TEMPLATE_ID,
-    //       placeholders: [employeeName, dateLabel, fromTime || "-", toTime || "-", statusLabel],
-    //     });
-    //     notification.status = "sent";
-    //   } catch (e: any) {
-    //     console.error("Permission status WA send failed:", e);
-    //     notification.status = "failed";
-    //     notification.error = e?.message || "WhatsApp send failed";
-    //   }
-    // }
-
+        await createNotification(updated.employeeId, message);
+      }
+    } catch (e: any) {
+      console.error("Permission status WA send failed:", e?.message || e);
+    }
 
     res.json(updated);
   } catch (error) {
     console.error("Error updating permission status:", error);
     res.status(500).json({ error: "Failed to update permission status" });
   }
-
 };

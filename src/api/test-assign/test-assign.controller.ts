@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 import { sendWhatsAppTemplate } from '../leave/leave.controller';
+import { createNotification } from '../notifications/notifications.controller';
 
 const TEST_ASSIGNED_TEMPLATE_ID = '888289';
 
@@ -44,7 +45,7 @@ export const assignTestToEmployees = async (req: Request, res: Response) => {
     // Fetch employees’ names & phones
     const employees = await prisma.employee.findMany({
       where: { id: { in: employeeIds } },
-      select: { firstName: true, lastName: true, phone: true }
+      select: { firstName: true, lastName: true, phone: true, id: true }
     });
 
     const scheduleSrc: Date | string | null = testDate ?? test?.activeFrom ?? null;
@@ -59,7 +60,15 @@ export const assignTestToEmployees = async (req: Request, res: Response) => {
         if (!to) return;
 
         const employeeName = [emp.firstName, emp.lastName].filter(Boolean).join(" ");
+        // 📩 Notification message
+        const message = `You have been assigned the ${testName} scheduled on ${dateLabel} at ${timeLabel}.\nKindly ensure to complete it as instructed.`;
 
+        // --- In-App Notification
+        try {
+          await createNotification(emp.id, message); // creates + broadcasts
+        } catch (e) {
+          console.error("Test assign in-app notification failed:", e);
+        }
         try {
           await sendWhatsAppTemplate({
             to,
@@ -111,6 +120,8 @@ export const getAssignedTests = async (req: Request, res: Response) => {
       select: { id: true, employeeId: true, testId: true, score: true, status: true, createdAt: true },
     });
 
+
+
     // 3) Latest attempt per (employeeId:testId)
     const latestAttemptMap = new Map<string, typeof attempts[number]>();
     for (const att of attempts) {
@@ -123,6 +134,8 @@ export const getAssignedTests = async (req: Request, res: Response) => {
       const key = `${a.employeeId}:${a.testId}`;
       const latest = latestAttemptMap.get(key) || null;
 
+      console.log('latest', latest);
+
       const score = latest?.score ?? null;
       const passThreshold = a.test?.passingPercent ?? null;
 
@@ -132,6 +145,7 @@ export const getAssignedTests = async (req: Request, res: Response) => {
 
       return {
         ...a,
+        status: latest ? latest.status : a.status, // if attempted, show latest status
         latestAttempt: latest,               // { id, score, status, createdAt, ... } or null
         latestScore: score,                  // number | null
         result: pass === null ? null : pass ? 'Pass' : 'Fail', // 'Pass' | 'Fail' | null
@@ -172,6 +186,7 @@ export const getAssignedTestOverview = async (req: Request, res: Response) => {
         timeTakenSec: timeDiffSec(assignment.startedAt, assignment.completedAt),
         totals: { total: 0, autoGradable: 0, correct: 0, wrong: 0, unanswered: 0 },
         rows: [],
+        status: "NotStarted",
       });
     }
 
@@ -212,10 +227,13 @@ export const getAssignedTestOverview = async (req: Request, res: Response) => {
         isCorrect = null;
       }
 
+      console.log('r', r)
+
       return {
         no: idx + 1,
         questionId: q.id,
         text: q.text,
+        weight: q.weight,
         type,
         selectedOptionIds: selectedIds,
         selectedOptionTexts: q.options.filter(o => selectedIds.includes(o.id)).map(o => o.text),
@@ -223,6 +241,10 @@ export const getAssignedTestOverview = async (req: Request, res: Response) => {
         correctOptionTexts: q.options.filter(o => correctIds.includes(o.id)).map(o => o.text),
         isCorrect, // true/false/null
         rawAnswer: !Array.isArray(r?.answer) ? (r?.answer ?? '') : null, // descriptive text if any
+        fileUrl: r?.fileUrl ?? null, // descriptive file if any
+        manualScore: r?.manualScore ?? null,   // ✅ show manual evaluation score
+        remarks: r?.remarks ?? null,           // ✅ show remarks
+
       };
     });
 
@@ -247,6 +269,7 @@ export const getAssignedTestOverview = async (req: Request, res: Response) => {
       employeeName: `${assignment.employee.firstName} ${assignment.employee.lastName}`,
       testId: assignment.testId,
       testName: assignment.test.name,
+      status: attempt.status,
     });
   } catch (e) {
     console.error(e);

@@ -126,6 +126,7 @@ model Employee {
   employmentType   EmploymentType
   probationEndDate DateTime?
   employmentStatus EmploymentStatus
+  employeeType     String?
 
   // Education & qualifications
   qualifications Qualification[]
@@ -141,6 +142,39 @@ model Employee {
   reportingManager Int?
   age              Int?
   bloodGroup       String?
+
+  // Health & Wellness
+  preEmploymentCheckDate DateTime?
+  height                 Float?
+  weight                 Float?
+  bmi                    Float?
+  bloodPressure          String?
+  bloodSugar             String?
+  cholesterol            String?
+
+  allergies         String?
+  chronicConditions String?
+
+  smoking                 Boolean?
+  alcohol                 Boolean?
+  exerciseFrequency       String?
+  visionType              String?
+  usesGlasses             Boolean?
+  visionRemarks           String?
+  hasDisability           Boolean?
+  disabilityType          String?
+  disabilityDescription   String?
+  disabilityProofFile     String?
+  disabilityProofFileName String?
+  disabilityProofUrl      String?
+  pastSurgeries           String?
+  preferredHospital       String?
+  primaryPhysician        String?
+  emergencyNotes          String?
+
+  // JSON fields for dynamic arrays
+  healthIssues Json? // [{condition, checkupFrequency, lastCheckupDate}]
+  vaccinations Json? // [{vaccineName, vaccinated, firstDose, secondDose, boosterDose, ...}]
 
   // Documents
   documents Document[]
@@ -172,6 +206,13 @@ model Employee {
   PerformanceResponse    PerformanceResponse[]
   PerformanceSummary     PerformanceSummary[]
   PerformanceFinalReview PerformanceFinalReview[]
+  Grievance              Grievance[]
+  GrievanceComment       GrievanceComment[]
+  poshComplaints         PoshCase[]               @relation("ComplainantCases")
+  poshAccusations        PoshCase[]               @relation("AccusedCases")
+  Training               Training[]
+  TrainingAssignment     TrainingAssignment[]
+  TrainingFeedback       TrainingFeedback[]
 }
 
 model EmergencyContact {
@@ -208,6 +249,8 @@ model Qualification {
   degree      String
   institution String
   year        Int
+  grade       String?
+  degreeName  String? // e.g., B.Tech, MBA
   employee    Employee @relation(fields: [employeeId], references: [id])
 
   createdAt DateTime @default(now())
@@ -242,6 +285,7 @@ model Department {
   PerformanceResponse     PerformanceResponse[]
   PerformanceSummary      PerformanceSummary[]
   PerformanceFinalReview  PerformanceFinalReview[]
+  Training                Training[]
 }
 
 model Branch {
@@ -471,6 +515,7 @@ model EvaluationTest {
   updatedAt             DateTime                @default(now()) @updatedAt
   AssignedTest          AssignedTest[]
   CandidateAssignedTest CandidateAssignedTest[]
+  TrainingTest          TrainingTest[]
 }
 
 model EvaluationAttempt {
@@ -479,7 +524,7 @@ model EvaluationAttempt {
   testId     Int
   score      Float
   status     String // Pass/Fail
-  response   String?
+  response   String?  @db.LongText
   employee   Employee @relation(fields: [employeeId], references: [id])
 
   createdAt DateTime @default(now())
@@ -500,8 +545,10 @@ model AssignedTest {
   startedAt   DateTime? // When user first opened the test
   completedAt DateTime? // When user finished
 
-  employee Employee       @relation(fields: [employeeId], references: [id])
-  test     EvaluationTest @relation(fields: [testId], references: [id])
+  employee             Employee            @relation(fields: [employeeId], references: [id])
+  test                 EvaluationTest      @relation(fields: [testId], references: [id])
+  TrainingAssignment   TrainingAssignment? @relation(fields: [trainingAssignmentId], references: [id])
+  trainingAssignmentId Int?
 }
 
 // ----------------------
@@ -748,6 +795,7 @@ enum ResignationStatus {
   APPROVED // fully approved (HR)
   REJECTED // rejected (manager or HR)
   WITHDRAWN // withdrawn by employee (before approval)
+  WITHDRAW_REQUESTED
   CANCELLED // cancelled by HR (process stopped)
   COMPLETED // exit done, F&F closed
 }
@@ -795,6 +843,11 @@ model ResignationRequest {
 
   withdrawnAt     DateTime?
   withdrawnReason String?
+
+  withdrawRequestedAt     DateTime?
+  withdrawDecision        ApprovalDecision? // HR approves or rejects
+  withdrawDecidedAt       DateTime?
+  withdrawStatusChangedBy Int?
 
   // Manager gate
   managerDecision  ApprovalDecision @default(PENDING)
@@ -1531,4 +1584,173 @@ model ManpowerRequisition {
   updatedAt DateTime @default(now()) @updatedAt
 
   job Job? @relation(fields: [jobId], references: [id])
+}
+
+enum GrievanceStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  REJECTED
+}
+
+model Grievance {
+  id          Int             @id @default(autoincrement())
+  employeeId  Int
+  title       String
+  description String
+  category    String? // e.g., "Workplace Issue", "Salary", "Harassment", "Other"
+  status      GrievanceStatus @default(OPEN)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  employee Employee           @relation(fields: [employeeId], references: [id])
+  comments GrievanceComment[]
+}
+
+model GrievanceComment {
+  id          Int    @id @default(autoincrement())
+  grievanceId Int
+  employeeId  Int
+  comment     String
+
+  createdAt DateTime  @default(now())
+  grievance Grievance @relation(fields: [grievanceId], references: [id])
+  employee  Employee  @relation(fields: [employeeId], references: [id])
+}
+
+enum PoshStatus {
+  FILED
+  UNDER_INVESTIGATION
+  CLOSED
+  REJECTED
+}
+
+model PoshCase {
+  id            Int        @id @default(autoincrement())
+  complainantId Int // Employee who raised it
+  accusedId     Int // Employee against whom complaint is raised
+  description   String
+  status        PoshStatus @default(FILED)
+  committeeNote String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  // Relations
+  complainant Employee      @relation("ComplainantCases", fields: [complainantId], references: [id])
+  accused     Employee      @relation("AccusedCases", fields: [accusedId], references: [id])
+  hearings    PoshHearing[]
+}
+
+model PoshHearing {
+  id       Int      @id @default(autoincrement())
+  poshId   Int
+  date     DateTime
+  notes    String?
+  outcome  String?
+  poshCase PoshCase @relation(fields: [poshId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+// ======================
+// TRAINING MODULE
+// ======================
+
+enum TrainingStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+model Training {
+  id          Int     @id @default(autoincrement())
+  title       String
+  description String?
+  objectives  String? @db.Text
+
+  // Trainer details
+  trainerType String? // INTERNAL | EXTERNAL
+  trainerId   Int? // for internal trainers (Employee)
+  trainerName String? // for external trainers
+  trainerOrg  String? // optional: external trainer organization
+
+  trainers Json?
+
+  mode          String? // ONLINE | OFFLINE | HYBRID
+  location      String?
+  startDate     DateTime?
+  endDate       DateTime?
+  status        TrainingStatus @default(DRAFT)
+  durationHours Float?
+  departmentId  Int?
+  createdBy     Int
+
+  department        Department?          @relation(fields: [departmentId], references: [id])
+  trainer           Employee?            @relation(fields: [trainerId], references: [id])
+  assignedEmployees TrainingAssignment[]
+  trainingTests     TrainingTest[]
+  feedbacks         TrainingFeedback[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model TrainingTest {
+  id          Int            @id @default(autoincrement())
+  trainingId  Int
+  testId      Int
+  isMandatory Boolean        @default(true)
+  orderNo     Int?
+  training    Training       @relation(fields: [trainingId], references: [id])
+  test        EvaluationTest @relation(fields: [testId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([trainingId, testId])
+}
+
+model TrainingAssignment {
+  id          Int       @id @default(autoincrement())
+  trainingId  Int
+  employeeId  Int
+  assignedBy  Int
+  assignedAt  DateTime  @default(now())
+  status      String    @default("NotStarted") // NotStarted/InProgress/Completed
+  progress    Float?
+  completedAt DateTime?
+
+  training      Training       @relation(fields: [trainingId], references: [id])
+  employee      Employee       @relation(fields: [employeeId], references: [id])
+  assignedTests AssignedTest[] // tests given as part of this training
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([trainingId, employeeId])
+}
+
+model TrainingFeedback {
+  id             Int     @id @default(autoincrement())
+  trainingId     Int
+  employeeId     Int
+  rating         Int? // overall training rating 1–5
+  feedback       String? // comments
+  trainerRating  Int? // trainer quality rating
+  contentQuality Int? // material rating
+  relevance      Int? // relevance rating
+  suggestions    String? // improvement suggestions
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  training Training @relation(fields: [trainingId], references: [id])
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@unique([trainingId, employeeId])
+  @@index([trainingId])
 }

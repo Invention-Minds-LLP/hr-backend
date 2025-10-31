@@ -9,6 +9,8 @@ import * as path from 'path';
 import axios from 'axios';
 import QRCode from 'qrcode';
 import { Client } from 'basic-ftp';
+import { AuthenticatedRequest } from '../../middleware/authMiddleware';
+import { ClearanceType } from '@prisma/client';
 const prisma = new PrismaClient();
 
 type ClearanceRow = {
@@ -86,7 +88,6 @@ export async function listResignations(req: Request, res: Response) {
 
     if (scope === 'mine' && employeeId) where.employeeId = Number(employeeId);
     else if (scope === 'manager' && managerId) where.managerId = Number(managerId);
-    console.log(where,scope)
     // scope=all -> no additional filter
 
     const rows = await prisma.resignationRequest.findMany({
@@ -328,10 +329,19 @@ export async function scheduleExitInterview(req: Request, res: Response) {
   try {
     const id = Number(req.params.id);
     const { scheduledAt, interviewerId, notes } = req.body;
+    const resignation = await prisma.resignationRequest.findUnique({
+      where: { id: id },
+      select: { employeeId: true },
+    });
+
+    if (!resignation) {
+      return res.status(404).json({ error: 'Resignation request not found' });
+    }
     const row = await prisma.exitInterview.upsert({
       where: { resignationId: id },
       create: {
         resignationId: id,
+        employeeId: resignation.employeeId, 
         scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
         interviewerId: interviewerId ?? null,
         notes
@@ -339,6 +349,7 @@ export async function scheduleExitInterview(req: Request, res: Response) {
       update: {
         scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
         interviewerId: interviewerId ?? null,
+        employeeId: resignation.employeeId, 
         notes
       }
     });
@@ -436,7 +447,6 @@ export async function getExitInterview(req: Request, res: Response) {
 export async function listExitInterviews(_req: Request, res: Response) {
   try {
     const all = await prisma.exitInterview.findMany({
-      where: { completedAt: { not: null } },
       include: { employee: true }, // get employee
       orderBy: { createdAt: "desc" },
     });
@@ -523,6 +533,91 @@ export async function hrHold(req: Request, res: Response) {
     res.status(500).json({ error: 'HR hold failed' });
   }
 }
+// POST /resignations/:id/request-withdraw
+export async function requestWithdraw(req: Request, res: Response) {
+  try {
+    const id = Number(req.params.id);
+    const { reason } = req.body;
+
+    const row = await prisma.resignationRequest.findUnique({ where: { id } });
+    if (!row) return res.status(404).json({ error: "Not found" });
+
+    // Cannot request if already approved/rejected/withdrawn
+    if (["APPROVED", "REJECTED", "WITHDRAWN"].includes(row.status)) {
+      return res.status(400).json({ error: "Cannot request withdraw at this stage" });
+    }
+
+    const upd = await prisma.resignationRequest.update({
+      where: { id },
+      data: {
+        status: "WITHDRAW_REQUESTED",
+        withdrawRequestedAt: new Date(),
+        withdrawnReason: reason,
+        withdrawDecision: null,
+        withdrawDecidedAt: null,
+      },
+    });
+    res.json(upd);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Request withdraw failed" });
+  }
+}
+// POST /resignations/:id/hr-withdraw-approve
+export async function hrApproveWithdraw(req: Request, res: Response) {
+  try {
+    const id = Number(req.params.id);
+    const { note, approvedBy } = req.body;
+
+    const row = await prisma.resignationRequest.findUnique({ where: { id } });
+    if (!row) return res.status(404).json({ error: "Not found" });
+    if (row.status !== "WITHDRAW_REQUESTED") {
+      return res.status(400).json({ error: "No withdraw request pending" });
+    }
+
+    const upd = await prisma.resignationRequest.update({
+      where: { id },
+      data: {
+        status: "WITHDRAWN",
+        withdrawDecision: "APPROVED",
+        withdrawDecidedAt: new Date(),
+        withdrawnAt: new Date(),
+        withdrawStatusChangedBy: approvedBy,
+      },
+    });
+    res.json(upd);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "HR withdraw approval failed" });
+  }
+}
+// POST /resignations/:id/hr-withdraw-reject
+export async function hrRejectWithdraw(req: Request, res: Response) {
+  try {
+    const id = Number(req.params.id);
+    const { note, rejectedBy } = req.body;
+
+    const row = await prisma.resignationRequest.findUnique({ where: { id } });
+    if (!row) return res.status(404).json({ error: "Not found" });
+    if (row.status !== "WITHDRAW_REQUESTED") {
+      return res.status(400).json({ error: "No withdraw request pending" });
+    }
+
+    const upd = await prisma.resignationRequest.update({
+      where: { id },
+      data: {
+        withdrawDecision: "REJECTED",
+        withdrawDecidedAt: new Date(),
+        withdrawStatusChangedBy: rejectedBy,
+        status: "SUBMITTED", // go back to normal resignation workflow
+      },
+    });
+    res.json(upd);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "HR withdraw rejection failed" });
+  }
+}
 
 
 
@@ -547,13 +642,7 @@ export const generateClearanceCertificate = async (req: Request, res: Response) 
     },
   });
   if (!r) return res.status(404).json({ message: 'Resignation not found' });
-  console.log('DBG resignation', {
-    id: r.id,
-    status: r.status,
-    clearances: r.clearances.map(c => ({ type: c.type, decision: c.decision, decidedAt: c.decidedAt })),
-    handoverTasks: r.handoverTasks.map(t => ({ id: t.id, status: t.status })),
-    finalSettlement: r.finalSettlement?.status ?? null,
-  });
+
   
   // 2) Eligibility checks
   const allClearancesApproved = r.clearances.length > 0 && r.clearances.every(c => c.decision === 'APPROVED');
@@ -848,5 +937,76 @@ export async function uploadToFTP(localFilePath: string, remoteFilePath: string)
     await client.uploadFrom(localFilePath, remoteFilePath);
   } finally {
     client.close();
+  }
+}
+export async function listResignationsWithClearances(req: AuthenticatedRequest, res: Response) {
+  try {
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        employee: {
+          include: { role: true, Department: true }
+        }
+      }
+    });
+
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    const emp = user.employee;
+    const isReportingManager = emp.roleId === 3;
+    const isHRManager = emp.roleId === 1;
+
+    // ✅ Determine which clearance type this user manages
+    const deptName = emp.Department?.name?.toUpperCase() ?? '';
+    const allowedClearanceType =
+      ['HR', 'FINANCE', 'IT', 'ADMIN', 'SECURITY'].includes(deptName)
+        ? deptName
+        : null;
+
+    const whereCondition = isHRManager
+      ? {} // HR sees all
+      : { managerId: emp.id }; // Reporting managers see only their reports
+
+    if (!isReportingManager) {
+      // If not reporting manager → optional logic
+      // either block access or show all (if HR/Admin)
+      return res.status(403).json({ error: 'Access denied. Only reporting managers can view clearances.' });
+    }
+
+    // Fetch resignations under this reporting manager
+    const resignations = await prisma.resignationRequest.findMany({
+      where: whereCondition, // 👈 show only employees reporting to this manager
+      include: {
+        employee: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            departmentId: true,
+            employeeCode: true,
+            Department: { select: { name: true } }
+          }
+        },
+        clearances: allowedClearanceType
+        ? { where: { type: allowedClearanceType as ClearanceType } } // ✅ Cast it to the enum
+        : false,
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    res.json(resignations);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load resignation clearances' });
   }
 }

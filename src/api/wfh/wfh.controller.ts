@@ -6,7 +6,7 @@ import { daysInclusive } from "../leave/leave.controller";
 
 
 const WFH_APPLY_TEMPLATE_ID = '890419';
-const WFH_STATUS_TEMPLATE_ID = "888267";
+const WFH_STATUS_TEMPLATE_ID = "909807";
 
 // Create WFH request
 export const createWFHRequest = async (req: Request, res: Response) => {
@@ -85,32 +85,136 @@ export const getWFHRequests = async (_req: Request, res: Response) => {
   }
 };
 
-// Update WFH request status
+// // Update WFH request status
+// export const updateWFHStatus = async (req: Request, res: Response) => {
+//   try {
+//     const { id } = req.params;
+//     const { status, userId, declineReason } = req.body;
+
+//     if (!["Approved", "Declined"].includes(status)) {
+//       return res.status(400).json({ error: "Invalid status value" });
+//     }
+
+//     const data: any = {
+//       status: status === "APPROVED" ? WFHStatus.APPROVED : WFHStatus.REJECTED,
+//       approvedBy: null,
+//       declinedBy: null,
+//       approvedDate: null,
+//       declinedDate: null,
+//       declineReason: null,
+//     };
+
+//     if (data.status === "APPROVED") {
+//       data.approvedBy = userId;
+//       data.approvedDate = new Date();
+//     } else if (data.status === "REJECTED") {
+//       data.declinedBy = userId;
+//       data.declinedDate = new Date();
+//       data.declineReason = declineReason;
+//     }
+
+//     const updatedWFH = await prisma.wFHRequest.update({
+//       where: { id: Number(id) },
+//       data,
+//       include: { employee: true },
+//     });
+
+//     const employee = updatedWFH.employee;
+//     const employeePhone = formatPhoneNumber(employee?.phone || "");
+//     const employeeName = [employee?.firstName, employee?.lastName]
+//       .filter(Boolean)
+//       .join(" ");
+//     const days = daysInclusive(updatedWFH.startDate, updatedWFH.endDate);
+//     const start = fmtDate(updatedWFH.startDate);
+//     const end = fmtDate(updatedWFH.endDate);
+//     const statusLabel =
+//       data.status === WFHStatus.APPROVED ? "Approved" : "Declined";
+
+//     let notification: {
+//       type: "WFH_STATUS_EMPLOYEE";
+//       status: "sent" | "skipped" | "failed";
+//       error?: string;
+//     } = { type: "WFH_STATUS_EMPLOYEE", status: "skipped" };
+
+//     if (employeePhone) {
+//       try {
+//         await sendWhatsAppTemplate({
+//           to: employeePhone,
+//           templateId: WFH_STATUS_TEMPLATE_ID, // define in your constants
+//           placeholders: [employeeName, days, start, end, statusLabel],
+//         });
+//         notification.status = "sent";
+//       } catch (e: any) {
+//         console.error("WFH status WA send failed:", e);
+//         notification.status = "failed";
+//         notification.error = e?.message || "WhatsApp send failed";
+//       }
+//     }
+
+
+//     res.json(updatedWFH);
+//   } catch (error) {
+//     console.error("Error updating WFH request status:", error);
+//     res.status(500).json({ error: "Failed to update WFH request status" });
+//   }
+// };
+
 export const updateWFHStatus = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { status, userId, declineReason } = req.body;
+    const { role, status, userId, declineReason } = req.body;
 
-    if (!["Approved", "Declined"].includes(status)) {
-      return res.status(400).json({ error: "Invalid status value" });
+    if (!['MANAGER', 'HR'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
     }
 
-    const data: any = {
-      status: status === "APPROVED" ? WFHStatus.APPROVED : WFHStatus.REJECTED,
-      approvedBy: null,
-      declinedBy: null,
-      approvedDate: null,
-      declinedDate: null,
-      declineReason: null,
-    };
+    if (!['Approved', 'Declined'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status value' });
+    }
 
-    if (data.status === "APPROVED") {
-      data.approvedBy = userId;
-      data.approvedDate = new Date();
-    } else if (data.status === "REJECTED") {
-      data.declinedBy = userId;
-      data.declinedDate = new Date();
-      data.declineReason = declineReason;
+    const wfh = await prisma.wFHRequest.findUnique({ where: { id: Number(id) } });
+    if (!wfh) return res.status(404).json({ error: 'WFH request not found' });
+
+    const data: any = {};
+
+    // --- Manager decision first ---
+    if (role === 'MANAGER') {
+      if (wfh.hodDecision !== 'PENDING') {
+        return res.status(400).json({ error: 'Manager already decided' });
+      }
+      data.hodDecision = status === 'Approved' ? 'APPROVED' : 'REJECTED';
+      data.hodDecidedAt = new Date();
+
+      if (data.hodDecision === 'REJECTED') {
+        data.status = WFHStatus.REJECTED;
+        data.declinedBy = userId;
+        data.declinedDate = new Date();
+        data.declineReason = declineReason || null;
+      }
+    }
+
+    // --- HR decision second ---
+    if (role === 'HR') {
+      if (wfh.hodDecision !== 'APPROVED') {
+        return res.status(400).json({ error: 'Manager approval required first' });
+      }
+      if (wfh.hrDecision !== 'PENDING') {
+        return res.status(400).json({ error: 'HR already decided' });
+      }
+
+      data.hrDecision = status === 'Approved' ? 'APPROVED' : 'REJECTED';
+      data.hrDecidedAt = new Date();
+
+      if (data.hrDecision === 'APPROVED') {
+        data.status = WFHStatus.APPROVED;
+        data.approvedBy = userId;
+        data.approvedDate = new Date();
+      } else {
+        data.status = WFHStatus.REJECTED;
+        data.declinedBy = userId;
+        data.declinedDate = new Date();
+        data.declineReason = declineReason || null;
+      }
     }
 
     const updatedWFH = await prisma.wFHRequest.update({
@@ -119,45 +223,36 @@ export const updateWFHStatus = async (req: Request, res: Response) => {
       include: { employee: true },
     });
 
+    // --- WhatsApp notify employee ---
     const employee = updatedWFH.employee;
-    const employeePhone = formatPhoneNumber(employee?.phone || "");
-    const employeeName = [employee?.firstName, employee?.lastName]
-      .filter(Boolean)
-      .join(" ");
+    const employeePhone = formatPhoneNumber(employee?.phone || '');
+    const employeeName = [employee?.firstName, employee?.lastName].filter(Boolean).join(' ');
     const days = daysInclusive(updatedWFH.startDate, updatedWFH.endDate);
     const start = fmtDate(updatedWFH.startDate);
     const end = fmtDate(updatedWFH.endDate);
     const statusLabel =
-      data.status === WFHStatus.APPROVED ? "Approved" : "Declined";
+      updatedWFH.status === WFHStatus.APPROVED ? 'Approved' :
+      updatedWFH.status === WFHStatus.REJECTED ? 'Declined' : 'Pending';
 
-    let notification: {
-      type: "WFH_STATUS_EMPLOYEE";
-      status: "sent" | "skipped" | "failed";
-      error?: string;
-    } = { type: "WFH_STATUS_EMPLOYEE", status: "skipped" };
-
-    if (employeePhone) {
+    if (employeePhone && (data.hodDecision === 'REJECTED' || data.hrDecision)) {
       try {
         await sendWhatsAppTemplate({
           to: employeePhone,
-          templateId: WFH_STATUS_TEMPLATE_ID, // define in your constants
+          templateId: WFH_STATUS_TEMPLATE_ID,
           placeholders: [employeeName, days, start, end, statusLabel],
         });
-        notification.status = "sent";
       } catch (e: any) {
-        console.error("WFH status WA send failed:", e);
-        notification.status = "failed";
-        notification.error = e?.message || "WhatsApp send failed";
+        console.error('WFH status WA send failed:', e?.message || e);
       }
     }
 
-
     res.json(updatedWFH);
   } catch (error) {
-    console.error("Error updating WFH request status:", error);
-    res.status(500).json({ error: "Failed to update WFH request status" });
+    console.error('Error updating WFH status:', error);
+    res.status(500).json({ error: 'Failed to update WFH status' });
   }
 };
+
 
 // Reuse the same helpers you already have
 function atStartOfDay(d: Date) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }

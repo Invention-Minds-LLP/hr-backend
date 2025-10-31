@@ -23,7 +23,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getEmployeeRequests = exports.getActiveEmployees = exports.getSpecificRoles = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
+exports.getEmployeesByDepartments = exports.uploadVaccineProof = exports.getEmployeeRequests = exports.getActiveEmployees = exports.getSpecificRoles = exports.uploadEmployeeDisabilityProof = exports.uploadEmployeePhoto = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
 exports.getAccruals = getAccruals;
 exports.getEmployeeAccrualsController = getEmployeeAccrualsController;
 exports.getTodayCelebrants = getTodayCelebrants;
@@ -45,73 +45,198 @@ const TEMP_FOLDER = path_1.default.join(__dirname, '../temp'); // absolute path
 if (!fs_1.default.existsSync(TEMP_FOLDER)) {
     fs_1.default.mkdirSync(TEMP_FOLDER, { recursive: true });
 }
+function generateEmployeeCode() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const lastEmployee = yield prisma.employee.findFirst({
+            orderBy: { employeeCode: 'desc' },
+            select: { employeeCode: true }
+        });
+        let newCode = 'EMP001';
+        if (lastEmployee === null || lastEmployee === void 0 ? void 0 : lastEmployee.employeeCode) {
+            const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
+            newCode = `EMP${String(lastNumber + 1).padStart(3, '0')}`;
+        }
+        return newCode;
+    });
+}
 // CREATE Employee (with emergency contacts & qualifications)
 const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     try {
         const { employeeCode, referenceCode, firstName, lastName, gender, dob, photoUrl, phone, email, designation, departmentId, branchId, dateOfJoining, employmentType, probationEndDate, employmentStatus, emergencyContacts, qualifications, addresses, roleId, bloodGroup, reportingManager, age, shiftMode, // 'FIXED' | 'ROTATIONAL' (optional)
         fixedShiftId, // optional
         rotationPatternId, // optional
-        rotationStartDate // optional
-         } = req.body;
-        const newEmployee = yield prisma.employee.create({
-            data: {
-                employeeCode,
-                referenceCode,
-                firstName,
-                lastName,
-                gender,
-                dob: new Date(dob),
-                photoUrl,
-                phone,
-                email,
-                designation,
-                dateOfJoining: new Date(dateOfJoining),
-                employmentType,
-                probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
-                employmentStatus,
-                bloodGroup,
-                age,
-                reportingManager,
-                // Connect relations
-                Department: { connect: { id: departmentId } },
-                Branch: { connect: { id: branchId } },
-                role: { connect: { id: roleId } },
-                Address: {
-                    create: addresses === null || addresses === void 0 ? void 0 : addresses.map((a) => ({
-                        type: a.type,
-                        line1: a.line1,
-                        line2: a.line2,
-                        city: a.city,
-                        state: a.state,
-                        zipCode: a.zipCode,
-                        country: a.country
-                    }))
+        rotationStartDate, // optional
+        employeeType, sameAsPermanent } = req.body;
+        const data = req.body;
+        let finalCode = employeeCode;
+        console.log(finalCode);
+        if (!finalCode) {
+            finalCode = yield generateEmployeeCode();
+            console.log("Generated employeeCode:", finalCode);
+        }
+        let newEmployee;
+        try {
+            newEmployee = yield prisma.employee.create({
+                data: {
+                    employeeCode: finalCode,
+                    referenceCode,
+                    firstName,
+                    lastName,
+                    gender,
+                    dob: new Date(dob),
+                    photoUrl,
+                    phone,
+                    email,
+                    designation,
+                    dateOfJoining: new Date(dateOfJoining),
+                    employmentType,
+                    probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
+                    employmentStatus,
+                    bloodGroup,
+                    age,
+                    reportingManager,
+                    employeeType,
+                    sameAsPermanent,
+                    // Health & Wellness fields
+                    preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
+                    height: data.height ? parseFloat(data.height) : null,
+                    weight: data.weight ? parseFloat(data.weight) : null,
+                    bmi: data.bmi ? parseFloat(data.bmi) : null,
+                    bloodPressure: data.bloodPressure,
+                    bloodSugar: data.bloodSugar,
+                    cholesterol: data.cholesterol,
+                    allergies: data.allergies,
+                    chronicConditions: data.chronicConditions,
+                    smoking: data.smoking,
+                    alcohol: data.alcohol,
+                    visionType: data.visionType, // e.g., 'NEAR', 'DISTANT', 'COLOR_BLIND'
+                    usesGlasses: data.usesGlasses,
+                    visionRemarks: data.visionRemarks,
+                    hasDisability: data.hasDisability,
+                    disabilityType: data.disabilityType, // e.g., 'PHYSICAL', 'HEARING', 'MENTAL', etc.
+                    disabilityDescription: data.disabilityDescription,
+                    disabilityProofFile: data.disabilityProofFile, // original file name
+                    disabilityProofFileName: data.disabilityProofFileName, // sanitized file name on server
+                    disabilityProofUrl: data.disabilityProofUrl, // URL to access the file
+                    preferredHospital: data.preferredHospital,
+                    primaryPhysician: data.primaryPhysician,
+                    emergencyNotes: data.emergencyNotes,
+                    healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined,
+                    vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined,
+                    // Connect relations
+                    Department: { connect: { id: departmentId } },
+                    Branch: { connect: { id: branchId } },
+                    role: { connect: { id: roleId } },
+                    Address: {
+                        create: addresses === null || addresses === void 0 ? void 0 : addresses.map((a) => ({
+                            type: a.type,
+                            line1: a.line1,
+                            line2: a.line2,
+                            city: a.city,
+                            state: a.state,
+                            zipCode: a.zipCode,
+                            country: a.country
+                        }))
+                    },
+                    // Nested creates
+                    emergencyContacts: {
+                        create: emergencyContacts === null || emergencyContacts === void 0 ? void 0 : emergencyContacts.map((ec) => ({
+                            name: ec.name,
+                            phone: ec.phone,
+                            relationship: ec.relationship
+                        }))
+                    },
+                    qualifications: {
+                        create: qualifications === null || qualifications === void 0 ? void 0 : qualifications.map((q) => ({
+                            degree: q.degree,
+                            institution: q.institution,
+                            year: q.year,
+                            grade: q.grade,
+                            degreeName: q.degreeName,
+                        }))
+                    },
                 },
-                // Nested creates
-                emergencyContacts: {
-                    create: emergencyContacts === null || emergencyContacts === void 0 ? void 0 : emergencyContacts.map((ec) => ({
-                        name: ec.name,
-                        phone: ec.phone,
-                        relationship: ec.relationship
-                    }))
-                },
-                qualifications: {
-                    create: qualifications === null || qualifications === void 0 ? void 0 : qualifications.map((q) => ({
-                        degree: q.degree,
-                        institution: q.institution,
-                        year: q.year
-                    }))
-                },
-            },
-            include: {
-                emergencyContacts: true,
-                qualifications: true,
-                Department: true,
-                Branch: true,
-                role: true,
-                Address: true,
+                include: {
+                    emergencyContacts: true,
+                    qualifications: true,
+                    Department: true,
+                    Branch: true,
+                    role: true,
+                    Address: true,
+                }
+            });
+        }
+        catch (err) {
+            if (err.code === 'P2002' && ((_b = (_a = err.meta) === null || _a === void 0 ? void 0 : _a.target) === null || _b === void 0 ? void 0 : _b.includes('employeeCode'))) {
+                // Regenerate a fresh code and retry
+                finalCode = yield generateEmployeeCode();
+                newEmployee = yield prisma.employee.create({
+                    data: {
+                        employeeCode: finalCode,
+                        referenceCode,
+                        firstName,
+                        lastName,
+                        gender,
+                        dob: new Date(dob),
+                        photoUrl,
+                        phone,
+                        email,
+                        designation,
+                        dateOfJoining: new Date(dateOfJoining),
+                        employmentType,
+                        probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
+                        employmentStatus,
+                        bloodGroup,
+                        age,
+                        reportingManager,
+                        employeeType,
+                        sameAsPermanent,
+                        // Connect relations
+                        Department: { connect: { id: departmentId } },
+                        Branch: { connect: { id: branchId } },
+                        role: { connect: { id: roleId } },
+                        Address: {
+                            create: addresses === null || addresses === void 0 ? void 0 : addresses.map((a) => ({
+                                type: a.type,
+                                line1: a.line1,
+                                line2: a.line2,
+                                city: a.city,
+                                state: a.state,
+                                zipCode: a.zipCode,
+                                country: a.country
+                            }))
+                        },
+                        // Nested creates
+                        emergencyContacts: {
+                            create: emergencyContacts === null || emergencyContacts === void 0 ? void 0 : emergencyContacts.map((ec) => ({
+                                name: ec.name,
+                                phone: ec.phone,
+                                relationship: ec.relationship
+                            }))
+                        },
+                        qualifications: {
+                            create: qualifications === null || qualifications === void 0 ? void 0 : qualifications.map((q) => ({
+                                degree: q.degree,
+                                institution: q.institution,
+                                year: q.year
+                            }))
+                        },
+                    },
+                    include: {
+                        emergencyContacts: true,
+                        qualifications: true,
+                        Department: true,
+                        Branch: true,
+                        role: true,
+                        Address: true,
+                    }
+                });
             }
-        });
+            else {
+                throw err;
+            }
+        }
         // NEW: persist shift assignment mode
         if (shiftMode === 'FIXED' && fixedShiftId) {
             yield prisma.employeeShiftSetting.create({
@@ -151,6 +276,7 @@ const getEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 emergencyContacts: true,
                 qualifications: true,
                 documents: true,
+                Department: true,
                 EmployeeShiftSetting: true,
                 shifts: {
                     orderBy: { date: 'desc' }, // Most recent first
@@ -161,7 +287,10 @@ const getEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 }
             }
         });
-        const formatted = employees.map(emp => (Object.assign(Object.assign({}, emp), { latestShiftAssignment: emp.shifts[0] || null })));
+        const formatted = employees.map(emp => {
+            var _a;
+            return (Object.assign(Object.assign({}, emp), { latestShiftAssignment: emp.shifts[0] || null, departmentName: ((_a = emp.Department) === null || _a === void 0 ? void 0 : _a.name) || null }));
+        });
         res.json(formatted);
     }
     catch (error) {
@@ -171,6 +300,7 @@ const getEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* (
 exports.getEmployees = getEmployees;
 // GET single employee by ID
 const getEmployeeById = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     try {
         const { id } = req.params;
         const employee = yield prisma.employee.findUnique({
@@ -181,6 +311,7 @@ const getEmployeeById = (req, res) => __awaiter(void 0, void 0, void 0, function
                 documents: true,
                 Address: true,
                 EmployeeShiftSetting: true,
+                Department: true,
                 shifts: {
                     orderBy: { date: 'desc' }, // Most recent first
                     take: 1, // Only 1 record
@@ -194,7 +325,7 @@ const getEmployeeById = (req, res) => __awaiter(void 0, void 0, void 0, function
             return res.status(404).json({ error: "Employee not found" });
         }
         // Attach the latest shift assignment
-        const formatted = Object.assign(Object.assign({}, employee), { latestShiftAssignment: employee.shifts[0] || null });
+        const formatted = Object.assign(Object.assign({}, employee), { latestShiftAssignment: employee.shifts[0] || null, departmentName: ((_a = employee.Department) === null || _a === void 0 ? void 0 : _a.name) || null });
         res.json(formatted);
     }
     catch (error) {
@@ -219,7 +350,9 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
         employeeFields.probationEndDate = toDate(probationEndDate);
         const updatedEmployee = yield prisma.employee.update({
             where: { id: Number(id) },
-            data: Object.assign(Object.assign({}, employeeFields), { Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, Address: {
+            data: Object.assign(Object.assign({}, employeeFields), { 
+                // Health & Wellness fields
+                preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null, height: data.height ? parseFloat(data.height) : null, weight: data.weight ? parseFloat(data.weight) : null, bmi: data.bmi ? parseFloat(data.bmi) : null, bloodPressure: data.bloodPressure, bloodSugar: data.bloodSugar, cholesterol: data.cholesterol, sameAsPermanent: data.sameAsPermanent, allergies: data.allergies, chronicConditions: data.chronicConditions, smoking: data.smoking, alcohol: data.alcohol, visionType: data.visionType, usesGlasses: data.usesGlasses, visionRemarks: data.visionRemarks, hasDisability: data.hasDisability, disabilityType: data.disabilityType, disabilityDescription: data.disabilityDescription, disabilityProofFile: data.disabilityProofFile, disabilityProofFileName: data.disabilityProofFileName, disabilityProofUrl: data.disabilityProofUrl, preferredHospital: data.preferredHospital, primaryPhysician: data.primaryPhysician, emergencyNotes: data.emergencyNotes, healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined, vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined, Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, Address: {
                     deleteMany: {},
                     create: addresses === null || addresses === void 0 ? void 0 : addresses.map((a) => ({
                         type: a.type,
@@ -315,7 +448,8 @@ function uploadToFTP(localFilePath, remoteFileName) {
         client.ftp.verbose = false;
         try {
             yield client.access(FTP_CONFIG);
-            yield client.ensureDir("/documents"); // Change folder for HR docs
+            const folder = path_1.default.dirname(remoteFileName);
+            yield client.ensureDir(folder);
             console.log(remoteFileName);
             yield client.uploadFrom(localFilePath, remoteFileName);
             yield client.close();
@@ -382,6 +516,89 @@ const uploadEmployeeDocuments = (req, res) => __awaiter(void 0, void 0, void 0, 
     }
 });
 exports.uploadEmployeeDocuments = uploadEmployeeDocuments;
+const uploadEmployeePhoto = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeId } = req.params;
+        const form = (0, formidable_1.default)({
+            uploadDir: TEMP_FOLDER,
+            keepExtensions: true,
+            multiples: false, // only one file
+        });
+        form.parse(req, (err, fields, files) => __awaiter(void 0, void 0, void 0, function* () {
+            if (err) {
+                console.error("Formidable Parse Error:", err);
+                return res.status(500).json({ error: err.message });
+            }
+            if (!files.file) {
+                return res.status(400).json({ error: "No photo uploaded" });
+            }
+            const file = Array.isArray(files.file) ? files.file[0] : files.file;
+            const tempFilePath = file.filepath;
+            const fileName = sanitizeFileName(file.originalFilename || `photo_${employeeId}_${Date.now()}.png`);
+            const remoteFilePath = `/public_html/photos/${fileName}`;
+            yield uploadToFTP(tempFilePath, remoteFilePath);
+            const fileUrl = `https://hrproindia.in/photos/${fileName}`;
+            fs_1.default.unlinkSync(tempFilePath); // cleanup temp file
+            // Update employee record with new photoUrl
+            const updatedEmployee = yield prisma.employee.update({
+                where: { id: Number(employeeId) },
+                data: { photoUrl: fileUrl },
+            });
+            return res.status(200).json({ photoUrl: fileUrl, employee: updatedEmployee });
+        }));
+    }
+    catch (error) {
+        console.error("Upload Photo Error:", error);
+        return res.status(500).json({ error: "Failed to upload profile photo" });
+    }
+});
+exports.uploadEmployeePhoto = uploadEmployeePhoto;
+const uploadEmployeeDisabilityProof = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeId } = req.params;
+        if (!employeeId) {
+            return res.status(400).json({ error: "Employee code is required" });
+        }
+        const form = (0, formidable_1.default)({
+            uploadDir: TEMP_FOLDER,
+            keepExtensions: true,
+            multiples: false, // only one disability certificate
+        });
+        form.parse(req, (err, fields, files) => __awaiter(void 0, void 0, void 0, function* () {
+            if (err) {
+                console.error("Formidable Parse Error:", err);
+                return res.status(500).json({ error: err.message });
+            }
+            if (!files.file) {
+                return res.status(400).json({ error: "No disability proof file uploaded" });
+            }
+            const file = Array.isArray(files.file) ? files.file[0] : files.file;
+            const tempFilePath = file.filepath;
+            const fileName = sanitizeFileName(file.originalFilename || `disability_${employeeId}_${Date.now()}${path_1.default.extname(file.filepath)}`);
+            const remoteFilePath = `/public_html/disability/${fileName}`;
+            yield uploadToFTP(tempFilePath, remoteFilePath);
+            const fileUrl = `https://hrproindia.in/disability/${fileName}`;
+            // cleanup local temp file
+            fs_1.default.unlinkSync(tempFilePath);
+            // Update employee record
+            const updatedEmployee = yield prisma.employee.update({
+                where: { id: Number(employeeId) },
+                data: { disabilityProofUrl: fileUrl },
+            });
+            return res.status(200).json({
+                success: true,
+                message: "Disability certificate uploaded successfully",
+                fileUrl,
+                employee: updatedEmployee,
+            });
+        }));
+    }
+    catch (error) {
+        console.error("Upload Disability Proof Error:", error);
+        return res.status(500).json({ error: "Failed to upload disability certificate" });
+    }
+});
+exports.uploadEmployeeDisabilityProof = uploadEmployeeDisabilityProof;
 const getSpecificRoles = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const roleIds = [1, 3, 4]; // roles to filter
@@ -394,7 +611,8 @@ const getSpecificRoles = (req, res) => __awaiter(void 0, void 0, void 0, functio
             select: {
                 id: true,
                 firstName: true,
-                lastName: true
+                lastName: true,
+                employeeCode: true,
             }
         });
         if (!employees.length) {
@@ -414,7 +632,7 @@ const getActiveEmployees = (req, res) => __awaiter(void 0, void 0, void 0, funct
             where: {
                 employmentStatus: 'ACTIVE'
             },
-            select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true }
+            select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true, employeeCode: true }
         });
         res.json(employees);
     }
@@ -680,3 +898,94 @@ function listMentors(req, res) {
         }
     });
 }
+const uploadVaccineProof = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeId, vaccineIndex } = req.params;
+        const form = (0, formidable_1.default)({
+            uploadDir: TEMP_FOLDER,
+            keepExtensions: true,
+            multiples: false,
+        });
+        form.parse(req, (err, fields, files) => __awaiter(void 0, void 0, void 0, function* () {
+            if (err) {
+                return res.status(500).json({ error: err.message });
+            }
+            console.log("FILES:", files);
+            // Dynamically pick first key
+            const fileKey = Object.keys(files)[0];
+            if (!fileKey) {
+                return res.status(400).json({ error: "No file uploaded" });
+            }
+            const uploaded = files[fileKey];
+            if (!uploaded) {
+                return res.status(400).json({ error: "File not found in request" });
+            }
+            const file = Array.isArray(uploaded) ? uploaded[0] : uploaded;
+            if (!file) {
+                return res.status(400).json({ error: "Invalid file upload" });
+            }
+            // Now TS knows "file" is defined ✅
+            const tempFilePath = file.filepath;
+            const fileName = sanitizeFileName(file.originalFilename || `vaccine_${employeeId}_${Date.now()}.pdf`);
+            const remoteFilePath = `/public_html/vaccine-proofs/${fileName}`;
+            yield uploadToFTP(tempFilePath, remoteFilePath);
+            const fileUrl = `https://hrproindia.in/vaccine-proofs/${fileName}`;
+            fs_1.default.unlinkSync(tempFilePath);
+            // update vaccinations JSON
+            const employee = yield prisma.employee.findUnique({ where: { id: Number(employeeId) } });
+            let vaccinations = (employee === null || employee === void 0 ? void 0 : employee.vaccinations) ? JSON.parse(employee.vaccinations) : [];
+            if (vaccinations[vaccineIndex]) {
+                vaccinations[vaccineIndex].proofUrl = fileUrl;
+            }
+            const updated = yield prisma.employee.update({
+                where: { id: Number(employeeId) },
+                data: { vaccinations: JSON.stringify(vaccinations) },
+            });
+            console.log(updated);
+            return res.status(200).json({ fileUrl, employee: updated });
+        }));
+    }
+    catch (error) {
+        console.error("Upload Vaccine Proof Error:", error);
+        return res.status(500).json({ error: "Failed to upload vaccine proof" });
+    }
+});
+exports.uploadVaccineProof = uploadVaccineProof;
+/**
+ * Get employees by multiple department IDs
+ * Example: GET /api/employees/by-departments?ids=1,2,3
+ */
+const getEmployeesByDepartments = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { ids } = req.query;
+        if (!ids) {
+            return res.status(400).json({ error: "Department IDs are required (use ?ids=1,2,3)" });
+        }
+        const idsArray = ids
+            .split(",")
+            .map((id) => Number(id.trim()))
+            .filter((id) => !isNaN(id));
+        if (!idsArray.length) {
+            return res.status(400).json({ error: "Invalid department IDs" });
+        }
+        const employees = yield prisma.employee.findMany({
+            where: {
+                departmentId: { in: idsArray },
+            },
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                departmentId: true,
+                Department: { select: { name: true } },
+            },
+            orderBy: { firstName: "asc" },
+        });
+        res.json(employees);
+    }
+    catch (error) {
+        console.error("❌ Failed to fetch employees by departments:", error);
+        res.status(500).json({ error: "Failed to fetch employees by departments" });
+    }
+});
+exports.getEmployeesByDepartments = getEmployeesByDepartments;
