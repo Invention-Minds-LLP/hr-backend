@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE `interview` ADD COLUMN `candidateAssignedTestId` INTEGER NULL;
+ALTER TABLE `Interview` ADD COLUMN `candidateAssignedTestId` INTEGER NULL;
 
 -- CreateTable
 CREATE TABLE `CandidateAssignedTest` (

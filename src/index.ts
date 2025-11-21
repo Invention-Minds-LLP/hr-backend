@@ -32,6 +32,9 @@ import poshRouter from "./api/posh/posh.routes";
 import notificationRouter from "./api/notifications/notifications.routes";
 import trainingRouter from "./api/training/training.routes";
 import attendanceCalendarRoutes from "./api/attendance/attendance.routes";
+import { initSurveyScheduler } from "./api/survey/survery.controller";
+import { initNoticePeriodSchedular } from "./api/resignation/resignation.controller";
+import incidentRouter from "./api/incident/incident.routes";
 
 
 
@@ -42,7 +45,9 @@ dotenv.config();
 const app = express();
 
 app.use(cors({
-    origin: "http://localhost:4200", // Allow your Angular app
+    origin: ["http://localhost:4200",
+      "https://demo.hrproindia.in"
+    ], // Allow your Angular app
     credentials: true               // Optional: if you plan to send cookies
   }));
 app.use(express.json());
@@ -76,7 +81,8 @@ app.use('/api/grievances', grievanceRouter);
 app.use('/api/posh', poshRouter);
 app.use('/api/notifications', notificationRouter);
 app.use('/api/trainings', trainingRouter);
-app.use('/api/attendance-calendar', attendanceCalendarRoutes);
+app.use('/api/attendance', attendanceCalendarRoutes);
+app.use('/api/incidents', incidentRouter);
 
 // Default route
 app.get("/", (req, res) => {
@@ -91,6 +97,8 @@ app.get("/", (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   });
 
+  initSurveyScheduler();
+  initNoticePeriodSchedular();
   
   // Start the server
   app.listen(port, '0.0.0.0',() => {

@@ -129,51 +129,45 @@ export const assignTraining = async (req: Request, res: Response) => {
 export const getTrainings = async (req: Request, res: Response) => {
   try {
     const { employeeId } = req.query;
+    const whereClause: any = {};
 
-    let result;
-
+    // If employeeId provided → show only trainings assigned to that employee
     if (employeeId) {
-      result = await prisma.trainingAssignment.findMany({
-        where: { employeeId: Number(employeeId) },
-        include: {
-          training: {
-            include: {
-              trainingTests: { include: { test: true } },
-              feedbacks: true,
-            },
-          },
-        },
-      });
-    } else {
-      result = await prisma.training.findMany({
-        include: {
-          trainingTests: { include: { test: true } },
-          assignedEmployees: {
-            include: {
-              employee: {
-                select: {
-                  id: true,
-                  firstName: true,
-                  lastName: true,
-                  Department: {
-                    select: { name: true },
-                  },
+      whereClause.assignedEmployees = {
+        some: { employeeId: Number(employeeId) },
+      };
+    }
+
+    const trainings = await prisma.training.findMany({
+      where: whereClause,
+      include: {
+        trainingTests: { include: { test: true } },
+        feedbacks: true,
+        assignedEmployees: {
+          include: {
+            employee: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                Department: {
+                  select: { name: true },
                 },
               },
             },
           },
-          feedbacks: true,
         },
-      });
-      
-    }
+      },
+      orderBy: { createdAt: 'desc' },
+    });
 
-    res.json(result);
+    res.json(trainings);
   } catch (error) {
     console.error("❌ Failed to fetch trainings:", error);
     res.status(500).json({ error: "Failed to fetch trainings" });
   }
 };
+
 
 /**
  * Mark a training as completed by an employee
@@ -390,4 +384,116 @@ export const getTrainingFeedbackSummary = async (req: Request, res: Response) =>
       res.status(500).json({ error: "Failed to update training" });
     }
   };
+  export const markTrainingAttendance = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { trainingId } = req.params;
+      const { employeeId, status } = req.body;
+      const markedBy = req.user.userId;
   
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+  
+      // 1️⃣ Check if an attendance already exists
+      const existing = await prisma.trainingAttendance.findFirst({
+        where: {
+          trainingId: Number(trainingId),
+          employeeId: Number(employeeId),
+          date: today,
+        }
+      });
+  
+      let record;
+  
+      if (existing) {
+        // 2️⃣ Update it
+        record = await prisma.trainingAttendance.update({
+          where: { id: existing.id },
+          data: {
+            status,
+            markedAt: new Date(),
+            markedBy,
+          }
+        });
+      } else {
+        // 3️⃣ Create new attendance
+        record = await prisma.trainingAttendance.create({
+          data: {
+            trainingId: Number(trainingId),
+            employeeId: Number(employeeId),
+            date: today,
+            status,
+            markedAt: new Date(),
+            markedBy,
+          }
+        });
+      }
+  
+      res.json({
+        message: "Attendance marked successfully",
+        data: record,
+      });
+  
+    } catch (err) {
+      console.error("Error marking attendance:", err);
+      res.status(500).json({ error: "Failed to mark attendance" });
+    }
+  };
+  export const getTrainingAttendance = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { trainingId } = req.params;
+  
+      const attendance = await prisma.trainingAttendance.findMany({
+        where: { trainingId: Number(trainingId) },
+        include: {
+          employee: true,
+        }
+      });
+  
+      res.json(attendance);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch attendance" });
+    }
+  };
+  export const bulkMarkTrainingAttendance = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { trainingId } = req.params;
+      const { attendanceList } = req.body; // [{employeeId, status}, ...]
+  
+      const markedBy = req.user.userId;
+  
+      const today = new Date();
+      today.setHours(0,0,0,0);
+  
+      for (const entry of attendanceList) {
+        await prisma.trainingAttendance.upsert({
+          where: {
+            trainingId_employeeId_date: {
+              trainingId: Number(trainingId),
+              employeeId: entry.employeeId,
+              date: today,
+            }
+          },
+          update: {
+            status: entry.status,
+            markedAt: new Date(),
+            markedBy,
+          },
+          create: {
+            trainingId: Number(trainingId),
+            employeeId: entry.employeeId,
+            date: today,
+            status: entry.status,
+            markedAt: new Date(),
+            markedBy,
+          }
+        });
+      }
+  
+      res.json({ message: "Bulk attendance updated" });
+  
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to update bulk attendance" });
+    }
+  };
+    

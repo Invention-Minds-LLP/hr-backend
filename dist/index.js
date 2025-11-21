@@ -30,11 +30,18 @@ const internship_routes_1 = __importDefault(require("./api/internship/internship
 const survery_routes_1 = __importDefault(require("./api/survey/survery.routes"));
 const performance_routes_1 = __importDefault(require("./api/performance/performance.routes"));
 const requisition_routes_1 = __importDefault(require("./api/requisition/requisition.routes"));
+const grievance_routes_1 = __importDefault(require("./api/grievance/grievance.routes"));
+const posh_routes_1 = __importDefault(require("./api/posh/posh.routes"));
+const notifications_routes_1 = __importDefault(require("./api/notifications/notifications.routes"));
+const training_routes_1 = __importDefault(require("./api/training/training.routes"));
+const attendance_routes_1 = __importDefault(require("./api/attendance/attendance.routes"));
 const port = 3002;
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 app.use((0, cors_1.default)({
-    origin: "http://localhost:4200", // Allow your Angular app
+    origin: ["http://localhost:4200",
+        "https://demo.hrproindia.in"
+    ], // Allow your Angular app
     credentials: true // Optional: if you plan to send cookies
 }));
 app.use(express_1.default.json());
@@ -63,6 +70,11 @@ app.use('/api/internships', internship_routes_1.default);
 app.use('/api/survey', survery_routes_1.default);
 app.use('/api/performance', performance_routes_1.default);
 app.use('/api/requisitions', requisition_routes_1.default);
+app.use('/api/grievances', grievance_routes_1.default);
+app.use('/api/posh', posh_routes_1.default);
+app.use('/api/notifications', notifications_routes_1.default);
+app.use('/api/trainings', training_routes_1.default);
+app.use('/api/attendance-calendar', attendance_routes_1.default);
 // Default route
 app.get("/", (req, res) => {
     res.send("✅ HR Management API is running!");

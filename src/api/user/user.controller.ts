@@ -112,7 +112,7 @@ export const loginUser = async (req: Request, res: Response) => {
       username: user.username,
     };
     
-    const token = jwt.sign(payload, process.env.JWT_SECRET as string, { expiresIn: "1d" });
+    const token = jwt.sign(payload, process.env.JWT_SECRET as string, { expiresIn: "12h" });
 
 
     // Update last login
@@ -280,7 +280,7 @@ export const loginCandidate = async (req: Request, res: Response) => {
     const token = jwt.sign(
       { candidateId: candidate.id, role: "candidate" },
       process.env.JWT_SECRET as string,
-      { expiresIn: "1d" }
+      { expiresIn: "12h" }
     );
 
     await prisma.candidate.update({

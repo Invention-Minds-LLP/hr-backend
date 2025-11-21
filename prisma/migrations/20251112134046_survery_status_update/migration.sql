@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE `EmployeeSurvey` ADD COLUMN `status` VARCHAR(191) NOT NULL DEFAULT 'DRAFT',
+    ADD COLUMN `submittedAt` DATETIME(3) NULL;

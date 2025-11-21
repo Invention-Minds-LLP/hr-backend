@@ -1,2 +1,2 @@
 -- AlterTable
-ALTER TABLE `overtimeapproval` ADD COLUMN `checkOut` DATETIME(3) NULL;
+ALTER TABLE `OvertimeApproval` ADD COLUMN `checkOut` DATETIME(3) NULL;

@@ -114,7 +114,9 @@ function getAllSurveys(_req, res) {
                             firstName: true,
                             lastName: true,
                             employeeCode: true,
-                            departmentId: true,
+                            Department: {
+                                select: { name: true }
+                            }
                         },
                     },
                     responses: { include: { question: true } },

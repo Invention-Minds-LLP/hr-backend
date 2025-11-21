@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE `resignationrequest` ADD COLUMN `withdrawDecidedAt` DATETIME(3) NULL,
+ALTER TABLE `ResignationRequest` ADD COLUMN `withdrawDecidedAt` DATETIME(3) NULL,
     ADD COLUMN `withdrawDecision` ENUM('PENDING', 'APPROVED', 'REJECTED') NULL,
     ADD COLUMN `withdrawRequestedAt` DATETIME(3) NULL,
     ADD COLUMN `withdrawStatusChangedBy` INTEGER NULL,

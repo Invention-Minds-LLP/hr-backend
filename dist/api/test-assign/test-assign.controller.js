@@ -13,6 +13,7 @@ exports.getAssignedTestOverview = exports.getAssignedTests = exports.assignTestT
 const client_1 = require("@prisma/client");
 const prisma = new client_1.PrismaClient();
 const leave_controller_1 = require("../leave/leave.controller");
+const notifications_controller_1 = require("../notifications/notifications.controller");
 const TEST_ASSIGNED_TEMPLATE_ID = '888289';
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" }) : "";
 const fmtTime = (d) => d ? new Date(d).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "";
@@ -49,7 +50,7 @@ const assignTestToEmployees = (req, res) => __awaiter(void 0, void 0, void 0, fu
         // Fetch employees’ names & phones
         const employees = yield prisma.employee.findMany({
             where: { id: { in: employeeIds } },
-            select: { firstName: true, lastName: true, phone: true }
+            select: { firstName: true, lastName: true, phone: true, id: true }
         });
         const scheduleSrc = (_a = testDate !== null && testDate !== void 0 ? testDate : test === null || test === void 0 ? void 0 : test.activeFrom) !== null && _a !== void 0 ? _a : null;
         const dateLabel = fmtDate(scheduleSrc) || "-";
@@ -61,6 +62,15 @@ const assignTestToEmployees = (req, res) => __awaiter(void 0, void 0, void 0, fu
             if (!to)
                 return;
             const employeeName = [emp.firstName, emp.lastName].filter(Boolean).join(" ");
+            // 📩 Notification message
+            const message = `You have been assigned the ${testName} scheduled on ${dateLabel} at ${timeLabel}.\nKindly ensure to complete it as instructed.`;
+            // --- In-App Notification
+            try {
+                yield (0, notifications_controller_1.createNotification)(emp.id, message); // creates + broadcasts
+            }
+            catch (e) {
+                console.error("Test assign in-app notification failed:", e);
+            }
             try {
                 yield (0, leave_controller_1.sendWhatsAppTemplate)({
                     to,
@@ -121,11 +131,12 @@ const getAssignedTests = (req, res) => __awaiter(void 0, void 0, void 0, functio
             var _a, _b, _c;
             const key = `${a.employeeId}:${a.testId}`;
             const latest = latestAttemptMap.get(key) || null;
+            console.log('latest', latest);
             const score = (_a = latest === null || latest === void 0 ? void 0 : latest.score) !== null && _a !== void 0 ? _a : null;
             const passThreshold = (_c = (_b = a.test) === null || _b === void 0 ? void 0 : _b.passingPercent) !== null && _c !== void 0 ? _c : null;
             // Assumes score is already a percentage (0–100). If not, adjust here.
             const pass = score !== null && passThreshold !== null ? Number(score) >= Number(passThreshold) : null;
-            return Object.assign(Object.assign({}, a), { latestAttempt: latest, latestScore: score, result: pass === null ? null : pass ? 'Pass' : 'Fail' });
+            return Object.assign(Object.assign({}, a), { status: latest ? latest.status : a.status, latestAttempt: latest, latestScore: score, result: pass === null ? null : pass ? 'Pass' : 'Fail' });
         });
         res.json(enriched);
     }
@@ -162,6 +173,7 @@ const getAssignedTestOverview = (req, res) => __awaiter(void 0, void 0, void 0, 
                 timeTakenSec: timeDiffSec(assignment.startedAt, assignment.completedAt),
                 totals: { total: 0, autoGradable: 0, correct: 0, wrong: 0, unanswered: 0 },
                 rows: [],
+                status: "NotStarted",
             });
         }
         // questions from the bank used by this test
@@ -173,7 +185,7 @@ const getAssignedTestOverview = (req, res) => __awaiter(void 0, void 0, void 0, 
         const byQ = new Map(responses.map(r => [Number(r.questionId), r]));
         let correct = 0, wrong = 0, unanswered = 0, autoGradable = 0;
         const rows = questions.map((q, idx) => {
-            var _a;
+            var _a, _b, _c, _d;
             const r = byQ.get(q.id);
             const type = (q.type || '').toUpperCase(); // 'MCQ'|'DESCRIPTIVE'
             const correctIds = q.options.filter(o => o.isCorrect).map(o => o.id).sort((a, b) => a - b);
@@ -200,10 +212,12 @@ const getAssignedTestOverview = (req, res) => __awaiter(void 0, void 0, void 0, 
                 // descriptive → not auto-graded here
                 isCorrect = null;
             }
+            console.log('r', r);
             return {
                 no: idx + 1,
                 questionId: q.id,
                 text: q.text,
+                weight: q.weight,
                 type,
                 selectedOptionIds: selectedIds,
                 selectedOptionTexts: q.options.filter(o => selectedIds.includes(o.id)).map(o => o.text),
@@ -211,6 +225,9 @@ const getAssignedTestOverview = (req, res) => __awaiter(void 0, void 0, void 0, 
                 correctOptionTexts: q.options.filter(o => correctIds.includes(o.id)).map(o => o.text),
                 isCorrect, // true/false/null
                 rawAnswer: !Array.isArray(r === null || r === void 0 ? void 0 : r.answer) ? ((_a = r === null || r === void 0 ? void 0 : r.answer) !== null && _a !== void 0 ? _a : '') : null, // descriptive text if any
+                fileUrl: (_b = r === null || r === void 0 ? void 0 : r.fileUrl) !== null && _b !== void 0 ? _b : null, // descriptive file if any
+                manualScore: (_c = r === null || r === void 0 ? void 0 : r.manualScore) !== null && _c !== void 0 ? _c : null, // ✅ show manual evaluation score
+                remarks: (_d = r === null || r === void 0 ? void 0 : r.remarks) !== null && _d !== void 0 ? _d : null, // ✅ show remarks
             };
         });
         const startedAt = assignment.startedAt;
@@ -233,6 +250,7 @@ const getAssignedTestOverview = (req, res) => __awaiter(void 0, void 0, void 0, 
             employeeName: `${assignment.employee.firstName} ${assignment.employee.lastName}`,
             testId: assignment.testId,
             testName: assignment.test.name,
+            status: attempt.status,
         });
     }
     catch (e) {

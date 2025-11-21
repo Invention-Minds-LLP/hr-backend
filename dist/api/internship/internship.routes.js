@@ -25,16 +25,17 @@ var __importStar = (this && this.__importStar) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const ctrl = __importStar(require("./internship.controller"));
+const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = (0, express_1.Router)();
-router.post('/', ctrl.createInternship);
-router.get('/', ctrl.listInternships);
-router.get('/:id', ctrl.getInternship);
-router.patch('/:id', ctrl.updateInternship);
+router.post('/', authMiddleware_1.authenticateToken, ctrl.createInternship);
+router.get('/', authMiddleware_1.authenticateToken, ctrl.listInternships);
+router.get('/:id', authMiddleware_1.authenticateToken, ctrl.getInternship);
+router.patch('/:id', authMiddleware_1.authenticateToken, ctrl.updateInternship);
 // Workflow actions
-router.post('/:id/offer', ctrl.offerInternship);
-router.post('/:id/activate', ctrl.activateInternship);
-router.post('/:id/extend', ctrl.extendInternship);
-router.post('/:id/complete', ctrl.completeInternship);
-router.post('/:id/drop', ctrl.dropInternship);
-router.post('/:id/convert', ctrl.convertInternship);
+router.post('/:id/offer', authMiddleware_1.authenticateToken, ctrl.offerInternship);
+router.post('/:id/activate', authMiddleware_1.authenticateToken, ctrl.activateInternship);
+router.post('/:id/extend', authMiddleware_1.authenticateToken, ctrl.extendInternship);
+router.post('/:id/complete', authMiddleware_1.authenticateToken, ctrl.completeInternship);
+router.post('/:id/drop', authMiddleware_1.authenticateToken, ctrl.dropInternship);
+router.post('/:id/convert', authMiddleware_1.authenticateToken, ctrl.convertInternship);
 exports.default = router;

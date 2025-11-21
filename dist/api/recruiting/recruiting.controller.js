@@ -8,10 +8,41 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.listInterviews = exports.getSummary = exports.saveHrReview = exports.upsertFeedback = exports.RecruitingController = void 0;
+exports.listEmployeeInterviews = exports.listInterviews = exports.getSummary = exports.saveHrReview = exports.upsertFeedback = exports.RecruitingController = void 0;
 const client_1 = require("@prisma/client");
+const formidable_1 = __importDefault(require("formidable"));
+const fs_1 = __importDefault(require("fs"));
+const basic_ftp_1 = require("basic-ftp");
 const prisma = new client_1.PrismaClient();
+const FTP_CONFIG = {
+    host: "srv680.main-hosting.eu", // Your FTP hostname
+    user: "u948610439.hrproindia.in", // Your FTP username
+    password: "Bsrenuk@1993", // Your FTP password
+    secure: false // Set to true if using FTPS
+};
+function uploadToFTP(localFilePath, remoteFileName) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const client = new basic_ftp_1.Client();
+        client.ftp.verbose = false;
+        try {
+            yield client.access(FTP_CONFIG);
+            const remoteDir = "/public_html/resume";
+            yield client.ensureDir(remoteDir); // Change folder for HR docs
+            console.log(remoteFileName);
+            yield client.uploadFrom(localFilePath, remoteFileName);
+            yield client.close();
+            // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
+        }
+        catch (error) {
+            console.error("FTP Upload Error:", error);
+            throw new Error("FTP upload failed");
+        }
+    });
+}
 /** Small helper to catch async errors */
 const asyncHandler = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 function bad(res, msg, code = 400) {
@@ -114,36 +145,126 @@ class RecruitingController {
         // ---------------- Candidates & Applications ----------------
         /** POST /candidates (raw) */
         this.createCandidate = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
-            const { name, email, phone, source, resumeUrl } = req.body || {};
+            const { name, email, phone, source, resumeUrl, address } = req.body || {};
             if (!name || !email)
                 return bad(res, 'name and email are required');
-            const cand = yield prisma.candidate.create({ data: { name, email, phone, source, resumeUrl } });
+            const cand = yield prisma.candidate.create({ data: { name, email, phone, source, resumeUrl, address } });
             res.status(201).json(cand);
         }));
         /** POST /applications  { jobId, candidate: { name, email, ... } } OR { jobId, candidateId } */
+        // createApplication = asyncHandler(async (req, res) => {
+        //   const { jobId, candidateId, candidate } = req.body || {};
+        //   if (!jobId) return bad(res, 'jobId is required');
+        //   const app = await prisma.$transaction(async (tx) => {
+        //     let candId = candidateId ? Number(candidateId) : undefined;
+        //     if (!candId) {
+        //       if (!candidate?.name || !candidate?.email) throw new Error('candidate.name and candidate.email are required');
+        //       // upsert by email
+        //       const cand = await tx.candidate.upsert({
+        //         where: { email: candidate.email },
+        //         update: { name: candidate.name, phone: candidate.phone, source: candidate.source, resumeUrl: candidate.resumeUrl, experience: candidate.experience.toString(), qualification: candidate.qualification },
+        //         create: { name: candidate.name, email: candidate.email, phone: candidate.phone, source: candidate.source, resumeUrl: candidate.resumeUrl, experience: candidate.experience.toString(), qualification: candidate.qualification },
+        //       });
+        //       candId = cand.id;
+        //     }
+        //     return tx.application.create({
+        //       data: { jobId: Number(jobId), candidateId: candId, status: ApplicationStatus.APPLIED },
+        //       include: { candidate: true, job: true },
+        //     });
+        //   });
+        //   res.status(201).json(app);
+        // });
         this.createApplication = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
-            const { jobId, candidateId, candidate } = req.body || {};
-            if (!jobId)
-                return bad(res, 'jobId is required');
-            const app = yield prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
-                let candId = candidateId ? Number(candidateId) : undefined;
-                if (!candId) {
-                    if (!(candidate === null || candidate === void 0 ? void 0 : candidate.name) || !(candidate === null || candidate === void 0 ? void 0 : candidate.email))
-                        throw new Error('candidate.name and candidate.email are required');
-                    // upsert by email
-                    const cand = yield tx.candidate.upsert({
-                        where: { email: candidate.email },
-                        update: { name: candidate.name, phone: candidate.phone, source: candidate.source, resumeUrl: candidate.resumeUrl, experience: candidate.experience.toString(), qualification: candidate.qualification },
-                        create: { name: candidate.name, email: candidate.email, phone: candidate.phone, source: candidate.source, resumeUrl: candidate.resumeUrl, experience: candidate.experience.toString(), qualification: candidate.qualification },
-                    });
-                    candId = cand.id;
+            const form = (0, formidable_1.default)({ multiples: false });
+            form.parse(req, (err, fields, files) => __awaiter(this, void 0, void 0, function* () {
+                if (err) {
+                    console.error("Form parse error:", err);
+                    return res.status(400).json({ error: "File upload failed" });
                 }
-                return tx.application.create({
-                    data: { jobId: Number(jobId), candidateId: candId, status: client_1.ApplicationStatus.APPLIED },
-                    include: { candidate: true, job: true },
-                });
+                try {
+                    // fields can be string | string[] | undefined
+                    const jobId = fields.jobId
+                        ? Number(Array.isArray(fields.jobId) ? fields.jobId[0] : fields.jobId)
+                        : undefined;
+                    const candidateId = fields.candidateId
+                        ? Number(Array.isArray(fields.candidateId) ? fields.candidateId[0] : fields.candidateId)
+                        : undefined;
+                    const candidateRaw = fields.candidate
+                        ? Array.isArray(fields.candidate)
+                            ? fields.candidate[0]
+                            : fields.candidate
+                        : "{}";
+                    const candidate = JSON.parse(candidateRaw);
+                    if (!jobId)
+                        return res.status(400).json({ error: "jobId is required" });
+                    const resumeField = files.resume;
+                    let resumeUrl;
+                    let resumeFile;
+                    if (Array.isArray(resumeField)) {
+                        resumeFile = resumeField[0]; // take the first file if multiple
+                    }
+                    else {
+                        resumeFile = resumeField;
+                    }
+                    if (resumeFile) {
+                        const filePath = resumeFile.filepath;
+                        const fileName = `${Date.now()}_${resumeFile.originalFilename}`;
+                        const remoteFilePath = `/public_html/resume/${fileName}`;
+                        yield uploadToFTP(filePath, remoteFilePath);
+                        resumeUrl = `https://hrproindia.in/resume/${fileName}`;
+                        console.log("Uploaded resume URL:", resumeUrl);
+                        fs_1.default.unlinkSync(filePath);
+                    }
+                    console.log("Resume URL to save:", resumeUrl);
+                    // --- Transaction ---
+                    const app = yield prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
+                        var _a, _b;
+                        let candId = candidateId;
+                        if (!candId) {
+                            if (!(candidate === null || candidate === void 0 ? void 0 : candidate.name) || !(candidate === null || candidate === void 0 ? void 0 : candidate.email)) {
+                                throw new Error("candidate.name and candidate.email are required");
+                            }
+                            // Upsert by email
+                            const cand = yield tx.candidate.upsert({
+                                where: { email: candidate.email },
+                                update: {
+                                    name: candidate.name,
+                                    phone: candidate.phone,
+                                    source: candidate.source,
+                                    resumeUrl: resumeUrl || candidate.resumeUrl,
+                                    experience: (_a = candidate.experience) === null || _a === void 0 ? void 0 : _a.toString(),
+                                    qualification: candidate.qualification,
+                                    address: candidate.address,
+                                },
+                                create: {
+                                    name: candidate.name,
+                                    email: candidate.email,
+                                    phone: candidate.phone,
+                                    source: candidate.source,
+                                    resumeUrl: resumeUrl || candidate.resumeUrl,
+                                    experience: (_b = candidate.experience) === null || _b === void 0 ? void 0 : _b.toString(),
+                                    qualification: candidate.qualification,
+                                    address: candidate.address,
+                                },
+                            });
+                            candId = cand.id;
+                        }
+                        return tx.application.create({
+                            data: {
+                                jobId,
+                                candidateId: candId,
+                                status: client_1.ApplicationStatus.APPLIED,
+                            },
+                            include: { candidate: true, job: true },
+                        });
+                    }));
+                    res.status(201).json(app);
+                }
+                catch (error) {
+                    console.error("Error creating application:", error);
+                    res.status(500).json({ error: "Internal server error" });
+                }
             }));
-            res.status(201).json(app);
         }));
         /** GET /applications?jobId=..&status=..&q=.. */
         this.listApplications = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
@@ -361,15 +482,70 @@ class RecruitingController {
             res.json(offer);
         }));
         /** POST /offers/:id/mark-joined -> Application HIRED + JoinOutcome JOINED */
+        // markJoined = asyncHandler(async (req, res) => {
+        //   const id = Number(req.params.id);
+        //   const offer = await prisma.offer.findUnique({ where: { id }, include: { application: true } });
+        //   if (!offer) return bad(res, 'Offer not found', 404);
+        //   const updated = await prisma.$transaction(async (tx) => {
+        //     const of = await tx.offer.update({ where: { id }, data: { joinOutcome: JoinOutcome.JOINED } });
+        //     await tx.application.update({ where: { id: offer.applicationId }, data: { status: ApplicationStatus.HIRED } });
+        //     return of;
+        //   });
+        //   res.json(updated);
+        // });
         this.markJoined = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
             const id = Number(req.params.id);
-            const offer = yield prisma.offer.findUnique({ where: { id }, include: { application: true } });
+            const offer = yield prisma.offer.findUnique({
+                where: { id },
+                include: {
+                    application: {
+                        include: { candidate: true, job: true }
+                    }
+                }
+            });
             if (!offer)
                 return bad(res, 'Offer not found', 404);
             const updated = yield prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
-                const of = yield tx.offer.update({ where: { id }, data: { joinOutcome: client_1.JoinOutcome.JOINED } });
-                yield tx.application.update({ where: { id: offer.applicationId }, data: { status: client_1.ApplicationStatus.HIRED } });
-                return of;
+                // 1. Update offer + application
+                const of = yield tx.offer.update({
+                    where: { id },
+                    data: { joinOutcome: client_1.JoinOutcome.JOINED }
+                });
+                yield tx.application.update({
+                    where: { id: offer.applicationId },
+                    data: { status: client_1.ApplicationStatus.HIRED }
+                });
+                // 2. Auto-create Employee if not already exists
+                const { candidate, job } = offer.application;
+                // // generate employeeCode e.g., EMP001, EMP002
+                // const count = await tx.employee.count();
+                // const employeeCode = `EMP${String(count + 1).padStart(3, "0")}`;
+                const employeeCode = yield generateEmployeeCode();
+                const employee = yield tx.employee.create({
+                    data: {
+                        employeeCode,
+                        referenceCode: null,
+                        firstName: candidate.name.split(" ")[0],
+                        lastName: candidate.name.split(" ").slice(1).join(" ") || "",
+                        gender: client_1.Gender.OTHER, // maybe derive from candidate if stored
+                        dob: new Date("2000-01-01"), // 🔹 placeholder, or collect from candidate form
+                        photoUrl: null,
+                        phone: candidate.phone || "",
+                        email: candidate.email,
+                        designation: job.title,
+                        departmentId: job.departmentId,
+                        branchId: 1, // 🔹 set default or map from job
+                        dateOfJoining: offer.proposedJoinAt || new Date(),
+                        employmentType: client_1.EmploymentType.PERMANENT,
+                        employmentStatus: client_1.EmploymentStatus.ACTIVE,
+                        employeeType: "NONCLINICAL", // or map from job/department
+                        roleId: 3, // 🔹 default role, e.g., "Employee"
+                        reportingManager: null,
+                        age: null,
+                        bloodGroup: null,
+                    }
+                });
+                return Object.assign(Object.assign({}, of), { employee });
             }));
             res.json(updated);
         }));
@@ -806,10 +982,24 @@ exports.upsertFeedback = asyncHandler((req, res) => __awaiter(void 0, void 0, vo
     });
     res.json(fb);
 }));
+function generateEmployeeCode() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const lastEmployee = yield prisma.employee.findFirst({
+            orderBy: { employeeCode: 'desc' },
+            select: { employeeCode: true }
+        });
+        let newCode = 'EMP001';
+        if (lastEmployee === null || lastEmployee === void 0 ? void 0 : lastEmployee.employeeCode) {
+            const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
+            newCode = `EMP${String(lastNumber + 1).padStart(3, '0')}`;
+        }
+        return newCode;
+    });
+}
 // POST /api/interviews/:id/hr-review
 exports.saveHrReview = asyncHandler((req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const interviewId = Number(req.params.id);
-    const { presentSalary, payslip, expectedSalary, grossOffer, conclusion, remarks, reviewerUserId } = req.body;
+    const { presentSalary, payslip, expectedSalary, grossOffer, conclusion, remarks, reviewerUserId, expectedDoj, noticePeriod } = req.body;
     const review = yield prisma.interviewHRReview.upsert({
         where: { interviewId },
         update: {
@@ -817,6 +1007,7 @@ exports.saveHrReview = asyncHandler((req, res) => __awaiter(void 0, void 0, void
             conclusion, remarks,
             reviewerUserId: reviewerUserId,
             reviewedAt: new Date(),
+            expectedDoj, noticePeriod
         },
         create: {
             interviewId,
@@ -824,6 +1015,7 @@ exports.saveHrReview = asyncHandler((req, res) => __awaiter(void 0, void 0, void
             conclusion, remarks,
             reviewerUserId: reviewerUserId,
             reviewedAt: new Date(),
+            expectedDoj, noticePeriod
         },
     });
     // keep Interview in sync (optional)
@@ -920,5 +1112,89 @@ exports.listInterviews = asyncHandler((req, res) => __awaiter(void 0, void 0, vo
             },
         },
     });
+    res.json(items);
+}));
+exports.listEmployeeInterviews = asyncHandler((req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const { employeeId } = req.params;
+    if (!employeeId) {
+        res.status(400);
+        throw new Error('Employee ID is required');
+    }
+    const all = yield prisma.interview.findMany({
+        where: {
+            panelUserIds: {
+                contains: employeeId.toString(), // match employeeId in CSV
+            },
+        },
+        orderBy: [{ startTime: 'desc' }, { id: 'desc' }],
+        include: {
+            application: {
+                select: {
+                    id: true,
+                    candidate: {
+                        select: {
+                            id: true,
+                            name: true,
+                            email: true,
+                            phone: true,
+                            experience: true,
+                            qualification: true,
+                        },
+                    },
+                    job: {
+                        select: {
+                            id: true,
+                            title: true,
+                            department: {
+                                select: { id: true, name: true },
+                            },
+                        },
+                    },
+                },
+            },
+            candidateAssignedTest: {
+                select: {
+                    id: true,
+                    status: true,
+                    score: true,
+                    reviewedAt: true,
+                    reviewDecision: true,
+                    completedAt: true,
+                    test: { select: { id: true, name: true } },
+                },
+            },
+            InterviewHRReview: {
+                select: {
+                    presentSalary: true,
+                    payslip: true,
+                    expectedSalary: true,
+                    grossOffer: true,
+                    conclusion: true,
+                    remarks: true,
+                    reviewerUserId: true,
+                    reviewedAt: true,
+                },
+            },
+            InterviewFeedback: {
+                where: { status: 'SUBMITTED' },
+                orderBy: { submittedAt: 'desc' },
+                select: {
+                    id: true,
+                    panelUserId: true,
+                    name: true,
+                    designation: true,
+                    jobSkills: true,
+                    jobKnowledge: true,
+                    attitude: true,
+                    communication: true,
+                    average: true,
+                    notes: true,
+                    status: true,
+                    submittedAt: true,
+                },
+            },
+        },
+    });
+    const items = all.filter(i => { var _a; return (_a = i.panelUserIds) === null || _a === void 0 ? void 0 : _a.split(',').map(id => id.trim()).includes(employeeId.toString()); });
     res.json(items);
 }));

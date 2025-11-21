@@ -56,7 +56,11 @@ exports.listExitInterviews = listExitInterviews;
 exports.setFinalSettlement = setFinalSettlement;
 exports.markCompleted = markCompleted;
 exports.hrHold = hrHold;
+exports.requestWithdraw = requestWithdraw;
+exports.hrApproveWithdraw = hrApproveWithdraw;
+exports.hrRejectWithdraw = hrRejectWithdraw;
 exports.uploadToFTP = uploadToFTP;
+exports.listResignationsWithClearances = listResignationsWithClearances;
 const client_1 = require("@prisma/client");
 const date_fns_1 = require("date-fns");
 const fsp = __importStar(require("fs/promises"));
@@ -120,7 +124,6 @@ function listResignations(req, res) {
                 where.employeeId = Number(employeeId);
             else if (scope === 'manager' && managerId)
                 where.managerId = Number(managerId);
-            console.log(where, scope);
             // scope=all -> no additional filter
             const rows = yield prisma.resignationRequest.findMany({
                 where,
@@ -377,10 +380,18 @@ function scheduleExitInterview(req, res) {
         try {
             const id = Number(req.params.id);
             const { scheduledAt, interviewerId, notes } = req.body;
+            const resignation = yield prisma.resignationRequest.findUnique({
+                where: { id: id },
+                select: { employeeId: true },
+            });
+            if (!resignation) {
+                return res.status(404).json({ error: 'Resignation request not found' });
+            }
             const row = yield prisma.exitInterview.upsert({
                 where: { resignationId: id },
                 create: {
                     resignationId: id,
+                    employeeId: resignation.employeeId,
                     scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
                     interviewerId: interviewerId !== null && interviewerId !== void 0 ? interviewerId : null,
                     notes
@@ -388,6 +399,7 @@ function scheduleExitInterview(req, res) {
                 update: {
                     scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
                     interviewerId: interviewerId !== null && interviewerId !== void 0 ? interviewerId : null,
+                    employeeId: resignation.employeeId,
                     notes
                 }
             });
@@ -473,7 +485,6 @@ function listExitInterviews(_req, res) {
     return __awaiter(this, void 0, void 0, function* () {
         try {
             const all = yield prisma.exitInterview.findMany({
-                where: { completedAt: { not: null } },
                 include: { employee: true }, // get employee
                 orderBy: { createdAt: "desc" },
             });
@@ -558,6 +569,96 @@ function hrHold(req, res) {
         }
     });
 }
+// POST /resignations/:id/request-withdraw
+function requestWithdraw(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const id = Number(req.params.id);
+            const { reason } = req.body;
+            const row = yield prisma.resignationRequest.findUnique({ where: { id } });
+            if (!row)
+                return res.status(404).json({ error: "Not found" });
+            // Cannot request if already approved/rejected/withdrawn
+            if (["APPROVED", "REJECTED", "WITHDRAWN"].includes(row.status)) {
+                return res.status(400).json({ error: "Cannot request withdraw at this stage" });
+            }
+            const upd = yield prisma.resignationRequest.update({
+                where: { id },
+                data: {
+                    status: "WITHDRAW_REQUESTED",
+                    withdrawRequestedAt: new Date(),
+                    withdrawnReason: reason,
+                    withdrawDecision: null,
+                    withdrawDecidedAt: null,
+                },
+            });
+            res.json(upd);
+        }
+        catch (e) {
+            console.error(e);
+            res.status(500).json({ error: "Request withdraw failed" });
+        }
+    });
+}
+// POST /resignations/:id/hr-withdraw-approve
+function hrApproveWithdraw(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const id = Number(req.params.id);
+            const { note, approvedBy } = req.body;
+            const row = yield prisma.resignationRequest.findUnique({ where: { id } });
+            if (!row)
+                return res.status(404).json({ error: "Not found" });
+            if (row.status !== "WITHDRAW_REQUESTED") {
+                return res.status(400).json({ error: "No withdraw request pending" });
+            }
+            const upd = yield prisma.resignationRequest.update({
+                where: { id },
+                data: {
+                    status: "WITHDRAWN",
+                    withdrawDecision: "APPROVED",
+                    withdrawDecidedAt: new Date(),
+                    withdrawnAt: new Date(),
+                    withdrawStatusChangedBy: approvedBy,
+                },
+            });
+            res.json(upd);
+        }
+        catch (e) {
+            console.error(e);
+            res.status(500).json({ error: "HR withdraw approval failed" });
+        }
+    });
+}
+// POST /resignations/:id/hr-withdraw-reject
+function hrRejectWithdraw(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const id = Number(req.params.id);
+            const { note, rejectedBy } = req.body;
+            const row = yield prisma.resignationRequest.findUnique({ where: { id } });
+            if (!row)
+                return res.status(404).json({ error: "Not found" });
+            if (row.status !== "WITHDRAW_REQUESTED") {
+                return res.status(400).json({ error: "No withdraw request pending" });
+            }
+            const upd = yield prisma.resignationRequest.update({
+                where: { id },
+                data: {
+                    withdrawDecision: "REJECTED",
+                    withdrawDecidedAt: new Date(),
+                    withdrawStatusChangedBy: rejectedBy,
+                    status: "SUBMITTED", // go back to normal resignation workflow
+                },
+            });
+            res.json(upd);
+        }
+        catch (e) {
+            console.error(e);
+            res.status(500).json({ error: "HR withdraw rejection failed" });
+        }
+    });
+}
 const APP_PUBLIC_URL = (_a = process.env.APP_PUBLIC_URL) !== null && _a !== void 0 ? _a : 'https://example.com';
 const COMPANY_NAME = (_b = process.env.COMPANY_NAME) !== null && _b !== void 0 ? _b : 'HR MINDS';
 const COMPANY_LOGO_URL = (_c = process.env.COMPANY_LOGO_URL) !== null && _c !== void 0 ? _c : ''; // optional
@@ -565,7 +666,7 @@ const COMPANY_TAGLINE = (_d = process.env.COMPANY_TAGLINE) !== null && _d !== vo
 const PUBLIC_BASE_URL = (_e = process.env.PUBLIC_BASE_URL) !== null && _e !== void 0 ? _e : 'https://hrproindia.in';
 const FTP_PUBLIC_DIR = (_f = process.env.FTP_PUBLIC_DIR) !== null && _f !== void 0 ? _f : '/public_html/certificate'; // remote dir
 const generateClearanceCertificate = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f, _g, _h;
+    var _a, _b, _c, _d, _e, _f;
     const id = Number(req.params.id);
     // 1) Load resignation with related data
     const r = yield prisma.resignationRequest.findUnique({
@@ -579,17 +680,10 @@ const generateClearanceCertificate = (req, res) => __awaiter(void 0, void 0, voi
     });
     if (!r)
         return res.status(404).json({ message: 'Resignation not found' });
-    console.log('DBG resignation', {
-        id: r.id,
-        status: r.status,
-        clearances: r.clearances.map(c => ({ type: c.type, decision: c.decision, decidedAt: c.decidedAt })),
-        handoverTasks: r.handoverTasks.map(t => ({ id: t.id, status: t.status })),
-        finalSettlement: (_b = (_a = r.finalSettlement) === null || _a === void 0 ? void 0 : _a.status) !== null && _b !== void 0 ? _b : null,
-    });
     // 2) Eligibility checks
     const allClearancesApproved = r.clearances.length > 0 && r.clearances.every(c => c.decision === 'APPROVED');
     const allTasksDone = r.handoverTasks.every(t => t.status === 'DONE');
-    const settlementPaid = ((_c = r.finalSettlement) === null || _c === void 0 ? void 0 : _c.status) === 'PAID';
+    const settlementPaid = ((_a = r.finalSettlement) === null || _a === void 0 ? void 0 : _a.status) === 'PAID';
     const statusOk = ['APPROVED', 'COMPLETED'].includes(r.status);
     if (!statusOk || !allClearancesApproved || !allTasksDone || !settlementPaid) {
         return res.status(400).json({
@@ -607,10 +701,10 @@ const generateClearanceCertificate = (req, res) => __awaiter(void 0, void 0, voi
         verifyUrl,
         employeeName: `${r.employee.firstName} ${r.employee.lastName}`,
         employeeCode: r.employee.employeeCode,
-        departmentName: (_e = (_d = r.employee.Department) === null || _d === void 0 ? void 0 : _d.name) !== null && _e !== void 0 ? _e : null,
-        branchName: (_g = (_f = r.employee.Branch) === null || _f === void 0 ? void 0 : _f.name) !== null && _g !== void 0 ? _g : null,
+        departmentName: (_c = (_b = r.employee.Department) === null || _b === void 0 ? void 0 : _b.name) !== null && _c !== void 0 ? _c : null,
+        branchName: (_e = (_d = r.employee.Branch) === null || _d === void 0 ? void 0 : _d.name) !== null && _e !== void 0 ? _e : null,
         dateOfJoining: r.employee.dateOfJoining,
-        lastWorkingDay: (_h = r.actualLastWorkingDay) !== null && _h !== void 0 ? _h : r.proposedLastWorkingDay,
+        lastWorkingDay: (_f = r.actualLastWorkingDay) !== null && _f !== void 0 ? _f : r.proposedLastWorkingDay,
         clearances: r.clearances.map(c => ({
             type: String(c.type),
             decision: c.decision, // 'PENDING' | 'APPROVED' | 'REJECTED'
@@ -639,7 +733,7 @@ const generateClearanceCertificate = (req, res) => __awaiter(void 0, void 0, voi
     try {
         yield fsp.unlink(filePath);
     }
-    catch (_j) { }
+    catch (_g) { }
     return res.json({ url: publicUrl, code });
 });
 exports.generateClearanceCertificate = generateClearanceCertificate;
@@ -852,6 +946,71 @@ function uploadToFTP(localFilePath, remoteFilePath) {
         }
         finally {
             client.close();
+        }
+    });
+}
+function listResignationsWithClearances(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c, _d;
+        try {
+            const userId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.userId;
+            if (!userId) {
+                res.status(401).json({ error: 'Unauthorized' });
+                return;
+            }
+            const user = yield prisma.user.findUnique({
+                where: { id: userId },
+                include: {
+                    employee: {
+                        include: { role: true, Department: true }
+                    }
+                }
+            });
+            if (!user) {
+                res.status(404).json({ error: 'User not found' });
+                return;
+            }
+            const emp = user.employee;
+            const isReportingManager = emp.roleId === 3;
+            const isHRManager = emp.roleId === 1;
+            // ✅ Determine which clearance type this user manages
+            const deptName = (_d = (_c = (_b = emp.Department) === null || _b === void 0 ? void 0 : _b.name) === null || _c === void 0 ? void 0 : _c.toUpperCase()) !== null && _d !== void 0 ? _d : '';
+            const allowedClearanceType = ['HR', 'FINANCE', 'IT', 'ADMIN', 'SECURITY'].includes(deptName)
+                ? deptName
+                : null;
+            const whereCondition = isHRManager
+                ? {} // HR sees all
+                : { managerId: emp.id }; // Reporting managers see only their reports
+            if (!isReportingManager) {
+                // If not reporting manager → optional logic
+                // either block access or show all (if HR/Admin)
+                return res.status(403).json({ error: 'Access denied. Only reporting managers can view clearances.' });
+            }
+            // Fetch resignations under this reporting manager
+            const resignations = yield prisma.resignationRequest.findMany({
+                where: whereCondition, // 👈 show only employees reporting to this manager
+                include: {
+                    employee: {
+                        select: {
+                            id: true,
+                            firstName: true,
+                            lastName: true,
+                            departmentId: true,
+                            employeeCode: true,
+                            Department: { select: { name: true } }
+                        }
+                    },
+                    clearances: allowedClearanceType
+                        ? { where: { type: allowedClearanceType } } // ✅ Cast it to the enum
+                        : false,
+                },
+                orderBy: { createdAt: 'desc' }
+            });
+            res.json(resignations);
+        }
+        catch (err) {
+            console.error(err);
+            res.status(500).json({ error: 'Failed to load resignation clearances' });
         }
     });
 }

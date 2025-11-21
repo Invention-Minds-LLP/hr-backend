@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE `candidate` ADD COLUMN `lastLogin` DATETIME(3) NULL,
+ALTER TABLE `Candidate` ADD COLUMN `lastLogin` DATETIME(3) NULL,
     ADD COLUMN `passwordHash` VARCHAR(191) NULL;
 
 -- CreateTable

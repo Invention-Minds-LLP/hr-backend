@@ -32,6 +32,8 @@ enum EmploymentStatus {
   ACTIVE
   TERMINATED
   SUSPENDED
+  NOTICE_PERIOD
+  RESIGNED
 }
 
 enum LeaveStatus {
@@ -144,13 +146,15 @@ model Employee {
   bloodGroup       String?
 
   // Health & Wellness
-  preEmploymentCheckDate DateTime?
-  height                 Float?
-  weight                 Float?
-  bmi                    Float?
-  bloodPressure          String?
-  bloodSugar             String?
-  cholesterol            String?
+  preEmploymentCheckDate  DateTime?
+  healthCheckReminderYear Int? // e.g., 2025
+  healthCheckReminderSent Boolean?  @default(false)
+  height                  Float?
+  weight                  Float?
+  bmi                     Float?
+  bloodPressure           String?
+  bloodSugar              String?
+  cholesterol             String?
 
   allergies         String?
   chronicConditions String?
@@ -188,31 +192,36 @@ model Employee {
   evaluations   EvaluationAttempt[]
   appraisals    AppraisalForm[]
 
-  createdAt              DateTime                 @default(now())
-  updatedAt              DateTime                 @default(now()) @updatedAt
-  Department             Department               @relation(fields: [departmentId], references: [id])
-  Branch                 Branch                   @relation(fields: [branchId], references: [id])
-  User                   User?
-  Address                Address[]
-  WFHRequest             WFHRequest[]
-  AssignedTest           AssignedTest[]
-  EmployeeShiftSetting   EmployeeShiftSetting?
-  ResignationRequest     ResignationRequest[]
-  AnnouncementAck        AnnouncementAck[]
-  Internship             Internship[]
-  OvertimeApproval       OvertimeApproval[]
-  EmployeeSurvey         EmployeeSurvey[]
-  ExitInterview          ExitInterview[]
-  PerformanceResponse    PerformanceResponse[]
-  PerformanceSummary     PerformanceSummary[]
-  PerformanceFinalReview PerformanceFinalReview[]
-  Grievance              Grievance[]
-  GrievanceComment       GrievanceComment[]
-  poshComplaints         PoshCase[]               @relation("ComplainantCases")
-  poshAccusations        PoshCase[]               @relation("AccusedCases")
-  Training               Training[]
-  TrainingAssignment     TrainingAssignment[]
-  TrainingFeedback       TrainingFeedback[]
+  createdAt                DateTime                   @default(now())
+  updatedAt                DateTime                   @default(now()) @updatedAt
+  Department               Department                 @relation(fields: [departmentId], references: [id])
+  Branch                   Branch                     @relation(fields: [branchId], references: [id])
+  User                     User?
+  Address                  Address[]
+  WFHRequest               WFHRequest[]
+  AssignedTest             AssignedTest[]
+  EmployeeShiftSetting     EmployeeShiftSetting?
+  ResignationRequest       ResignationRequest[]
+  AnnouncementAck          AnnouncementAck[]
+  Internship               Internship[]
+  OvertimeApproval         OvertimeApproval[]
+  EmployeeSurvey           EmployeeSurvey[]
+  ExitInterview            ExitInterview[]
+  PerformanceResponse      PerformanceResponse[]
+  PerformanceSummary       PerformanceSummary[]
+  PerformanceFinalReview   PerformanceFinalReview[]
+  Grievance                Grievance[]
+  GrievanceComment         GrievanceComment[]
+  poshComplaints           PoshCase[]                 @relation("ComplainantCases")
+  poshAccusations          PoshCase[]                 @relation("AccusedCases")
+  Training                 Training[]
+  TrainingAssignment       TrainingAssignment[]
+  TrainingFeedback         TrainingFeedback[]
+  ComplaintAcknowledgement ComplaintAcknowledgement[]
+  EmployeeLeaveBalance     EmployeeLeaveBalance[]
+  TrainingAttendance       TrainingAttendance[]
+  incidentAsEmployee       Incident[]                 @relation("IncidentEmployee")
+  incidentAsReporter       Incident[]                 @relation("IncidentReporter")
 }
 
 model EmergencyContact {
@@ -336,11 +345,12 @@ model Attendance {
 }
 
 model LeaveType {
-  id           Int            @id @default(autoincrement())
-  name         String         @unique
-  description  String?
-  carryForward Boolean        @default(false)
-  LeaveRequest LeaveRequest[]
+  id                   Int                    @id @default(autoincrement())
+  name                 String                 @unique
+  description          String?
+  carryForward         Boolean                @default(false)
+  LeaveRequest         LeaveRequest[]
+  EmployeeLeaveBalance EmployeeLeaveBalance[]
 }
 
 model LeaveRequest {
@@ -1376,10 +1386,12 @@ model OvertimeApproval {
 }
 
 model EmployeeSurvey {
-  id         Int      @id @default(autoincrement())
-  employeeId Int
-  date       DateTime
-  createdAt  DateTime @default(now())
+  id          Int       @id @default(autoincrement())
+  employeeId  Int
+  date        DateTime
+  createdAt   DateTime  @default(now())
+  submittedAt DateTime?
+  status      String    @default("DRAFT") // DRAFT | SUBMITTED
 
   employee  Employee         @relation(fields: [employeeId], references: [id])
   responses SurveyResponse[]
@@ -1604,8 +1616,9 @@ model Grievance {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  employee Employee           @relation(fields: [employeeId], references: [id])
-  comments GrievanceComment[]
+  employee                 Employee                   @relation(fields: [employeeId], references: [id])
+  comments                 GrievanceComment[]
+  ComplaintAcknowledgement ComplaintAcknowledgement[]
 }
 
 model GrievanceComment {
@@ -1638,9 +1651,10 @@ model PoshCase {
   updatedAt DateTime @default(now()) @updatedAt
 
   // Relations
-  complainant Employee      @relation("ComplainantCases", fields: [complainantId], references: [id])
-  accused     Employee      @relation("AccusedCases", fields: [accusedId], references: [id])
-  hearings    PoshHearing[]
+  complainant              Employee                   @relation("ComplainantCases", fields: [complainantId], references: [id])
+  accused                  Employee                   @relation("AccusedCases", fields: [accusedId], references: [id])
+  hearings                 PoshHearing[]
+  ComplaintAcknowledgement ComplaintAcknowledgement[]
 }
 
 model PoshHearing {
@@ -1695,8 +1709,9 @@ model Training {
   trainingTests     TrainingTest[]
   feedbacks         TrainingFeedback[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @default(now()) @updatedAt
+  TrainingAttendance TrainingAttendance[]
 }
 
 model TrainingTest {
@@ -1753,4 +1768,77 @@ model TrainingFeedback {
 
   @@unique([trainingId, employeeId])
   @@index([trainingId])
+}
+
+model ComplaintAcknowledgement {
+  id             Int      @id @default(autoincrement())
+  employeeId     Int
+  grievanceId    Int?
+  poshCaseId     Int?
+  acknowledgedAt DateTime @default(now())
+
+  employee  Employee   @relation(fields: [employeeId], references: [id])
+  grievance Grievance? @relation(fields: [grievanceId], references: [id])
+  poshCase  PoshCase?  @relation(fields: [poshCaseId], references: [id])
+  createdAt DateTime   @default(now())
+
+  @@index([employeeId])
+  @@index([grievanceId])
+  @@index([poshCaseId])
+}
+
+enum BalanceCategory {
+  LEAVE
+  PERMISSION
+}
+
+model EmployeeLeaveBalance {
+  id             Int             @id @default(autoincrement())
+  employeeId     Int
+  leaveTypeId    Int?
+  permissionType PermissionType?
+  category       BalanceCategory // LEAVE or PERMISSION
+  year           Int
+  totalAllowed   Int             @default(0)
+  used           Int             @default(0)
+
+  employee  Employee   @relation(fields: [employeeId], references: [id])
+  leaveType LeaveType? @relation(fields: [leaveTypeId], references: [id])
+
+  @@unique([employeeId, leaveTypeId, permissionType, year])
+}
+
+model TrainingAttendance {
+  id         Int       @id @default(autoincrement())
+  trainingId Int
+  employeeId Int
+  date       DateTime // Which day they attended
+  status     String // PRESENT | ABSENT | LATE
+  markedAt   DateTime? // When attendance was marked
+  markedBy   Int? // Employee/User ID who marked
+
+  training Training @relation(fields: [trainingId], references: [id])
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([trainingId, employeeId, date]) // one record per person per day
+  @@index([trainingId])
+  @@index([employeeId])
+}
+
+model Incident {
+  id          Int      @id @default(autoincrement())
+  employeeId  Int // employee involved
+  reportedBy  Int // who raised it
+  title       String
+  description String   @db.Text
+  status      String
+  attachment  String? // file URL (optional)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  employee Employee @relation("IncidentEmployee", fields: [employeeId], references: [id])
+  reporter Employee @relation("IncidentReporter", fields: [reportedBy], references: [id])
 }

@@ -1,2 +1,2 @@
 -- AlterTable
-ALTER TABLE `manpowerrequisition` ADD COLUMN `departmentId` INTEGER NULL;
+ALTER TABLE `ManpowerRequisition` ADD COLUMN `departmentId` INTEGER NULL;

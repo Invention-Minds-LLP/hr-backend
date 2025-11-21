@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE `internship` ADD COLUMN `departmentId` INTEGER NULL;
+ALTER TABLE `Internship` ADD COLUMN `departmentId` INTEGER NULL;
 
 -- CreateIndex
 CREATE INDEX `Internship_departmentId_idx` ON `Internship`(`departmentId`);

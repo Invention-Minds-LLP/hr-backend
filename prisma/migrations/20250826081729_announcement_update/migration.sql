@@ -5,7 +5,7 @@
 
 */
 -- AlterTable
-ALTER TABLE `announcement` ADD COLUMN `attachments` VARCHAR(191) NULL,
+ALTER TABLE `Announcement` ADD COLUMN `attachments` VARCHAR(191) NULL,
     ADD COLUMN `circularCode` VARCHAR(191) NULL,
     ADD COLUMN `isPinned` BOOLEAN NOT NULL DEFAULT false,
     ADD COLUMN `requireAck` BOOLEAN NOT NULL DEFAULT false,

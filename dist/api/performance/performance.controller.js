@@ -9,7 +9,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.submitFullForm = exports.getEmployeeForm = exports.submitFinalReview = exports.submitSummary = exports.submitResponses = exports.getTemplateByDept = exports.createTemplate = void 0;
+exports.getAllSummaries = exports.assignFormToEmployee = exports.submitFullForm = exports.getEmployeeForm = exports.submitFinalReview = exports.submitSummary = exports.submitResponses = exports.getTemplateByDept = exports.createTemplate = void 0;
 const client_1 = require("@prisma/client");
 const prisma = new client_1.PrismaClient();
 // Create a template
@@ -203,3 +203,66 @@ const submitFullForm = (req, res) => __awaiter(void 0, void 0, void 0, function*
     }
 });
 exports.submitFullForm = submitFullForm;
+const assignFormToEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeId, employeeIds, departmentId, cycle, period } = req.body;
+        const ids = employeeIds || (employeeId ? [employeeId] : []);
+        if (!ids.length) {
+            return res.status(400).json({ error: "No employees provided" });
+        }
+        const results = [];
+        for (const id of ids) {
+            // check if already assigned
+            const exists = yield prisma.performanceSummary.findFirst({
+                where: { employeeId: id, departmentId, cycle, period }
+            });
+            if (!exists) {
+                const summary = yield prisma.performanceSummary.create({
+                    data: {
+                        employeeId: id,
+                        departmentId,
+                        cycle,
+                        period
+                    }
+                });
+                results.push({ employeeId: id, assigned: true, summary });
+            }
+            else {
+                results.push({ employeeId: id, assigned: false, message: "Already assigned" });
+            }
+        }
+        res.json(results);
+    }
+    catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.assignFormToEmployee = assignFormToEmployee;
+// Get all summaries with employee & department
+const getAllSummaries = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const summaries = yield prisma.performanceSummary.findMany({
+            include: {
+                employee: {
+                    select: {
+                        id: true,
+                        employeeCode: true,
+                        firstName: true,
+                        lastName: true,
+                        email: true,
+                        dateOfJoining: true
+                    }
+                },
+                department: {
+                    select: { id: true, name: true }
+                }
+            },
+            orderBy: { createdAt: "desc" }
+        });
+        res.json(summaries);
+    }
+    catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getAllSummaries = getAllSummaries;

@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE `exitinterview` ADD COLUMN `academicQualification` VARCHAR(191) NULL,
+ALTER TABLE `ExitInterview` ADD COLUMN `academicQualification` VARCHAR(191) NULL,
     ADD COLUMN `attitudeSuperiors` VARCHAR(191) NULL,
     ADD COLUMN `companyOpinion` VARCHAR(191) NULL,
     ADD COLUMN `demotivating` VARCHAR(191) NULL,

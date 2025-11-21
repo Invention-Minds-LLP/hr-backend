@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE `employee` ADD COLUMN `alcohol` BOOLEAN NULL,
+ALTER TABLE `Employee` ADD COLUMN `alcohol` BOOLEAN NULL,
     ADD COLUMN `allergies` VARCHAR(191) NULL,
     ADD COLUMN `bloodPressure` VARCHAR(191) NULL,
     ADD COLUMN `bloodSugar` VARCHAR(191) NULL,

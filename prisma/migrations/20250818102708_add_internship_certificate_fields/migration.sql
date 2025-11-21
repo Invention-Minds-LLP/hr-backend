@@ -5,7 +5,7 @@
 
 */
 -- AlterTable
-ALTER TABLE `internship` ADD COLUMN `certificateCode` VARCHAR(191) NULL,
+ALTER TABLE `Internship` ADD COLUMN `certificateCode` VARCHAR(191) NULL,
     ADD COLUMN `certificateIssuedAt` DATETIME(3) NULL;
 
 -- CreateIndex

@@ -5,7 +5,7 @@
 
 */
 -- AlterTable
-ALTER TABLE `employee` DROP COLUMN `disabilities`,
+ALTER TABLE `Employee` DROP COLUMN `disabilities`,
     ADD COLUMN `disabilityDescription` VARCHAR(191) NULL,
     ADD COLUMN `disabilityProofFile` VARCHAR(191) NULL,
     ADD COLUMN `disabilityProofFileName` VARCHAR(191) NULL,

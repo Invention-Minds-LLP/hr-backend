@@ -2,8 +2,10 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const requisition_controller_1 = require("./requisition.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+console.log("🚀 requisition.routes.ts loaded!");
 const router = (0, express_1.Router)();
-router.post("/", requisition_controller_1.createRequisition);
-router.get("/", requisition_controller_1.listRequisitions);
-router.patch("/:id/status", requisition_controller_1.updateRequisitionStatus);
+router.post("/", authMiddleware_1.authenticateToken, requisition_controller_1.createRequisition);
+router.get("/", authMiddleware_1.authenticateToken, requisition_controller_1.listRequisitions);
+router.patch("/:id/status", authMiddleware_1.authenticateToken, requisition_controller_1.updateRequisitionStatus);
 exports.default = router;

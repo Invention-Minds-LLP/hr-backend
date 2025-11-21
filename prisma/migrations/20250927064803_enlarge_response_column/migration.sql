@@ -1,2 +1,2 @@
 -- AlterTable
-ALTER TABLE `evaluationattempt` MODIFY `response` LONGTEXT NULL;
+ALTER TABLE `EvaluationAttempt` MODIFY `response` LONGTEXT NULL;

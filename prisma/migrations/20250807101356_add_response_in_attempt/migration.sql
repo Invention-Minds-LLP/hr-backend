@@ -1,2 +1,2 @@
 -- AlterTable
-ALTER TABLE `evaluationattempt` ADD COLUMN `response` VARCHAR(191) NULL;
+ALTER TABLE `EvaluationAttempt` ADD COLUMN `response` VARCHAR(191) NULL;

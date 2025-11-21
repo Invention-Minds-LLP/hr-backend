@@ -6,6 +6,7 @@ import fs from "fs";
 import { Client } from "basic-ftp";
 import path from "path";
 import { $Enums } from '@prisma/client';
+import { createNotification } from "../notifications/notifications.controller";
 
 const FTP_CONFIG = {
   host: "srv680.main-hosting.eu",  // Your FTP hostname
@@ -104,35 +105,35 @@ export const createEmployee = async (req: Request, res: Response) => {
           employeeType,
           sameAsPermanent,
           // Health & Wellness fields
-        preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
-        height: data.height ? parseFloat(data.height) : null,
-        weight: data.weight ? parseFloat(data.weight) : null,
-        bmi: data.bmi ? parseFloat(data.bmi) : null,
-        bloodPressure: data.bloodPressure,
-        bloodSugar: data.bloodSugar,
-        cholesterol: data.cholesterol,
+          preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
+          height: data.height ? parseFloat(data.height) : null,
+          weight: data.weight ? parseFloat(data.weight) : null,
+          bmi: data.bmi ? parseFloat(data.bmi) : null,
+          bloodPressure: data.bloodPressure,
+          bloodSugar: data.bloodSugar,
+          cholesterol: data.cholesterol,
 
-        allergies: data.allergies,
-        chronicConditions: data.chronicConditions,
+          allergies: data.allergies,
+          chronicConditions: data.chronicConditions,
 
-        smoking: data.smoking,
-        alcohol: data.alcohol,
-        visionType:              data.visionType,          // e.g., 'NEAR', 'DISTANT', 'COLOR_BLIND'
-        usesGlasses:             data.usesGlasses,
-        visionRemarks:           data.visionRemarks,
-        hasDisability:          data.hasDisability,
-        disabilityType:          data.disabilityType,        // e.g., 'PHYSICAL', 'HEARING', 'MENTAL', etc.
-        disabilityDescription:   data.disabilityDescription,
-        disabilityProofFile:     data.disabilityProofFile,   // original file name
-        disabilityProofFileName: data.disabilityProofFileName, // sanitized file name on server
-        disabilityProofUrl:      data.disabilityProofUrl,      // URL to access the file
+          smoking: data.smoking,
+          alcohol: data.alcohol,
+          visionType: data.visionType,          // e.g., 'NEAR', 'DISTANT', 'COLOR_BLIND'
+          usesGlasses: data.usesGlasses,
+          visionRemarks: data.visionRemarks,
+          hasDisability: data.hasDisability,
+          disabilityType: data.disabilityType,        // e.g., 'PHYSICAL', 'HEARING', 'MENTAL', etc.
+          disabilityDescription: data.disabilityDescription,
+          disabilityProofFile: data.disabilityProofFile,   // original file name
+          disabilityProofFileName: data.disabilityProofFileName, // sanitized file name on server
+          disabilityProofUrl: data.disabilityProofUrl,      // URL to access the file
 
-        preferredHospital: data.preferredHospital,
-        primaryPhysician: data.primaryPhysician,
-        emergencyNotes: data.emergencyNotes,
+          preferredHospital: data.preferredHospital,
+          primaryPhysician: data.primaryPhysician,
+          emergencyNotes: data.emergencyNotes,
 
-        healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined,
-        vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined,
+          healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined,
+          vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined,
           // Connect relations
           Department: { connect: { id: departmentId } },
           Branch: { connect: { id: branchId } },
@@ -397,16 +398,16 @@ export const updateEmployee = async (req: Request, res: Response) => {
 
         smoking: data.smoking,
         alcohol: data.alcohol,
-        
-        visionType:              data.visionType,          // e.g., 'NEAR', 'DISTANT', 'COLOR_BLIND'
-        usesGlasses:             data.usesGlasses,
-        visionRemarks:           data.visionRemarks,
-        hasDisability:          data.hasDisability,
-        disabilityType:          data.disabilityType,        // e.g., 'PHYSICAL', 'HEARING', 'MENTAL', etc.
-        disabilityDescription:   data.disabilityDescription,
-        disabilityProofFile:     data.disabilityProofFile,   // original file name
+
+        visionType: data.visionType,          // e.g., 'NEAR', 'DISTANT', 'COLOR_BLIND'
+        usesGlasses: data.usesGlasses,
+        visionRemarks: data.visionRemarks,
+        hasDisability: data.hasDisability,
+        disabilityType: data.disabilityType,        // e.g., 'PHYSICAL', 'HEARING', 'MENTAL', etc.
+        disabilityDescription: data.disabilityDescription,
+        disabilityProofFile: data.disabilityProofFile,   // original file name
         disabilityProofFileName: data.disabilityProofFileName, // sanitized file name on server
-        disabilityProofUrl:      data.disabilityProofUrl,  
+        disabilityProofUrl: data.disabilityProofUrl,
 
         preferredHospital: data.preferredHospital,
         primaryPhysician: data.primaryPhysician,
@@ -1053,53 +1054,53 @@ export const uploadVaccineProof = async (req: Request, res: Response) => {
       if (err) {
         return res.status(500).json({ error: err.message });
       }
-    
+
       console.log("FILES:", files);
-    
+
       // Dynamically pick first key
       const fileKey = Object.keys(files)[0];
       if (!fileKey) {
         return res.status(400).json({ error: "No file uploaded" });
       }
-    
+
       const uploaded = files[fileKey];
       if (!uploaded) {
         return res.status(400).json({ error: "File not found in request" });
       }
-    
+
       const file = Array.isArray(uploaded) ? uploaded[0] : uploaded;
       if (!file) {
         return res.status(400).json({ error: "Invalid file upload" });
       }
-    
+
       // Now TS knows "file" is defined ✅
       const tempFilePath = file.filepath;
       const fileName = sanitizeFileName(
         file.originalFilename || `vaccine_${employeeId}_${Date.now()}.pdf`
       );
-    
+
       const remoteFilePath = `/public_html/vaccine-proofs/${fileName}`;
       await uploadToFTP(tempFilePath, remoteFilePath);
       const fileUrl = `https://hrproindia.in/vaccine-proofs/${fileName}`;
-    
+
       fs.unlinkSync(tempFilePath);
-    
+
       // update vaccinations JSON
       const employee = await prisma.employee.findUnique({ where: { id: Number(employeeId) } });
       let vaccinations = employee?.vaccinations ? JSON.parse(employee.vaccinations as string) : [];
       if (vaccinations[vaccineIndex]) {
         vaccinations[vaccineIndex].proofUrl = fileUrl;
       }
-    
+
       const updated = await prisma.employee.update({
         where: { id: Number(employeeId) },
         data: { vaccinations: JSON.stringify(vaccinations) },
       });
       console.log(updated)
-    
+
       return res.status(200).json({ fileUrl, employee: updated });
     });
-    
+
   } catch (error) {
     console.error("Upload Vaccine Proof Error:", error);
     return res.status(500).json({ error: "Failed to upload vaccine proof" });
@@ -1145,5 +1146,64 @@ export const getEmployeesByDepartments = async (req: Request, res: Response) => 
   } catch (error) {
     console.error("❌ Failed to fetch employees by departments:", error);
     res.status(500).json({ error: "Failed to fetch employees by departments" });
+  }
+};
+export const sendHealthCheckReminders = async () => {
+  const today = new Date();
+  const currentYear = today.getFullYear();
+
+  const employees = await prisma.employee.findMany({
+    where: {
+      preEmploymentCheckDate: { not: null },
+      OR: [
+        { healthCheckReminderYear: null },
+        { healthCheckReminderYear: { not: currentYear } }
+      ]
+    }
+  });
+
+  for (const emp of employees) {
+    const nextCheckDate = new Date(emp.preEmploymentCheckDate!);
+    nextCheckDate.setFullYear(nextCheckDate.getFullYear() + 1);
+
+    // Not yet time → skip
+    if (today < nextCheckDate) continue;
+
+    // ✔ Ready to send reminder
+    const message = `
+Hello ${emp.firstName} - ${emp.employeeCode},
+
+Your annual Health Check is due.
+
+Please schedule your medical check-up at the earliest.
+
+- HR Team
+`;
+
+    // Send WhatsApp
+    // try {
+    //   const formattedPhone = formatPhoneNumber(emp.phone);
+    //   await sendWhatsAppTemplate({
+    //     to: formattedPhone,
+    //     templateId: HEALTH_CHECK_REMINDER_TEMPLATE_ID,
+    //     placeholders: [emp.firstName]
+    //   });
+    // } catch (err) {
+    //   console.error("WhatsApp sending failed:", err);
+    // }
+
+    // Create notification
+    await createNotification(emp.id, message);
+
+    // Update the year reminder sent
+    await prisma.employee.update({
+      where: { id: emp.id },
+      data: {
+        healthCheckReminderYear: currentYear,
+        healthCheckReminderSent: true
+      }
+    });
+
+    console.log(`Health check reminder sent to ${emp.firstName}`);
   }
 };

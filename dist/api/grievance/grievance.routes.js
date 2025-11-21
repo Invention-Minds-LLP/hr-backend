@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const grievance_controller_1 = require("./grievance.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const router = (0, express_1.Router)();
+router.post("/", authMiddleware_1.authenticateToken, grievance_controller_1.createGrievance);
+router.get("/", authMiddleware_1.authenticateToken, grievance_controller_1.listGrievances);
+router.post("/:id/comment", authMiddleware_1.authenticateToken, grievance_controller_1.addGrievanceComment);
+router.patch("/:id/status", authMiddleware_1.authenticateToken, grievance_controller_1.updateGrievanceStatus);
+exports.default = router;

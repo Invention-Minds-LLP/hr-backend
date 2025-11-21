@@ -33,11 +33,12 @@ const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = (0, express_1.Router)();
 const upload = (0, multer_1.default)({ dest: 'uploads/' });
 // Create an announcement
-router.post('/', upload.array('attachments', 10), ann.createAnnouncement);
+router.post('/', upload.array('attachments', 10), authMiddleware_1.authenticateToken, ann.createAnnouncement);
 // Acknowledge the latest/live announcement (or pass :id explicitly)
-router.post('/:id/ack', ann.ackAnnouncement);
+router.post('/:id/ack', authMiddleware_1.authenticateToken, ann.ackAnnouncement);
 // List live + ack stats (rate, counts)
-router.get('/live', ann.listLiveAnnouncementsWithStats);
+router.get('/live', authMiddleware_1.authenticateToken, ann.listLiveAnnouncementsWithStats);
 // List all announcements (employee)
 router.get('/live-employee', authMiddleware_1.authenticateToken, ann.listLiveForEmployee);
+router.get('/live/all', authMiddleware_1.authenticateToken, ann.listAllLiveForEmployee);
 exports.default = router;

@@ -2,10 +2,11 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const role_controller_1 = require("./role.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = (0, express_1.Router)();
-router.post("/", role_controller_1.createRole);
-router.get("/", role_controller_1.getRoles);
-router.get("/:id", role_controller_1.getRoleById);
-router.put("/:id", role_controller_1.updateRole);
-router.delete("/:id", role_controller_1.deleteRole);
+router.post("/", authMiddleware_1.authenticateToken, role_controller_1.createRole);
+router.get("/", authMiddleware_1.authenticateToken, role_controller_1.getRoles);
+router.get("/:id", authMiddleware_1.authenticateToken, role_controller_1.getRoleById);
+router.put("/:id", authMiddleware_1.authenticateToken, role_controller_1.updateRole);
+router.delete("/:id", authMiddleware_1.authenticateToken, role_controller_1.deleteRole);
 exports.default = router;

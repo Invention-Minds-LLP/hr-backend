@@ -5,10 +5,10 @@
 
 */
 -- AlterTable
-ALTER TABLE `attendance` ADD COLUMN `reason` VARCHAR(191) NULL;
+ALTER TABLE `Attendance` ADD COLUMN `reason` VARCHAR(191) NULL;
 
 -- AlterTable
-ALTER TABLE `document` ADD COLUMN `category` VARCHAR(191) NOT NULL,
+ALTER TABLE `Document` ADD COLUMN `category` VARCHAR(191) NOT NULL,
     ADD COLUMN `issueDate` DATETIME(3) NULL;
 
 -- CreateTable

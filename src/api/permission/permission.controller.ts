@@ -3,6 +3,7 @@ import { PrismaClient, PermissionStatus } from "@prisma/client";
 const prisma = new PrismaClient();
 import { sendWhatsAppTemplate } from "../leave/leave.controller";
 import { createNotification } from "../notifications/notifications.controller";
+import { BalanceCategory } from "@prisma/client";
 
 const PERMISSION_APPLY_TEMPLATE_ID = '888273';
 const PERMISSION_STATUS_TEMPLATE_ID = '909821';
@@ -29,6 +30,34 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
 
     if (!employeeId || !permissionType || !timing || !day || !reason) {
       return res.status(400).json({ error: "All fields are required" });
+    }
+
+    const year = new Date(day).getFullYear();
+
+    // Each permission counts as 1 unit
+    const unitsRequested = 1;
+
+    // Fetch balance
+    const balance = await prisma.employeeLeaveBalance.findFirst({
+      where: {
+        employeeId,
+        category: "PERMISSION",
+        permissionType,
+        year
+      }
+    });
+    
+
+    if (!balance) {
+      return res.status(400).json({ error: "Permission balance not configured." });
+    }
+
+    const remaining = balance.totalAllowed - balance.used;
+
+    if (remaining < unitsRequested) {
+      return res.status(400).json({
+        error: `You have only ${remaining} permission(s) remaining for ${permissionType}`
+      });
     }
 
     const request = await prisma.permissionRequest.create({
@@ -242,9 +271,51 @@ export const updatePermissionStatus = async (req: Request, res: Response) => {
       data.hrDecidedAt = new Date();
 
       if (status === "APPROVED") {
+        
         data.status = "APPROVED";
         data.approvedBy = userId;
         data.approvedDate = new Date();
+        const year = perm.day.getFullYear();
+        const units = 1; // each permission = 1 unit
+
+        const balanceKey = {
+          employeeId: perm.employeeId,
+          category: BalanceCategory.PERMISSION,   // ✅ FIXED
+          leaveTypeId: null,
+          permissionType: perm.permissionType,
+          year
+        };
+        
+
+        // Fetch balance
+        const balance = await prisma.employeeLeaveBalance.findFirst({
+          where: balanceKey
+        });
+        
+
+        if (!balance) {
+          return res.status(400).json({
+            error: `Permission balance not configured for ${perm.permissionType} (${year})`
+          });
+        }
+
+        if (balance.used + units > balance.totalAllowed) {
+          return res.status(400).json({
+            error: `Insufficient permission balance. Only ${
+              balance.totalAllowed - balance.used
+            } remaining`
+          });
+        }
+
+        // Deduct balance
+        await prisma.employeeLeaveBalance.updateMany({
+          where: balanceKey,
+          data: {
+            used: { increment: units }
+          }
+        });
+        
+
       } else {
         data.status = "REJECTED";
         data.declinedBy = userId;
@@ -297,5 +368,26 @@ export const updatePermissionStatus = async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Error updating permission status:", error);
     res.status(500).json({ error: "Failed to update permission status" });
+  }
+};
+export const getPermissionBalance = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.empId);
+    const year = Number(req.query.year) || new Date().getFullYear();
+
+    const balances = await prisma.employeeLeaveBalance.findMany({
+      where: { employeeId, year, category: "PERMISSION" },
+    });
+
+    res.json(
+      balances.map(b => ({
+        permissionType: b.permissionType,
+        totalAllowed: b.totalAllowed,
+        used: b.used,
+        remaining: b.totalAllowed - b.used
+      }))
+    );
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch permission balance" });
   }
 };

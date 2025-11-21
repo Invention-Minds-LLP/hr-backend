@@ -4,6 +4,7 @@ import { PrismaClient, JobStatus, ApplicationStatus, OfferStatus, JoinOutcome, R
 import formidable, { File as FormidableFile } from "formidable";
 import fs from "fs";
 import { Client } from 'basic-ftp';
+import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
 
@@ -357,33 +358,151 @@ export class RecruitingController {
   // ---------------- Interviews ----------------
 
   /** POST /applications/:id/interviews  { stage, startTime, endTime, panelUserIds?, feedbackDue? } */
-  scheduleInterview = asyncHandler(async (req, res) => {
-    const applicationId = Number(req.params.id);
-    const { stage, startTime, endTime, panelUserIds, feedbackDue } = req.body || {};
-    if (!stage || !startTime || !endTime) return bad(res, 'stage, startTime, endTime are required');
+  // scheduleInterview = asyncHandler(async (req, res) => {
+  //   const applicationId = Number(req.params.id);
+  //   const { stage, startTime, endTime, panelUserIds, feedbackDue } = req.body || {};
+  //   if (!stage || !startTime || !endTime) return bad(res, 'stage, startTime, endTime are required');
 
-    const app = await prisma.application.findUnique({ where: { id: applicationId } });
-    if (!app) return bad(res, 'Application not found', 404);
+  //   const app = await prisma.application.findUnique({ where: { id: applicationId } });
+  //   if (!app) return bad(res, 'Application not found', 404);
 
-    const itv = await prisma.$transaction(async (tx) => {
-      // move status if needed
-      if (app.status === ApplicationStatus.SHORTLISTED || app.status === ApplicationStatus.SCREENING) {
-        await tx.application.update({ where: { id: applicationId }, data: { status: ApplicationStatus.INTERVIEW_SCHEDULED } });
-      }
-      return tx.interview.create({
-        data: {
-          applicationId,
-          stage,
-          startTime: new Date(startTime),
-          endTime: new Date(endTime),
-          panelUserIds,
-          feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
+  //   const itv = await prisma.$transaction(async (tx) => {
+  //     // move status if needed
+  //     if (app.status === ApplicationStatus.SHORTLISTED || app.status === ApplicationStatus.SCREENING) {
+  //       await tx.application.update({ where: { id: applicationId }, data: { status: ApplicationStatus.INTERVIEW_SCHEDULED } });
+  //     }
+  //     return tx.interview.create({
+  //       data: {
+  //         applicationId,
+  //         stage,
+  //         startTime: new Date(startTime),
+  //         endTime: new Date(endTime),
+  //         panelUserIds,
+  //         feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
+  //       },
+  //     });
+  //   });
+
+  //   res.status(201).json(itv);
+  // });
+  /** POST /applications/:id/interviews  
+ * body: { stage, startTime, endTime, panelUserIds: number[], feedbackDue? }
+ */
+scheduleInterview = asyncHandler(async (req, res) => {
+  const applicationId = Number(req.params.id);
+  const { stage, startTime, endTime, panelUserIds, feedbackDue } = req.body || {};
+
+  if (!stage || !startTime || !endTime) return bad(res, 'stage, startTime, endTime are required');
+
+  const app = await prisma.application.findUnique({ where: { id: applicationId } });
+  if (!app) return bad(res, 'Application not found', 404);
+
+  // ✅ Step 1: Parse panelUserIds safely
+  const panels: number[] = Array.isArray(panelUserIds)
+    ? panelUserIds.map(Number)
+    : typeof panelUserIds === 'string'
+      ? panelUserIds.split(',').map(s => Number(s.trim()))
+      : [];
+
+  if (!panels.length) return bad(res, 'At least one panel member is required');
+
+  const start = new Date(startTime);
+  const end = new Date(endTime);
+
+  // ✅ Step 2: Check for overlapping interviews
+  const overlaps = await prisma.interview.findMany({
+    where: {
+      AND: [
+        {
+          OR: panels.map(pid => ({
+            panelUserIds: { contains: pid.toString() },
+          })),
         },
-      });
+        {
+          startTime: { lt: end },
+          endTime: { gt: start },
+        },
+      ],
+    },
+    include: {
+      application: {
+        include: {
+          candidate: { select: { name: true } },
+          job: { select: { title: true } },
+        },
+      },
+    },
+  });
+
+  // ✅ Step 3: If overlaps found → find which employee(s)
+  if (overlaps.length > 0) {
+    const allPanelIdsInConflicts = new Set<number>();
+
+    overlaps.forEach(o => {
+      (o.panelUserIds || '')
+        .split(',')
+        .map(id => Number(id.trim()))
+        .filter(id => panels.includes(id))
+        .forEach(id => allPanelIdsInConflicts.add(id));
     });
 
-    res.status(201).json(itv);
+    // Get employee names for the conflicting panel members
+    const conflictingEmployees = await prisma.employee.findMany({
+      where: { id: { in: Array.from(allPanelIdsInConflicts) } },
+      select: { id: true, firstName: true, lastName: true, employeeCode: true },
+    });
+
+    // Build detailed message list
+    const conflicts = overlaps.map(o => {
+      const overlappingPanelIds = (o.panelUserIds || '')
+        .split(',')
+        .map(id => Number(id.trim()))
+        .filter(id => panels.includes(id));
+
+      const names = conflictingEmployees
+        .filter(e => overlappingPanelIds.includes(e.id))
+        .map(e => `${e.firstName} ${e.lastName}${e.employeeCode ? ` (${e.employeeCode})` : ''}`)
+        .join(', ');
+
+      const startT = new Date(o.startTime).toLocaleString();
+      const endT = new Date(o.endTime).toLocaleString();
+      return `🕒 ${names} already scheduled for "${o.application.job.title}" with candidate "${o.application.candidate.name}" from ${startT} to ${endT}`;
+    });
+
+    return res.status(409).json({
+      warning: true,
+      message: 'Some panel members already have interviews scheduled during this time.',
+      conflicts,
+    });
+  }
+
+  // ✅ Step 4: No conflicts → create the interview
+  const itv = await prisma.$transaction(async (tx) => {
+    if (
+      app.status === ApplicationStatus.SHORTLISTED ||
+      app.status === ApplicationStatus.SCREENING
+    ) {
+      await tx.application.update({
+        where: { id: applicationId },
+        data: { status: ApplicationStatus.INTERVIEW_SCHEDULED },
+      });
+    }
+
+    return tx.interview.create({
+      data: {
+        applicationId,
+        stage,
+        startTime: start,
+        endTime: end,
+        panelUserIds: panels.join(','), // store CSV
+        feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
+      },
+    });
   });
+
+  res.status(201).json(itv);
+});
+
 
   /** PATCH /interviews/:id/feedback  { result, feedbackUrl?, feedbackAt? } */
   recordInterviewFeedback = asyncHandler(async (req, res) => {
@@ -704,6 +823,16 @@ export class RecruitingController {
       include: { candidate: true },
     });
     if (!app) return res.status(404).json({ error: 'Application not found' });
+
+    if (!app.candidate.passwordHash) {
+      const plainPassword = app.candidate.email.toLowerCase(); // email as password
+      const hash = await bcrypt.hash(plainPassword, 10);
+    
+      await prisma.candidate.update({
+        where: { id: app.candidateId },
+        data: { passwordHash: hash }
+      });
+    }
 
     const assigned = await prisma.candidateAssignedTest.create({
       data: {

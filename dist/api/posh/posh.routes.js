@@ -1,0 +1,12 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const posh_controller_1 = require("./posh.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const router = (0, express_1.Router)();
+router.post("/", authMiddleware_1.authenticateToken, posh_controller_1.createPoshCase);
+router.get("/", authMiddleware_1.authenticateToken, posh_controller_1.listPoshCases);
+router.post("/:id/hearing", authMiddleware_1.authenticateToken, posh_controller_1.addHearing);
+router.get("/:id/hearing", authMiddleware_1.authenticateToken, posh_controller_1.getHearings);
+router.patch("/:id/status", authMiddleware_1.authenticateToken, posh_controller_1.updatePoshStatus);
+exports.default = router;

@@ -2,10 +2,11 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const branch_controller_1 = require("./branch.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = (0, express_1.Router)();
-router.post("/", branch_controller_1.createBranch);
-router.get("/", branch_controller_1.getBranches);
-router.get("/:id", branch_controller_1.getBranchById);
-router.put("/:id", branch_controller_1.updateBranch);
-router.delete("/:id", branch_controller_1.deleteBranch);
+router.post("/", authMiddleware_1.authenticateToken, branch_controller_1.createBranch);
+router.get("/", authMiddleware_1.authenticateToken, branch_controller_1.getBranches);
+router.get("/:id", authMiddleware_1.authenticateToken, branch_controller_1.getBranchById);
+router.put("/:id", authMiddleware_1.authenticateToken, branch_controller_1.updateBranch);
+router.delete("/:id", authMiddleware_1.authenticateToken, branch_controller_1.deleteBranch);
 exports.default = router;

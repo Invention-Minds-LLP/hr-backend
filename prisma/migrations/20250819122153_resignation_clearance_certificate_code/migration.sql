@@ -5,10 +5,10 @@
 
 */
 -- DropIndex
-DROP INDEX `ResignationDocument_clearanceCertificateUrl_key` ON `resignationdocument`;
+DROP INDEX `ResignationDocument_clearanceCertificateUrl_key` ON `ResignationDocument`;
 
 -- AlterTable
-ALTER TABLE `resignationdocument` ADD COLUMN `clearanceCertificateCode` VARCHAR(191) NULL;
+ALTER TABLE `ResignationDocument` ADD COLUMN `clearanceCertificateCode` VARCHAR(191) NULL;
 
 -- CreateIndex
 CREATE UNIQUE INDEX `ResignationDocument_clearanceCertificateCode_key` ON `ResignationDocument`(`clearanceCertificateCode`);

@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE `assignedtest` ADD COLUMN `trainingAssignmentId` INTEGER NULL;
+ALTER TABLE `AssignedTest` ADD COLUMN `trainingAssignmentId` INTEGER NULL;
 
 -- CreateTable
 CREATE TABLE `Training` (

@@ -15,6 +15,33 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "All fields are required" });
     }
 
+    const start = new Date(startDate);
+    const leaveYear = start.getFullYear();
+    const daysRequested = daysInclusive(start, new Date(endDate));
+    // Fetch balance for that year & leave type
+    const balance = await prisma.employeeLeaveBalance.findFirst({
+      where: {
+        employeeId: employeeId,
+        leaveTypeId: leaveTypeId,
+        year: leaveYear,
+      }
+    });
+    
+
+    if (!balance) {
+      return res.status(400).json({
+        error: `Leave balance not configured for ${leaveYear}`
+      });
+    }
+
+    const remaining = balance.totalAllowed - balance.used;
+
+    if (daysRequested > remaining) {
+      return res.status(400).json({
+        error: `Insufficient balance. You have only ${remaining} days available for this leave type.`
+      });
+    }
+
     const leaveRequest = await prisma.leaveRequest.create({
       data: {
         employeeId,
@@ -176,6 +203,20 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
         data.status = LeaveStatus.APPROVED;
         data.approvedBy = userId;
         data.approvedDate = new Date();
+        const leaveYear = leave.startDate.getFullYear();
+        const days = daysInclusive(leave.startDate, leave.endDate);
+    
+        await prisma.employeeLeaveBalance.updateMany({
+          where: {
+            employeeId: leave.employeeId,
+            leaveTypeId: leave.leaveTypeId,
+            year: leaveYear
+          },
+          data: {
+            used: { increment: days }
+          }
+        });
+        
       } else {
         data.status = LeaveStatus.REJECTED;
         data.declinedBy = userId;
@@ -471,3 +512,40 @@ export async function sendWhatsAppTemplate({
   }
   return resp.data;
 }
+export const getBlockedDates = async (req: Request, res: Response) => {
+  const employeeId = Number(req.params.employeeId);
+
+  const existing = await prisma.leaveRequest.findMany({
+    where: {
+      employeeId,
+      status: { in: ["APPROVED", "PENDING"] }
+    },
+    select: { startDate: true, endDate: true }
+  });
+
+  return res.json(existing);
+};
+export const getLeaveBalance = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.employeeId);
+    const year = Number(req.query.year) || new Date().getFullYear();
+
+    const balances = await prisma.employeeLeaveBalance.findMany({
+      where: { employeeId, year, category: 'LEAVE' },
+      include: { leaveType: true }
+    });
+
+    res.json(
+      balances.map(b => ({
+        leaveTypeId: b.leaveTypeId,
+        leaveType: b.leaveType?.name ?? null,
+        totalAllowed: b.totalAllowed,
+        used: b.used,
+        remaining: b.totalAllowed - b.used,
+        year: b.year
+      }))
+    );
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch leave balance" });
+  }
+};

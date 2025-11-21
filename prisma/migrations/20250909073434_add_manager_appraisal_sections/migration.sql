@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE `managerappraisal` ADD COLUMN `attendanceComments` VARCHAR(191) NULL,
+ALTER TABLE `ManagerAppraisal` ADD COLUMN `attendanceComments` VARCHAR(191) NULL,
     ADD COLUMN `attendanceRating` DOUBLE NULL,
     ADD COLUMN `guestServiceComments` VARCHAR(191) NULL,
     ADD COLUMN `guestServiceRating` DOUBLE NULL,

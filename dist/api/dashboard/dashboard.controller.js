@@ -9,10 +9,11 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DashboardController = void 0;
+exports.assignDelegate = exports.escalateClearances = exports.reassignReviewer = exports.nudgePanel = exports.createRenewalTickets = exports.notifyExpiringDocs = exports.extendProbation = exports.requestProbationFeedback = exports.bulkRejectApprovals = exports.bulkApproveApprovals = exports.markUnmarkedException = exports.messageUnmarked = exports.DashboardController = void 0;
 exports.listPendingClearances = listPendingClearances;
 const client_1 = require("@prisma/client");
 const date_fns_1 = require("date-fns");
+const date_fns_2 = require("date-fns");
 const prisma = new client_1.PrismaClient();
 const IST = 'Asia/Kolkata';
 function parseAud(audience) {
@@ -81,6 +82,7 @@ function fmtDate(d) {
 function fmtTime(d) {
     return d ? d.toLocaleTimeString('en-IN', { timeZone: IST, hour: '2-digit', minute: '2-digit' }) : '—';
 }
+// type List = { title: string; cols: string[]; rows: ListRow[]; actions?: string[] };
 class DashboardController {
     constructor() {
         // ========== PUBLIC HANDLERS ==========
@@ -116,7 +118,7 @@ class DashboardController {
             });
             const employeeIds = employees.map((e) => e.id);
             // ---- Today counts
-            const [leavesToday, wfhToday, permissionsToday] = yield Promise.all([
+            const [leavesToday, interviewsToday, permissionsToday] = yield Promise.all([
                 prisma.leaveRequest.count({
                     where: {
                         employeeId: { in: employeeIds },
@@ -127,14 +129,9 @@ class DashboardController {
                         ],
                     },
                 }),
-                prisma.wFHRequest.count({
+                prisma.interview.count({
                     where: {
-                        employeeId: { in: employeeIds },
-                        status: 'APPROVED',
-                        OR: [
-                            { startDate: { lte: todayEnd }, endDate: { gte: todayStart } },
-                            { startDate: { lte: todayEnd }, endDate: todayStart },
-                        ],
+                        startTime: { gte: todayStart, lte: todayEnd },
                     },
                 }),
                 prisma.permissionRequest.count({
@@ -423,8 +420,9 @@ class DashboardController {
                         announcementStats.length;
             }
             // ---- Attention widgets
-            const [unmarkedCount, pendingApprovals, docsExpiring, offersAwaiting, overdueClearances] = yield Promise.all([
-                this.countUnmarkedAttendance(employeeIds, todayStart, todayEnd),
+            const [attendanceSplit, pendingApprovals, docsExpiring, offersAwaiting, overdueClearances] = yield Promise.all([
+                // this.countUnmarkedAttendance(employeeIds, todayStart, todayEnd),
+                this.getLateAttendanceSplit(employeeIds, todayStart, todayEnd),
                 this.countPendingApprovals(employeeIds, todayStart, todayEnd),
                 prisma.document.count({
                     where: {
@@ -484,6 +482,40 @@ class DashboardController {
                 ? Math.min(100, Math.round((leavesYTD / (policy.leaveEntitlement * Math.max(1, headcount))) * 100))
                 : 0;
             const shiftCoveragePct = headcount ? Math.round(((shiftToday + fixedShiftCount) / headcount) * 100) : 0;
+            // -------------------------------
+            // 📊 PeopleOps — Recruitment & Training Focused Metrics
+            // -------------------------------
+            const monthlyStart = (0, date_fns_2.startOfMonth)(new Date());
+            // 1️⃣ Jobs created this month
+            const jobsCreatedThisMonth = yield prisma.job.count({
+                where: { createdAt: { gte: monthlyStart, lte: todayEnd } },
+            });
+            // 2️⃣ Applications received this month
+            const applicantsThisMonth = yield prisma.application.count({
+                where: { createdAt: { gte: monthlyStart, lte: todayEnd } },
+            });
+            // 3️⃣ Employees who have pending training (not completed)
+            const [clinicalPending, nonClinicalPending] = yield Promise.all([
+                prisma.employee.count({
+                    where: {
+                        employeeType: 'CLINICAL',
+                        AssignedTest: { some: { status: { notIn: ['Completed', 'COMPLETED', 'Done'] } } },
+                    },
+                }),
+                prisma.employee.count({
+                    where: {
+                        employeeType: 'NONCLINICAL',
+                        AssignedTest: { some: { status: { notIn: ['Completed', 'COMPLETED', 'Done'] } } },
+                    },
+                }),
+            ]);
+            // 4️⃣ Employees in notice period this month
+            const noticePeriodThisMonth = yield prisma.resignationRequest.count({
+                where: {
+                    status: { in: ['SUBMITTED', 'UNDER_REVIEW', 'ON_HOLD', 'APPROVED'] },
+                    proposedLastWorkingDay: { gte: monthlyStart, lte: todayEnd },
+                },
+            });
             // ---- Learning & Performance
             const [assignedTestsToday, overdueTests, appSubmitted, waitingMgr, last7Attempts] = yield Promise.all([
                 prisma.assignedTest.count({ where: { assignedAt: { gte: todayStart, lte: todayEnd } } }),
@@ -497,6 +529,52 @@ class DashboardController {
             const avgScore7d = last7Attempts.length
                 ? Math.round(last7Attempts.reduce((s, a) => s + (a.score || 0), 0) / last7Attempts.length)
                 : 0;
+            const monthStart = (0, date_fns_2.startOfMonth)(now);
+            const monthEnd = (0, date_fns_2.endOfMonth)(now);
+            // ---- Learning & Performance (custom business metrics)
+            const employeesForAppraisal = yield prisma.employee.findMany({
+                where: { employmentStatus: 'ACTIVE', id: { in: employeeIds } },
+                select: { id: true, dateOfJoining: true },
+            });
+            const eligibleThisMonth = employeesForAppraisal.filter(emp => {
+                const monthsWorked = (now.getFullYear() - emp.dateOfJoining.getFullYear()) * 12 +
+                    (now.getMonth() - emp.dateOfJoining.getMonth());
+                return monthsWorked > 0 && monthsWorked % 3 === 0; // every 3 months cycle
+            });
+            const eligibleIds = eligibleThisMonth.map(e => e.id);
+            // Appraisals in this month
+            const [appraisalPendingMgr, appraisalSubmitted, resignationNoExit, missingDocs] = yield Promise.all([
+                prisma.appraisalForm.count({
+                    where: {
+                        employeeId: { in: eligibleIds },
+                        status: { in: ['Draft', 'Pending Manager Review'] },
+                        updatedAt: { gte: (0, date_fns_2.startOfMonth)(now), lte: (0, date_fns_2.endOfMonth)(now) },
+                    },
+                }),
+                prisma.appraisalForm.count({
+                    where: {
+                        employeeId: { in: eligibleIds },
+                        status: { in: ['Submitted', 'Reviewed'] },
+                        updatedAt: { gte: (0, date_fns_2.startOfMonth)(now), lte: (0, date_fns_2.endOfMonth)(now) },
+                    },
+                }),
+                prisma.exitInterview.count({
+                    where: {
+                        completedAt: null
+                    },
+                }),
+                (() => __awaiter(this, void 0, void 0, function* () {
+                    const allEmp = yield prisma.employee.findMany({
+                        where: { id: { in: employeeIds } },
+                        include: { documents: true },
+                    });
+                    const mandatoryDocs = ['AADHAAR', 'PAN', 'BANK'];
+                    return allEmp.filter(emp => {
+                        const docTitles = emp.documents.map(d => { var _a; return (_a = d.title) === null || _a === void 0 ? void 0 : _a.toUpperCase(); });
+                        return mandatoryDocs.some(req => !docTitles.includes(req));
+                    }).length;
+                }))(),
+            ]);
             // ---- Security & Access
             const [bagSuspicious7d, failedLogins24h, unreadNotifications] = yield Promise.all([
                 prisma.bagCheck.count({ where: { date: { gte: addDays(todayStart, -7) }, result: 'SUSPICIOUS' } }),
@@ -506,19 +584,21 @@ class DashboardController {
             // ---- Drilldown lists (for modals)
             const lists = yield this.getAllLists(todayStart, todayEnd);
             const attention = [
-                { label: 'Unmarked attendance (by 11:00)', count: unmarkedCount, severity: 'danger', modal: 'unmarked' },
-                { label: 'Pending approvals (Leave/WFH/Perm)', count: pendingApprovals, severity: 'warn', modal: 'approvals' },
-                { label: 'Probation ending (7 days)', count: probationSoon, severity: 'warn', modal: 'probation' },
-                { label: 'Contract expiring (30 days)', count: docsExpiring, severity: 'warn', modal: 'docs' },
-                { label: 'Candidates awaiting  (7d)', count: offersAwaiting, severity: 'warn', modal: 'offersPendingSignature' },
-                { label: 'Exit clearances overdue', count: overdueClearances, severity: 'danger', modal: 'clearances' },
+                // { label: 'Attendance not marked (by 11:00)', count: unmarkedCount, severity: 'danger', modal: 'unmarked' },
+                { label: 'Clinical staff late (>15min)', count: attendanceSplit.clinicalNotCheckedIn, severity: attendanceSplit.clinicalNotCheckedIn ? 'warn' : 'good', modal: 'clinicalLate' },
+                { label: 'Non-clinical staff late (>15min)', count: attendanceSplit.nonClinicalNotCheckedIn, severity: attendanceSplit.nonClinicalNotCheckedIn ? 'warn' : 'good', modal: 'nonClinicalLate' },
+                { label: 'Pending leave/permission', count: pendingApprovals, severity: 'warn', modal: 'approvals' },
+                { label: 'Probation ending soon (7 days)', count: probationSoon, severity: 'warn', modal: 'probation' },
+                { label: 'Contracts expiring soon (30 days)', count: docsExpiring, severity: 'warn', modal: 'docs' },
+                { label: 'Applicants waiting in pipeline (7 days)', count: offersAwaiting, severity: 'warn', modal: 'offersPendingSignature' },
+                { label: 'Overdue exit clearances', count: overdueClearances, severity: 'danger', modal: 'clearances' },
             ];
             // now add OT pending
             const otPending = yield prisma.overtimeApproval.count({
                 where: { status: 'PENDING', date: yesterdayStart }
             });
             attention.push({
-                label: 'OT pending approval (yesterday)',
+                label: 'Overtime approvals pending (yesterday)',
                 count: otPending,
                 severity: otPending ? 'warn' : 'good',
                 modal: 'otPending',
@@ -526,33 +606,48 @@ class DashboardController {
             res.json({
                 today: {
                     leaves: leavesToday,
-                    wfh: wfhToday,
                     permissions: permissionsToday,
                     late,
                     otYesterday,
                     newJoiners,
                     birthdays,
                     anniversaries,
+                    interviewsToday: interviewsToday,
                     announcementsAck: Math.round(ackRate * 100) / 100,
                 },
                 announcements: announcementStats,
                 latestAnnouncement: announcementStats[0] || null,
                 attention,
                 pipeline,
+                // peopleOps: [
+                //     ['Active employees', String(headcount)],
+                //     ['Staff change (this month)', (netMovement >= 0 ? '▲ +' : '▼ ') + netMovement, netMovement >= 0 ? 'good' : 'danger'],
+                //     ['Active interns', String(internsActive)],
+                //     ['Training completion rate', `${trainCompliance}%`, trainCompliance >= 85 ? 'good' : trainCompliance >= 70 ? 'warn' : 'danger'],
+                //     ['Leave used (%)', `${leavePct}% used`],
+                //     ['Shift coverage today', `${shiftCoveragePct}%`, shiftCoveragePct >= 90 ? 'good' : shiftCoveragePct >= 75 ? 'warn' : 'danger'],
+                // ],
                 peopleOps: [
-                    ['Headcount (Active)', String(headcount)],
-                    ['Net movement (MTD)', (netMovement >= 0 ? '▲ +' : '▼ ') + netMovement, netMovement >= 0 ? 'good' : 'danger'],
-                    ['Interns active', String(internsActive)],
-                    ['Training compliance', `${trainCompliance}%`, trainCompliance >= 85 ? 'good' : trainCompliance >= 70 ? 'warn' : 'danger'],
-                    ['Entitlement usage (leave)', `${leavePct}% used`],
-                    ['Shift coverage (today)', `${shiftCoveragePct}%`, shiftCoveragePct >= 90 ? 'good' : shiftCoveragePct >= 75 ? 'warn' : 'danger'],
+                    ['Active employees size', String(headcount)],
+                    ['New job posts (this month)', String(jobsCreatedThisMonth)],
+                    ['Applications received (this month)', String(applicantsThisMonth)],
+                    ['Clinical staff pending training', String(clinicalPending), clinicalPending ? 'warn' : 'good'],
+                    ['Non-clinical staff pending training', String(nonClinicalPending), nonClinicalPending ? 'warn' : 'good'],
+                    ['Employees in notice period (this month)', String(noticePeriodThisMonth), noticePeriodThisMonth ? 'warn' : 'good'],
                 ],
+                // learnPerf: [
+                //     ['Tests assigned today', String(assignedTestsToday)],
+                //     ['Overdue tests', String(overdueTests), overdueTests ? 'warn' : 'good'],
+                //     ['Submitted appraisals', String(appSubmitted)],
+                //     ['Pending Manager Review', String(waitingMgr), waitingMgr ? 'warn' : 'good'],
+                //     ['Avg test score (last 7 days)', `${avgScore7d}%`, avgScore7d >= 70 ? 'good' : avgScore7d >= 50 ? 'warn' : 'danger'],
+                // ],
                 learnPerf: [
-                    ['Assigned tests today', String(assignedTestsToday)],
-                    ['Overdue tests', String(overdueTests), overdueTests ? 'warn' : 'good'],
-                    ['Appraisals — Submitted', String(appSubmitted)],
-                    ['Waiting on Manager', String(waitingMgr), waitingMgr ? 'warn' : 'good'],
-                    ['Avg score (7d)', `${avgScore7d}%`, avgScore7d >= 70 ? 'good' : avgScore7d >= 50 ? 'warn' : 'danger'],
+                    ['Employees eligible for appraisal (this month)', String(eligibleIds.length)],
+                    ['Pending Manager Review', String(appraisalPendingMgr), appraisalPendingMgr ? 'warn' : 'good'],
+                    ['Submitted appraisals', String(appraisalSubmitted)],
+                    ['Resignation – Exit form not filled', String(resignationNoExit), resignationNoExit ? 'warn' : 'good'],
+                    ['Employees missing mandatory documents', String(missingDocs), missingDocs ? 'warn' : 'good'],
                 ],
                 secAccess: [
                     ['Bag-check suspicious (7d)', String(bagSuspicious7d), bagSuspicious7d ? 'danger' : 'good'],
@@ -627,6 +722,7 @@ class DashboardController {
                     cols: ['Department', 'Audience', 'Acked', 'Pending', 'Ack %'],
                     rows,
                     actions: ['View pending'],
+                    selectable: true
                 });
             }
             // -------------------------------------------
@@ -683,6 +779,43 @@ class DashboardController {
                     cols: ['Employee', 'EMP ID', 'Department', 'Email', 'Phone', 'Manager'],
                     rows,
                     actions: ['Remind all', 'Export'],
+                    selectable: true
+                });
+            }
+            if (key === 'interviewsToday') {
+                const items = yield prisma.interview.findMany({
+                    where: {
+                        startTime: { gte: start, lte: end },
+                    },
+                    orderBy: { startTime: 'asc' },
+                    take: 100,
+                });
+                const appIds = items.map(i => i.applicationId);
+                const applications = yield prisma.application.findMany({
+                    where: { id: { in: appIds } },
+                    include: {
+                        candidate: { select: { name: true, email: true, phone: true } },
+                        job: { select: { title: true } },
+                    },
+                });
+                const appMap = new Map(applications.map(a => [a.id, a]));
+                const rows = items.map(i => {
+                    var _a, _b, _c, _d, _e, _f;
+                    const app = appMap.get(i.applicationId);
+                    return [
+                        (_b = (_a = app === null || app === void 0 ? void 0 : app.candidate) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : '—',
+                        (_d = (_c = app === null || app === void 0 ? void 0 : app.job) === null || _c === void 0 ? void 0 : _c.title) !== null && _d !== void 0 ? _d : '—',
+                        (_e = i.stage) !== null && _e !== void 0 ? _e : '—',
+                        fmtTime(i.startTime),
+                        fmtTime(i.endTime),
+                        (_f = i.result) !== null && _f !== void 0 ? _f : '—',
+                    ];
+                });
+                return res.json({
+                    title: 'Interviews Scheduled Today',
+                    cols: ['Candidate', 'Job Title', 'Stage', 'Start', 'End', 'Result'],
+                    rows,
+                    actions: ['Message', 'Reschedule'],
                 });
             }
             // Leaves (approved & overlapping today)
@@ -955,6 +1088,7 @@ class DashboardController {
                     cols: ['Employee', 'EMP ID', 'Dept', 'Shift Type', 'Sched End', 'Check-out', 'OT Duration'],
                     rows,
                     actions: ['Export'],
+                    selectable: true
                 });
             }
             // New Joiners / Birthdays / Anniversaries (sameMonthDay as in your summary)
@@ -1009,6 +1143,7 @@ class DashboardController {
                     prisma.application.findMany({
                         where,
                         select: {
+                            id: true,
                             status: true,
                             currentStage: true,
                             updatedAt: true,
@@ -1022,19 +1157,23 @@ class DashboardController {
                 ]);
                 const rows = items.map(a => {
                     var _a, _b, _c, _d, _e, _f, _g, _h;
-                    return [
-                        (_b = (_a = a.candidate) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : '—',
-                        (_d = (_c = a.job) === null || _c === void 0 ? void 0 : _c.title) !== null && _d !== void 0 ? _d : '—',
-                        (_e = a.status) !== null && _e !== void 0 ? _e : '—',
-                        (_f = a.currentStage) !== null && _f !== void 0 ? _f : '—',
-                        (_h = (_g = a.updatedAt) === null || _g === void 0 ? void 0 : _g.toLocaleString('en-IN', { timeZone: IST })) !== null && _h !== void 0 ? _h : '—',
-                    ];
+                    return ({
+                        id: a.id, // 👈 unique id
+                        data: [
+                            (_b = (_a = a.candidate) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : '—',
+                            (_d = (_c = a.job) === null || _c === void 0 ? void 0 : _c.title) !== null && _d !== void 0 ? _d : '—',
+                            (_e = a.status) !== null && _e !== void 0 ? _e : '—',
+                            (_f = a.currentStage) !== null && _f !== void 0 ? _f : '—',
+                            (_h = (_g = a.updatedAt) === null || _g === void 0 ? void 0 : _g.toLocaleString('en-IN', { timeZone: IST })) !== null && _h !== void 0 ? _h : '—',
+                        ]
+                    });
                 });
                 return res.json({
                     title: `Pipeline after shortlist (excl. Rejected/No-show/Hired) — ${total}`,
                     cols: ['Candidate', 'Job', 'Status', 'Stage', 'Last update'],
                     rows,
-                    actions: ['Open application', 'Message candidate'],
+                    actions: [],
+                    selectable: true
                 });
             }
             if (key === 'otPending') {
@@ -1225,6 +1364,358 @@ class DashboardController {
             ];
         });
     }
+    // private async getLateAttendanceSplit(employeeIds: number[], start: Date, end: Date) {
+    //     const employees = await prisma.employee.findMany({
+    //         where: { id: { in: employeeIds } },
+    //         select: {
+    //             id: true,
+    //             firstName: true,
+    //             lastName: true,
+    //             employeeCode: true,
+    //             employeeType: true,
+    //             Department: { select: { name: true } },
+    //             EmployeeShiftSetting: {
+    //                 select: {
+    //                     mode: true,
+    //                     fixedShift: { select: { startTime: true, endTime: true } },
+    //                     rotationPattern: {
+    //                         select: {
+    //                             cycleDays: true,
+    //                             items: {
+    //                                 select: {
+    //                                     dayIndex: true,
+    //                                     shift: { select: { startTime: true, endTime: true } },
+    //                                 },
+    //                             },
+    //                         },
+    //                     },
+    //                 },
+    //             },
+    //         },
+    //     });
+    //     const attendance = await prisma.attendance.findMany({
+    //         where: { employeeId: { in: employeeIds }, date: { gte: start, lte: end } },
+    //         select: { employeeId: true, checkIn: true },
+    //     });
+    //     const presentMap = new Map<number, Date>();
+    //     for (const rec of attendance) {
+    //         if (rec.checkIn) presentMap.set(rec.employeeId, rec.checkIn);
+    //     }
+    //     // Approved or pending Leave/WFH/Permission (excused employees)
+    //     const [approvedLeave, approvedWFH, approvedPerm] = await Promise.all([
+    //         prisma.leaveRequest.findMany({
+    //             where: {
+    //                 employeeId: { in: employeeIds },
+    //                 status: { in: ['APPROVED', 'PENDING'] },
+    //                 OR: [
+    //                     { startDate: { lte: end }, endDate: { gte: start } },
+    //                     { startDate: { lte: end }, endDate: start },
+    //                 ],
+    //             },
+    //             select: { employeeId: true },
+    //         }),
+    //         prisma.wFHRequest.findMany({
+    //             where: {
+    //                 employeeId: { in: employeeIds },
+    //                 status: { in: ['APPROVED', 'PENDING'] },
+    //                 OR: [
+    //                     { startDate: { lte: end }, endDate: { gte: start } },
+    //                     { startDate: { lte: end }, endDate: start },
+    //                 ],
+    //             },
+    //             select: { employeeId: true },
+    //         }),
+    //         prisma.permissionRequest.findMany({
+    //             where: {
+    //                 employeeId: { in: employeeIds },
+    //                 status: { in: ['APPROVED', 'PENDING'] },
+    //                 OR: [
+    //                     { day: { gte: start, lte: end } },
+    //                     { startTime: { lte: end }, endTime: { gte: start } },
+    //                 ],
+    //             },
+    //             select: { employeeId: true },
+    //         }),
+    //     ]);
+    //     const excused = new Set<number>([
+    //         ...approvedLeave.map((x) => x.employeeId),
+    //         ...approvedWFH.map((x) => x.employeeId),
+    //         ...approvedPerm.map((x) => x.employeeId),
+    //     ]);
+    //     function combineDateAndTime(baseDate: Date, time: Date): Date {
+    //         const d = new Date(baseDate);
+    //         d.setHours(time.getHours(), time.getMinutes(), 0, 0);
+    //         return d;
+    //     }
+    //     function fmtTime(t: Date) {
+    //         return t.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+    //     }
+    //     const clinicalList: any[] = [];
+    //     const nonClinicalList: any[] = [];
+    //     for (const e of employees) {
+    //         if (excused.has(e.id)) continue;
+    //         const checkIn = presentMap.get(e.id);
+    //         if (!e.EmployeeShiftSetting) continue;
+    //         let shiftStartCandidates: Date[] = [];
+    //         let displayShiftTime = '—';
+    //         console.log(e.firstName, JSON.stringify(e.EmployeeShiftSetting.rotationPattern, null, 2));
+    //         if (e.EmployeeShiftSetting.mode === 'FIXED' && e.EmployeeShiftSetting.fixedShift?.startTime) {
+    //             const shiftTime = combineDateAndTime(start, e.EmployeeShiftSetting.fixedShift.startTime);
+    //             shiftStartCandidates = [shiftTime];
+    //             displayShiftTime = fmtTime(e.EmployeeShiftSetting.fixedShift.startTime);
+    //         } else if (e.EmployeeShiftSetting.mode === 'ROTATIONAL' && e.EmployeeShiftSetting.rotationPattern?.items?.length) {
+    //             const uniq = new Map<number, Date>();
+    //             for (const it of e.EmployeeShiftSetting.rotationPattern.items) {
+    //                 if (it.shift?.startTime)
+    //                     uniq.set(it.dayIndex, combineDateAndTime(start, it.shift.startTime));
+    //             }
+    //             shiftStartCandidates = Array.from(uniq.values());
+    //             // show first shift start time (for display only)
+    //             const first = e.EmployeeShiftSetting.rotationPattern.items[0]?.shift?.startTime;
+    //             if (first) displayShiftTime = fmtTime(first);
+    //         }
+    //         if (shiftStartCandidates.length === 0) continue;
+    //         let lateBy: number | null = null;
+    //         if (checkIn) {
+    //             for (const s of shiftStartCandidates) {
+    //                 const diff = Math.round((checkIn.getTime() - s.getTime()) / 60000);
+    //                 if (diff > 15) {
+    //                     lateBy = lateBy == null ? diff : Math.min(lateBy, diff);
+    //                 }
+    //             }
+    //         } else {
+    //             const now = new Date();
+    //             for (const s of shiftStartCandidates) {
+    //                 const diff = Math.round((now.getTime() - s.getTime()) / 60000);
+    //                 if (diff > 15) {
+    //                     lateBy = lateBy == null ? diff : Math.min(lateBy, diff);
+    //                 }
+    //             }
+    //         }
+    //         if (lateBy != null) {
+    //             const isFixed = e.EmployeeShiftSetting.mode === 'FIXED';
+    //             const row = {
+    //                 name: `${e.firstName} ${e.lastName}`,
+    //                 code: e.employeeCode,
+    //                 dept: e.Department?.name || '-',
+    //                 shift: isFixed ? 'General' : 'Rotational',
+    //                 shiftTime: displayShiftTime,
+    //                 delayMins: lateBy,
+    //             };
+    //             if (e.employeeType === 'CLINICAL') clinicalList.push(row);
+    //             else nonClinicalList.push(row);
+    //         }
+    //     }
+    //     return {
+    //         clinicalLate: clinicalList.length,
+    //         nonClinicalLate: nonClinicalList.length,
+    //         clinicalList,
+    //         nonClinicalList,
+    //     };
+    // }
+    getLateAttendanceSplit(employeeIds, start, end) {
+        return __awaiter(this, void 0, void 0, function* () {
+            var _a, _b, _c, _d, _e, _f, _g;
+            const employees = yield prisma.employee.findMany({
+                where: { id: { in: employeeIds } },
+                select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    employeeCode: true,
+                    employeeType: true,
+                    Department: { select: { name: true } },
+                    EmployeeShiftSetting: {
+                        select: {
+                            mode: true,
+                            fixedShift: { select: { startTime: true, endTime: true } },
+                            rotationPattern: {
+                                select: {
+                                    cycleDays: true,
+                                    items: {
+                                        select: {
+                                            dayIndex: true,
+                                            shift: { select: { startTime: true, endTime: true } },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+            const attendance = yield prisma.attendance.findMany({
+                where: { employeeId: { in: employeeIds }, date: { gte: start, lte: end } },
+                select: { employeeId: true, checkIn: true },
+            });
+            const presentMap = new Map();
+            for (const rec of attendance) {
+                if (rec.checkIn)
+                    presentMap.set(rec.employeeId, new Date(rec.checkIn));
+            }
+            // Approved or pending Leave/WFH/Permission
+            const [approvedLeave, approvedWFH, approvedPerm] = yield Promise.all([
+                prisma.leaveRequest.findMany({
+                    where: {
+                        employeeId: { in: employeeIds },
+                        status: { in: ['APPROVED', 'PENDING'] },
+                        OR: [
+                            { startDate: { lte: end }, endDate: { gte: start } },
+                            { startDate: { lte: end }, endDate: start },
+                        ],
+                    },
+                    select: { employeeId: true },
+                }),
+                prisma.wFHRequest.findMany({
+                    where: {
+                        employeeId: { in: employeeIds },
+                        status: { in: ['APPROVED', 'PENDING'] },
+                        OR: [
+                            { startDate: { lte: end }, endDate: { gte: start } },
+                            { startDate: { lte: end }, endDate: start },
+                        ],
+                    },
+                    select: { employeeId: true },
+                }),
+                prisma.permissionRequest.findMany({
+                    where: {
+                        employeeId: { in: employeeIds },
+                        status: { in: ['APPROVED', 'PENDING'] },
+                        OR: [
+                            { day: { gte: start, lte: end } },
+                            { startTime: { lte: end }, endTime: { gte: start } },
+                        ],
+                    },
+                    select: { employeeId: true },
+                }),
+            ]);
+            const excused = new Set([
+                ...approvedLeave.map((x) => x.employeeId),
+                ...approvedWFH.map((x) => x.employeeId),
+                ...approvedPerm.map((x) => x.employeeId),
+            ]);
+            // helper functions
+            function safeToDate(value) {
+                if (!value)
+                    return null;
+                const d = new Date(value);
+                return isNaN(d.getTime()) ? null : d;
+            }
+            function combineDateAndTime(baseDate, timeValue) {
+                const time = safeToDate(timeValue);
+                if (!time)
+                    return null;
+                const combined = new Date(baseDate);
+                combined.setHours(time.getHours(), time.getMinutes(), 0, 0);
+                return combined;
+            }
+            function fmtTime(t) {
+                const d = safeToDate(t);
+                return d ? d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—';
+            }
+            function getTodayShiftTime(time) {
+                const today = new Date();
+                const shift = new Date(today);
+                shift.setHours(time.getHours(), time.getMinutes(), 0, 0); // keep today's date
+                return shift;
+            }
+            const clinicalList = [];
+            const nonClinicalList = [];
+            const clinicalNotCheckedIn = [];
+            const nonClinicalNotCheckedIn = [];
+            const now = new Date();
+            for (const e of employees) {
+                if (excused.has(e.id))
+                    continue;
+                const checkIn = presentMap.get(e.id);
+                if (!e.EmployeeShiftSetting)
+                    continue;
+                let shiftStartCandidates = [];
+                let displayShiftTime = '—';
+                if (e.EmployeeShiftSetting.mode === 'FIXED' && ((_a = e.EmployeeShiftSetting.fixedShift) === null || _a === void 0 ? void 0 : _a.startTime)) {
+                    const shiftTime = combineDateAndTime(start, e.EmployeeShiftSetting.fixedShift.startTime);
+                    if (shiftTime)
+                        shiftStartCandidates = [shiftTime];
+                    displayShiftTime = fmtTime(e.EmployeeShiftSetting.fixedShift.startTime);
+                }
+                else if (e.EmployeeShiftSetting.mode === 'ROTATIONAL' && ((_c = (_b = e.EmployeeShiftSetting.rotationPattern) === null || _b === void 0 ? void 0 : _b.items) === null || _c === void 0 ? void 0 : _c.length)) {
+                    const uniq = new Map();
+                    for (const it of e.EmployeeShiftSetting.rotationPattern.items) {
+                        const shiftDate = combineDateAndTime(start, (_d = it.shift) === null || _d === void 0 ? void 0 : _d.startTime);
+                        if (shiftDate)
+                            uniq.set(it.dayIndex, shiftDate);
+                    }
+                    shiftStartCandidates = Array.from(uniq.values());
+                    const first = (_f = (_e = e.EmployeeShiftSetting.rotationPattern.items[0]) === null || _e === void 0 ? void 0 : _e.shift) === null || _f === void 0 ? void 0 : _f.startTime;
+                    if (first)
+                        displayShiftTime = fmtTime(first);
+                }
+                if (shiftStartCandidates.length === 0)
+                    continue;
+                let lateBy = null;
+                let notCheckedIn = false;
+                const shiftStart = shiftStartCandidates[0]
+                    ? getTodayShiftTime(new Date(shiftStartCandidates[0]))
+                    : null;
+                if (shiftStart) {
+                    if (checkIn) {
+                        // ✅ Ensure checkIn is also from today
+                        const check = new Date(checkIn);
+                        const checkToday = new Date();
+                        check.setFullYear(checkToday.getFullYear(), checkToday.getMonth(), checkToday.getDate());
+                        const diffMs = check.getTime() - shiftStart.getTime();
+                        const diffMins = Math.round(diffMs / 60000);
+                        if (diffMins > 15)
+                            lateBy = diffMins;
+                    }
+                    else {
+                        // ✅ Not checked in → calculate how late from now
+                        const now = new Date();
+                        const diffMs = now.getTime() - shiftStart.getTime();
+                        const diffMins = Math.round(diffMs / 60000);
+                        if (diffMins > 15) {
+                            lateBy = diffMins;
+                            notCheckedIn = true;
+                        }
+                    }
+                }
+                const isFixed = e.EmployeeShiftSetting.mode === 'FIXED';
+                const baseRow = {
+                    name: `${e.firstName} ${e.lastName}`,
+                    code: e.employeeCode,
+                    dept: ((_g = e.Department) === null || _g === void 0 ? void 0 : _g.name) || '-',
+                    shift: isFixed ? 'General' : 'Rotational',
+                    shiftTime: displayShiftTime,
+                };
+                if (lateBy != null && !isNaN(lateBy) && (!notCheckedIn)) {
+                    console.log(lateBy);
+                    const row = Object.assign(Object.assign({}, baseRow), { delayMins: lateBy });
+                    if (e.employeeType === 'CLINICAL')
+                        clinicalList.push(row);
+                    else
+                        nonClinicalList.push(row);
+                }
+                else if (notCheckedIn) {
+                    console.log(lateBy);
+                    const row = Object.assign(Object.assign({}, baseRow), { delayMins: lateBy }); // 👈 prevent undefined in table
+                    if (e.employeeType === 'CLINICAL')
+                        clinicalNotCheckedIn.push(row);
+                    else
+                        nonClinicalNotCheckedIn.push(row);
+                }
+            }
+            return {
+                clinicalLate: clinicalList.length,
+                nonClinicalLate: nonClinicalList.length,
+                clinicalList,
+                nonClinicalList,
+                clinicalNotCheckedIn: clinicalNotCheckedIn.length,
+                nonClinicalNotCheckedIn: nonClinicalNotCheckedIn.length,
+                clinicalNotCheckedInList: clinicalNotCheckedIn,
+                nonClinicalNotCheckedInList: nonClinicalNotCheckedIn,
+            };
+        });
+    }
     countUnmarkedAttendance(employeeIds, start, end) {
         return __awaiter(this, void 0, void 0, function* () {
             const todaysAttendance = yield prisma.attendance.findMany({
@@ -1299,7 +1790,7 @@ class DashboardController {
     getAllLists(todayStart, todayEnd) {
         return __awaiter(this, void 0, void 0, function* () {
             // Unmarked
-            const unmarkedRows = yield this.buildUnmarkedList(todayStart, todayEnd);
+            // const unmarkedRows = await this.buildUnmarkedList(todayStart, todayEnd);
             // Approvals created today
             const [permPend, leavePend, wfhPend] = yield Promise.all([
                 prisma.permissionRequest.findMany({
@@ -1318,41 +1809,72 @@ class DashboardController {
                     take: 50,
                 }),
             ]);
+            // Example for unmarked rows
+            // const unmarkedRows = (await this.buildUnmarkedList(todayStart, todayEnd))
+            // 🩺 Fetch late attendance split (clinical / non-clinical)
+            const { clinicalNotCheckedInList, nonClinicalNotCheckedInList } = yield this.getLateAttendanceSplit((yield prisma.employee.findMany({
+                where: { employmentStatus: 'ACTIVE' },
+                select: { id: true },
+            })).map(e => e.id), todayStart, todayEnd);
+            console.log('Clinical late:', clinicalNotCheckedInList.length, clinicalNotCheckedInList, 'Non-clinical late:', nonClinicalNotCheckedInList.length, nonClinicalNotCheckedInList);
+            // Approvals
             const approvalsRows = [
-                ...leavePend.map((x) => {
+                ...leavePend.map((x, idx) => {
                     var _a;
-                    return [
-                        'Leave',
-                        `${x.employee.firstName} ${x.employee.lastName}`,
-                        x.employee.employeeCode || '—',
-                        ((_a = x.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
-                        x.createdAt.toLocaleString('en-IN', { timeZone: IST }),
-                        'PENDING',
-                    ];
+                    return ({
+                        id: x.id, // use DB primary key
+                        data: [
+                            'Leave',
+                            `${x.employee.firstName} ${x.employee.lastName}`,
+                            x.employee.employeeCode || '—',
+                            ((_a = x.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
+                            x.createdAt.toLocaleString('en-IN', { timeZone: IST }),
+                            'PENDING',
+                        ]
+                    });
                 }),
                 ...wfhPend.map((x) => {
                     var _a;
-                    return [
-                        'WFH',
-                        `${x.employee.firstName} ${x.employee.lastName}`,
-                        x.employee.employeeCode || '—',
-                        ((_a = x.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
-                        x.createdAt.toLocaleString('en-IN', { timeZone: IST }),
-                        'PENDING',
-                    ];
+                    return ({
+                        id: x.id,
+                        data: [
+                            'WFH',
+                            `${x.employee.firstName} ${x.employee.lastName}`,
+                            x.employee.employeeCode || '—',
+                            ((_a = x.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
+                            x.createdAt.toLocaleString('en-IN', { timeZone: IST }),
+                            'PENDING',
+                        ]
+                    });
                 }),
                 ...permPend.map((x) => {
                     var _a;
-                    return [
-                        'Permission',
-                        `${x.employee.firstName} ${x.employee.lastName}`,
-                        x.employee.employeeCode || '—',
-                        ((_a = x.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
-                        x.createdAt.toLocaleString('en-IN', { timeZone: IST }),
-                        'PENDING',
-                    ];
+                    return ({
+                        id: x.id,
+                        data: [
+                            'Permission',
+                            `${x.employee.firstName} ${x.employee.lastName}`,
+                            x.employee.employeeCode || '—',
+                            ((_a = x.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
+                            x.createdAt.toLocaleString('en-IN', { timeZone: IST }),
+                            'PENDING',
+                        ]
+                    });
                 }),
             ].slice(0, 20);
+            // Documents expiring (30 days)
+            const docs = yield prisma.document.findMany({
+                where: { expiryDate: { gte: todayStart, lte: addDays(todayEnd, 30) } },
+                include: { employee: { select: { firstName: true, lastName: true, employeeCode: true, id: true, Department: { select: { name: true } }, } } },
+            });
+            console.log('Docs expiring soon:', docs.length, docs);
+            // Interviews missing feedback today
+            const miss = yield prisma.interview.findMany({
+                where: { startTime: { gte: todayStart, lte: todayEnd }, feedbackAt: null },
+                include: { application: { include: { candidate: true } } },
+            });
+            // Exit clearances overdue
+            const overdue = yield listPendingClearancesDetailed(); // <— run in parallel
             // Probation ending (7 days)
             const probRowsRaw = yield prisma.employee.findMany({
                 where: { probationEndDate: { gte: todayStart, lte: addDays(todayEnd, 7) } },
@@ -1363,95 +1885,131 @@ class DashboardController {
                     Department: { select: { name: true } },
                     reportingManager: true,
                     probationEndDate: true,
+                    id: true,
                 },
             });
-            const probRows = probRowsRaw.map((e) => {
+            const probRows = probRowsRaw.map((e, idx) => {
                 var _a;
-                return [
-                    `${e.firstName} ${e.lastName}`,
-                    e.employeeCode || '—',
-                    ((_a = e.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
-                    e.reportingManager ? `Mgr #${e.reportingManager}` : '—',
-                    e.probationEndDate
-                        ? e.probationEndDate.toLocaleDateString('en-IN', { timeZone: IST, month: 'short', day: '2-digit', year: 'numeric' })
-                        : '—',
-                ];
+                return ({
+                    id: e.id,
+                    data: [
+                        `${e.firstName} ${e.lastName}`,
+                        e.employeeCode || '—',
+                        ((_a = e.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
+                        e.reportingManager ? `Mgr #${e.reportingManager}` : '—',
+                        e.probationEndDate
+                            ? e.probationEndDate.toLocaleDateString('en-IN', { timeZone: IST, month: 'short', day: '2-digit', year: 'numeric' })
+                            : '—',
+                    ]
+                });
             });
-            // Documents expiring (30 days)
-            const docs = yield prisma.document.findMany({
-                where: { expiryDate: { gte: todayStart, lte: addDays(todayEnd, 30) } },
-                include: { employee: { select: { firstName: true, lastName: true, employeeCode: true, Department: { select: { name: true } }, } } },
-            });
-            const docRows = docs.map((d) => {
+            const docRows = docs.map((d, idx) => {
                 var _a;
-                return [
-                    `${d.employee.firstName} ${d.employee.lastName}`,
-                    d.employee.employeeCode || '—',
-                    ((_a = d.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
-                    d.type || d.category,
-                    d.expiryDate
-                        ? d.expiryDate.toLocaleDateString('en-IN', { timeZone: IST, month: 'short', day: '2-digit', year: 'numeric' })
-                        : '—',
-                    'Expiring',
-                ];
+                return ({
+                    id: d.id,
+                    data: [
+                        `${d.employee.firstName} ${d.employee.lastName}`,
+                        d.employee.employeeCode || '—',
+                        ((_a = d.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
+                        d.type || d.category,
+                        d.expiryDate
+                            ? d.expiryDate.toLocaleDateString('en-IN', { timeZone: IST, month: 'short', day: '2-digit', year: 'numeric' })
+                            : '—',
+                        'Expiring',
+                    ]
+                });
             });
-            // Interviews missing feedback today
-            const miss = yield prisma.interview.findMany({
-                where: { startTime: { gte: todayStart, lte: todayEnd }, feedbackAt: null },
-                include: { application: { include: { candidate: true } } },
-            });
-            const missRows = miss.map((m) => [
-                m.application.candidate.name,
-                m.stage,
-                m.panelUserIds || '—',
-                m.startTime.toLocaleTimeString('en-IN', { timeZone: IST, hour: '2-digit', minute: '2-digit' }),
-            ]);
-            // Exit clearances overdue
-            const overdue = yield listPendingClearancesDetailed(); // <— run in parallel
-            const overRows = overdue.map(o => [
-                o.employeeName,
-                o.employeeCode || '—',
-                o.deptName || '—',
-                o.type,
-                `${o.sinceDays} days`,
-                o.verifierId ? `User #${o.verifierId}` : 'Unassigned'
-            ]);
+            const missRows = miss.map((m, idx) => ({
+                id: idx + 1,
+                data: [
+                    m.application.candidate.name,
+                    m.stage,
+                    m.panelUserIds || '—',
+                    m.startTime.toLocaleTimeString('en-IN', { timeZone: IST, hour: '2-digit', minute: '2-digit' }),
+                ]
+            }));
+            const overRows = overdue.map((o, idx) => ({
+                id: idx + 1,
+                resignationId: o.resignationId, // for unique key
+                data: [
+                    o.employeeName,
+                    o.employeeCode || '—',
+                    o.deptName || '—',
+                    o.type,
+                    `${o.sinceDays} days`,
+                    o.verifierId ? `User #${o.verifierId}` : 'Unassigned',
+                    o.note || '—' // 👈 show note column
+                ]
+            }));
             return {
-                unmarked: {
-                    title: 'Unmarked attendance',
-                    cols: ['Employee', 'EMP ID', 'Manager', 'Dept', 'Last seen'],
-                    rows: unmarkedRows,
-                    actions: ['Message all', 'Mark exception'],
+                // unmarked: {
+                //     title: 'Unmarked attendance',
+                //     cols: ['Employee', 'EMP ID', 'Manager', 'Dept', 'Last seen'],
+                //     rows: unmarkedRows,
+                //     actions: ['Message all', 'Mark exception'],
+                //     selectable: true
+                // },
+                clinicalLate: {
+                    title: 'Clinical Staff Late (>15min)',
+                    cols: ['Employee', 'EMP ID', 'Dept', 'Shift Type', 'Shift Time', 'Delay (mins)'],
+                    rows: clinicalNotCheckedInList.map((x, idx) => ({
+                        id: idx + 1,
+                        data: [
+                            x.name,
+                            x.code,
+                            x.dept || '—',
+                            x.shift,
+                            x.shiftTime,
+                            `${x.delayMins} min`
+                        ]
+                    })),
+                    actions: ['Notify all', 'Mark exception'],
+                    selectable: true
+                },
+                nonClinicalLate: {
+                    title: 'Non-Clinical Staff Late (>15min)',
+                    cols: ['Employee', 'EMP ID', 'Dept', 'Shift Type', 'Shift Time', 'Delay (mins)'],
+                    rows: nonClinicalNotCheckedInList.map((x, idx) => ({
+                        id: idx + 1,
+                        data: [
+                            x.name,
+                            x.code,
+                            x.dept || '—',
+                            x.shift,
+                            x.shiftTime,
+                            `${x.delayMins} min`
+                        ]
+                    })),
+                    actions: ['Notify all', 'Mark exception'],
+                    selectable: true
                 },
                 approvals: {
                     title: 'Pending approvals',
                     cols: ['Type', 'Employee', 'EMP ID', 'Dept', 'Requested', 'Status'],
                     rows: approvalsRows,
                     actions: ['Approve all', 'Reject all'],
+                    selectable: true
                 },
                 probation: {
                     title: 'Probation ending (7 days)',
                     cols: ['Employee', 'EMP ID', 'Dept', 'Manager', 'End date'],
                     rows: probRows,
                     actions: ['Request feedback', 'Extend probation'],
+                    selectable: true
                 },
                 docs: {
                     title: 'Documents expiring (30 days)',
                     cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Expiry', 'Status'],
                     rows: docRows,
-                    actions: ['Notify all', 'Create renewal tickets'],
-                },
-                feedback: {
-                    title: 'Interviews missing feedback',
-                    cols: ['Candidate', 'Stage', 'Panel', 'Due'],
-                    rows: missRows,
-                    actions: ['Nudge panel', 'Reassign reviewer'],
+                    actions: ['Notify all'],
+                    selectable: true
                 },
                 clearances: {
                     title: 'Exit clearances overdue',
-                    cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Since', 'Owner'],
+                    cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Since', 'Owner', 'Note'],
                     rows: overRows,
                     actions: ['Escalate', 'Assign delegate'],
+                    selectable: true
                 },
             };
         });
@@ -1465,7 +2023,7 @@ class DashboardController {
             });
             const att = yield prisma.attendance.findMany({
                 where: { date: { gte: todayStart, lte: todayEnd } },
-                select: { employeeId: true },
+                select: { id: true, employeeId: true },
             });
             const present = new Set(att.map((a) => a.employeeId));
             const [leave, wfh, perm] = yield Promise.all([
@@ -1506,13 +2064,17 @@ class DashboardController {
             const mgrMap = yield buildManagerNameMap(unmarked.map(e => e.reportingManager));
             const rows = [];
             for (const e of unmarked) {
-                rows.push([
-                    `${e.firstName} ${e.lastName}`,
-                    e.employeeCode || '—',
-                    e.reportingManager ? (mgrMap.get(e.reportingManager) || '—') : '—', // ← manager name here
-                    ((_a = e.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
-                    'Yesterday 6:00 pm',
-                ]);
+                // const existing = att.find(a => a.employeeId === e.id);
+                rows.push({
+                    id: e.id, // employeeId, used only for creation
+                    data: [
+                        `${e.firstName} ${e.lastName}`,
+                        e.employeeCode || '—',
+                        e.reportingManager ? (mgrMap.get(e.reportingManager) || '—') : '—',
+                        ((_a = e.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
+                        'Yesterday 6:00 pm'
+                    ]
+                });
             }
             return rows.slice(0, 20);
         });
@@ -1557,7 +2119,7 @@ function listPendingClearancesDetailed() {
                 managerDecidedAt: true,
                 hrDecidedAt: true,
                 employee: { select: { firstName: true, lastName: true, employeeCode: true, Department: { select: { name: true } }, } },
-                clearances: { select: { type: true, decision: true, verifierId: true, createdAt: true } }
+                clearances: { select: { type: true, decision: true, verifierId: true, createdAt: true, id: true, note: true } }
             }
         });
         const now = new Date();
@@ -1576,7 +2138,8 @@ function listPendingClearancesDetailed() {
                     deptName: ((_e = r.employee.Department) === null || _e === void 0 ? void 0 : _e.name) || undefined,
                     type,
                     sinceDays: Math.max(0, (0, date_fns_1.differenceInCalendarDays)(now, startAnchor)),
-                    verifierId: (_f = row === null || row === void 0 ? void 0 : row.verifierId) !== null && _f !== void 0 ? _f : null
+                    verifierId: (_f = row === null || row === void 0 ? void 0 : row.verifierId) !== null && _f !== void 0 ? _f : null,
+                    note: (row === null || row === void 0 ? void 0 : row.note) || null // 👈 new
                 });
             }
         }
@@ -1599,3 +2162,326 @@ function buildManagerNameMap(ids) {
         return new Map(mgrs.map(m => [m.id, `${m.firstName} ${m.lastName}`]));
     });
 }
+// ----------------------
+// 1. Unmarked attendance
+// ----------------------
+const messageUnmarked = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeIds, message } = req.body;
+        // TODO: integrate with notification/email service
+        // console.log("Message to unmarked employees:", employeeIds, message);
+        return res.json({ success: true, notified: employeeIds.length });
+    }
+    catch (err) {
+        console.error("Message Unmarked Error:", err);
+        return res.status(500).json({ error: "Failed to send messages" });
+    }
+});
+exports.messageUnmarked = messageUnmarked;
+const markUnmarkedException = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeIds } = req.body;
+        const today = new Date(); // normalize to start of day if needed
+        // Create attendance rows with EXCEPTION status
+        const created = yield prisma.attendance.createMany({
+            data: employeeIds.map((empId) => ({
+                employeeId: empId,
+                date: today,
+                status: "EXCEPTION",
+            })),
+            skipDuplicates: true, // avoid duplicate rows if called twice
+        });
+        //   // Fetch the actual attendance ids for these employees (in case duplicates were skipped)
+        //   const attendance = await prisma.attendance.findMany({
+        //     where: {
+        //       employeeId: { in: employeeIds },
+        //       date: today
+        //     },
+        //     select: { id: true, employeeId: true }
+        //   });
+        return res.json({
+            success: true,
+            created: created.count,
+        });
+    }
+    catch (err) {
+        console.error("Mark Exception Error:", err);
+        return res.status(500).json({ error: "Failed to mark exceptions" });
+    }
+});
+exports.markUnmarkedException = markUnmarkedException;
+// ----------------------
+// 2. Pending approvals
+// ----------------------
+const bulkApproveApprovals = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { leaveIds, wfhIds, permissionIds } = req.body;
+        if (leaveIds === null || leaveIds === void 0 ? void 0 : leaveIds.length) {
+            yield prisma.leaveRequest.updateMany({
+                where: { id: { in: leaveIds } },
+                data: { status: "APPROVED", approvedDate: new Date() },
+            });
+        }
+        if (wfhIds === null || wfhIds === void 0 ? void 0 : wfhIds.length) {
+            yield prisma.wFHRequest.updateMany({
+                where: { id: { in: wfhIds } },
+                data: { status: "APPROVED", approvedDate: new Date() },
+            });
+        }
+        if (permissionIds === null || permissionIds === void 0 ? void 0 : permissionIds.length) {
+            yield prisma.permissionRequest.updateMany({
+                where: { id: { in: permissionIds } },
+                data: { status: "APPROVED", approvedDate: new Date() },
+            });
+        }
+        return res.json({ success: true });
+    }
+    catch (err) {
+        console.error("Bulk Approve Error:", err);
+        return res.status(500).json({ error: "Failed to approve requests" });
+    }
+});
+exports.bulkApproveApprovals = bulkApproveApprovals;
+const bulkRejectApprovals = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { leaveIds, wfhIds, permissionIds, reason } = req.body;
+        if (leaveIds === null || leaveIds === void 0 ? void 0 : leaveIds.length) {
+            yield prisma.leaveRequest.updateMany({
+                where: { id: { in: leaveIds } },
+                data: { status: "REJECTED", declineReason: reason, declinedDate: new Date() },
+            });
+        }
+        if (wfhIds === null || wfhIds === void 0 ? void 0 : wfhIds.length) {
+            yield prisma.wFHRequest.updateMany({
+                where: { id: { in: wfhIds } },
+                data: { status: "REJECTED", declineReason: reason, declinedDate: new Date() },
+            });
+        }
+        if (permissionIds === null || permissionIds === void 0 ? void 0 : permissionIds.length) {
+            yield prisma.permissionRequest.updateMany({
+                where: { id: { in: permissionIds } },
+                data: { status: "REJECTED", declineReason: reason, declinedDate: new Date() },
+            });
+        }
+        return res.json({ success: true });
+    }
+    catch (err) {
+        console.error("Bulk Reject Error:", err);
+        return res.status(500).json({ error: "Failed to reject requests" });
+    }
+});
+exports.bulkRejectApprovals = bulkRejectApprovals;
+// ----------------------
+// 3. Probation ending
+// ----------------------
+const requestProbationFeedback = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeIds } = req.body;
+        // fetch employees + their reporting managers
+        const employees = yield prisma.employee.findMany({
+            where: { id: { in: employeeIds } },
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                reportingManager: true,
+            },
+        });
+        // collect managers
+        const managerIds = Array.from(new Set(employees.map(e => e.reportingManager).filter(Boolean)));
+        if (!managerIds.length) {
+            return res.json({ success: false, message: "No reporting managers found" });
+        }
+        // optional: build manager name map (if we want to use names in notification body)
+        const mgrMap = yield buildManagerNameMap(managerIds);
+        // build messages for managers
+        const notifications = managerIds.map((mgrId) => {
+            // which employees belong to this manager?
+            const reportees = employees.filter(e => e.reportingManager === mgrId);
+            const names = reportees.map(e => `${e.firstName} ${e.lastName}`).join(", ");
+            return {
+                employeeId: mgrId,
+                message: `Please provide probation feedback for: ${names}`,
+                channel: "EMAIL",
+            };
+        });
+        // save notifications
+        yield prisma.notification.createMany({ data: notifications });
+        console.log("Requested probation feedback from managers:", mgrMap);
+        return res.json({ success: true, requested: managerIds.length });
+    }
+    catch (err) {
+        console.error("Probation Feedback Error:", err);
+        return res.status(500).json({ error: "Failed to request feedback" });
+    }
+});
+exports.requestProbationFeedback = requestProbationFeedback;
+const extendProbation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeId, newEndDate } = req.body;
+        const updated = yield prisma.employee.update({
+            where: { id: Number(employeeId) },
+            data: { probationEndDate: new Date(newEndDate) },
+        });
+        yield prisma.notification.create({
+            data: {
+                employeeId: updated.id,
+                message: `Your probation has been extended until ${newEndDate}.`,
+                channel: "EMAIL",
+            },
+        });
+        return res.json({ success: true });
+    }
+    catch (err) {
+        console.error("Extend Probation Error:", err);
+        return res.status(500).json({ error: "Failed to extend probation" });
+    }
+});
+exports.extendProbation = extendProbation;
+// ----------------------
+// 4. Documents expiring
+// ----------------------
+const notifyExpiringDocs = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { documentIds } = req.body;
+        // fetch employees for those documents
+        const docs = yield prisma.document.findMany({
+            where: { id: { in: documentIds } },
+            select: { id: true, employeeId: true, title: true, expiryDate: true },
+        });
+        // create notifications
+        yield prisma.notification.createMany({
+            data: docs.map((doc) => {
+                var _a;
+                return ({
+                    employeeId: doc.employeeId,
+                    message: `Your document "${doc.title}" is expiring on ${(_a = doc.expiryDate) === null || _a === void 0 ? void 0 : _a.toLocaleDateString()}.`,
+                    channel: "EMAIL",
+                });
+            }),
+        });
+        console.log("Notified employees for expiring docs:", documentIds);
+        return res.json({ success: true, notified: docs.length });
+    }
+    catch (err) {
+        console.error("Notify Docs Error:", err);
+        return res.status(500).json({ error: "Failed to notify employees" });
+    }
+});
+exports.notifyExpiringDocs = notifyExpiringDocs;
+const createRenewalTickets = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { documentIds } = req.body;
+        // TODO: integrate with ticket/task system
+        console.log("Create renewal tickets for docs:", documentIds);
+        return res.json({ success: true, tickets: documentIds.length });
+    }
+    catch (err) {
+        console.error("Renewal Ticket Error:", err);
+        return res.status(500).json({ error: "Failed to create tickets" });
+    }
+});
+exports.createRenewalTickets = createRenewalTickets;
+// ----------------------
+// 5. Missing interview feedback
+// ----------------------
+const nudgePanel = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { interviewIds } = req.body;
+        // TODO: integrate with notifications
+        console.log("Nudge panel for interviews:", interviewIds);
+        return res.json({ success: true, nudged: interviewIds.length });
+    }
+    catch (err) {
+        console.error("Nudge Panel Error:", err);
+        return res.status(500).json({ error: "Failed to nudge panel" });
+    }
+});
+exports.nudgePanel = nudgePanel;
+const reassignReviewer = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { interviewId, newReviewerIds } = req.body;
+        yield prisma.interview.update({
+            where: { id: Number(interviewId) },
+            data: { panelUserIds: newReviewerIds.join(",") },
+        });
+        return res.json({ success: true });
+    }
+    catch (err) {
+        console.error("Reassign Reviewer Error:", err);
+        return res.status(500).json({ error: "Failed to reassign reviewer" });
+    }
+});
+exports.reassignReviewer = reassignReviewer;
+// ----------------------
+// 6. Exit clearances overdue
+// ----------------------
+const escalateClearances = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { clearanceIds } = req.body;
+        // clearanceIds = [{ resignationId: 2, type: "IT" }, ...]
+        for (const item of clearanceIds) {
+            const { resignationId, type } = item;
+            let clearance = yield prisma.resignationClearance.findFirst({
+                where: { resignationId, type }
+            });
+            if (clearance) {
+                yield prisma.resignationClearance.update({
+                    where: { id: clearance.id },
+                    data: {
+                        note: "Escalated by HR",
+                        decidedAt: new Date(),
+                    },
+                });
+            }
+            else {
+                yield prisma.resignationClearance.create({
+                    data: {
+                        resignationId,
+                        type,
+                        note: "Escalated by HR",
+                        decidedAt: new Date(),
+                    },
+                });
+            }
+        }
+        return res.json({ success: true });
+    }
+    catch (err) {
+        console.error("Escalate Clearances Error:", err);
+        return res.status(500).json({ error: "Failed to escalate clearances" });
+    }
+});
+exports.escalateClearances = escalateClearances;
+const assignDelegate = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { resignationId, type, delegateId } = req.body;
+        // find existing clearance for this resignation + type
+        let clearance = yield prisma.resignationClearance.findFirst({
+            where: { resignationId, type }
+        });
+        if (clearance) {
+            // update existing
+            yield prisma.resignationClearance.update({
+                where: { id: clearance.id },
+                data: { verifierId: delegateId },
+            });
+        }
+        else {
+            // create new row and assign delegate
+            yield prisma.resignationClearance.create({
+                data: {
+                    resignationId,
+                    type,
+                    verifierId: delegateId,
+                },
+            });
+        }
+        return res.json({ success: true });
+    }
+    catch (err) {
+        console.error("Assign Delegate Error:", err);
+        return res.status(500).json({ error: "Failed to assign delegate" });
+    }
+});
+exports.assignDelegate = assignDelegate;

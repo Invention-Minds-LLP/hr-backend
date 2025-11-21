@@ -1,2 +1,2 @@
 -- AlterTable
-ALTER TABLE `employee` ADD COLUMN `sameAsPermanent` BOOLEAN NULL;
+ALTER TABLE `Employee` ADD COLUMN `sameAsPermanent` BOOLEAN NULL;

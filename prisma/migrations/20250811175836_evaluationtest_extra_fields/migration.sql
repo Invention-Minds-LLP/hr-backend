@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE `evaluationtest` ADD COLUMN `activeFrom` DATETIME(3) NULL,
+ALTER TABLE `EvaluationTest` ADD COLUMN `activeFrom` DATETIME(3) NULL,
     ADD COLUMN `activeTo` DATETIME(3) NULL,
     ADD COLUMN `instructions` VARCHAR(191) NULL,
     ADD COLUMN `isPublished` BOOLEAN NULL DEFAULT false,

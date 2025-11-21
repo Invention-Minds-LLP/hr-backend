@@ -88,7 +88,9 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
             where: { employeeCode },
             select: {
                 id: true,
-                departmentId: true
+                departmentId: true,
+                photoUrl: true,
+                designation: true,
             }
         });
         if (!employee)
@@ -124,7 +126,9 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
             id: user.id,
             role: user.role,
             empId: employee.id,
-            deptId: employee.departmentId
+            deptId: employee.departmentId,
+            designation: employee.designation,
+            photoUrl: employee.photoUrl || null
         });
     }
     catch (error) {

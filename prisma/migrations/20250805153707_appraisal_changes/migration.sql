@@ -1,2 +1,2 @@
 -- AlterTable
-ALTER TABLE `appraisalform` ADD COLUMN `managerId` INTEGER NULL;
+ALTER TABLE `AppraisalForm` ADD COLUMN `managerId` INTEGER NULL;

@@ -65,3 +65,31 @@ export const getAttendanceCalendar = async (req: Request, res: Response) => {
     res.status(500).json({ message: 'Server error', error: err });
   }
 };
+export const getWeeklyAttendance = async (req: Request, res: Response) => {
+  try {
+    const { employeeId, start, end } = req.query;
+
+    if (!employeeId || !start || !end) {
+      return res.status(400).json({ message: "Missing parameters" });
+    }
+
+    const startDate = new Date(start as string);
+    const endDate = new Date(end as string);
+
+    const attendance = await prisma.attendance.findMany({
+      where: {
+        employeeId: Number(employeeId),
+        date: {
+          gte: startDate,
+          lte: endDate,
+        },
+      },
+      orderBy: { date: 'asc' },
+    });
+
+    res.json(attendance);
+  } catch (error) {
+    console.error("Error fetching attendance:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};

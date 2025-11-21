@@ -1,9 +1,9 @@
 -- AlterTable
-ALTER TABLE `leaverequest` ADD COLUMN `approvedDate` DATETIME(3) NULL,
+ALTER TABLE `LeaveRequest` ADD COLUMN `approvedDate` DATETIME(3) NULL,
     ADD COLUMN `declinedDate` DATETIME(3) NULL;
 
 -- AlterTable
-ALTER TABLE `permissionrequest` ADD COLUMN `approvedBy` INTEGER NULL,
+ALTER TABLE `PermissionRequest` ADD COLUMN `approvedBy` INTEGER NULL,
     ADD COLUMN `approvedDate` DATETIME(3) NULL,
     ADD COLUMN `declineReason` VARCHAR(191) NULL,
     ADD COLUMN `declinedBy` INTEGER NULL,

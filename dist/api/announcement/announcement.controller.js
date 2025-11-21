@@ -16,6 +16,7 @@ exports.createAnnouncement = createAnnouncement;
 exports.ackAnnouncement = ackAnnouncement;
 exports.listLiveForEmployee = listLiveForEmployee;
 exports.listLiveAnnouncementsWithStats = listLiveAnnouncementsWithStats;
+exports.listAllLiveForEmployee = listAllLiveForEmployee;
 const client_1 = require("@prisma/client");
 const basic_ftp_1 = require("basic-ftp");
 const fs_1 = __importDefault(require("fs"));
@@ -118,8 +119,8 @@ function createAnnouncement(req, res) {
                     circularCode,
                     title,
                     body,
-                    isPinned: isPinned || false,
-                    requireAck: requireAck || false,
+                    isPinned: req.body.isPinned === "true",
+                    requireAck: req.body.requireAck === "true",
                     type: type || 'GENERAL',
                     audience: audience ? JSON.stringify(audience) : null,
                     startsAt: startsAt ? new Date(startsAt) : undefined,
@@ -268,6 +269,80 @@ function listLiveAnnouncementsWithStats(_req, res) {
         catch (e) {
             console.error(e);
             return res.status(500).json({ error: "Failed to load live announcements" });
+        }
+    });
+}
+function listAllLiveForEmployee(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const user = req.user; // from JWT/session middleware
+            const empId = user.empId;
+            const deptId = user.deptId;
+            const role = user.role;
+            const branchId = user.branchId;
+            console.log(`Fetching all live announcements for empId=${empId}`);
+            const now = new Date();
+            // 1️⃣ Fetch all live announcements (still valid)
+            const liveAnnouncements = yield prisma.announcement.findMany({
+                where: {
+                    startsAt: { lte: now },
+                    OR: [{ endsAt: null }, { endsAt: { gte: now } }],
+                },
+                orderBy: { startsAt: "desc" },
+                include: {
+                    acks: {
+                        where: { employeeId: empId },
+                        select: { id: true },
+                    },
+                },
+            });
+            // 2️⃣ Filter based on audience (who should see this)
+            const relevant = liveAnnouncements.filter((a) => {
+                var _a, _b, _c, _d;
+                if (!a.audience)
+                    return true; // all employees can see
+                let audience;
+                try {
+                    audience = JSON.parse(a.audience);
+                    if (typeof audience === "string") {
+                        audience = JSON.parse(audience); // handle double JSON encoding
+                    }
+                }
+                catch (err) {
+                    console.error(`Invalid audience JSON for announcement ${a.id}`, a.audience);
+                    return false;
+                }
+                if (audience.all)
+                    return true;
+                if ((_a = audience.departmentId) === null || _a === void 0 ? void 0 : _a.some((d) => Number(d) === Number(deptId)))
+                    return true;
+                if ((_b = audience.branchId) === null || _b === void 0 ? void 0 : _b.some((b) => Number(b) === Number(branchId)))
+                    return true;
+                if ((_c = audience.roleId) === null || _c === void 0 ? void 0 : _c.some((r) => String(r) === String(role)))
+                    return true;
+                if ((_d = audience.employeeId) === null || _d === void 0 ? void 0 : _d.some((e) => Number(e) === Number(empId)))
+                    return true;
+                return false;
+            });
+            // 3️⃣ Add acknowledgement status
+            const result = relevant.map((a) => ({
+                id: a.id,
+                title: a.title,
+                body: a.body,
+                type: a.type,
+                startsAt: a.startsAt,
+                endsAt: a.endsAt,
+                attachments: a.attachments,
+                isPinned: a.isPinned,
+                requireAck: a.requireAck,
+                acknowledged: a.acks && a.acks.length > 0, // 👈 flag
+            }));
+            console.log(`Found ${result.length} announcements for empId=${empId}`);
+            return res.json(result);
+        }
+        catch (e) {
+            console.error(e);
+            return res.status(500).json({ error: "Failed to load announcements" });
         }
     });
 }

@@ -17,6 +17,7 @@ const client_1 = require("@prisma/client");
 const node_cron_1 = __importDefault(require("node-cron"));
 const prisma = new client_1.PrismaClient();
 const leave_controller_1 = require("../leave/leave.controller");
+const notifications_controller_1 = require("../notifications/notifications.controller");
 const APPRAISAL_REMINDER_COUNT_TEMPLATE_ID = '';
 const APPRAISAL_CREATED_TEMPLATE_ID = "888277";
 function formatPhoneNumber(raw) {
@@ -78,6 +79,8 @@ const createAppraisalsForEmployees = (employeeIds_1, cycle_1, ...args_1) => __aw
     // Fire-and-forget WhatsApp notifications; don't block/throw the API
     yield Promise.all(employees.map((emp) => __awaiter(void 0, void 0, void 0, function* () {
         const mgr = emp.reportingManager ? mgrById.get(emp.reportingManager) : undefined;
+        if (!mgr)
+            return;
         const mgrPhone = formatPhoneNumber((mgr === null || mgr === void 0 ? void 0 : mgr.phone) || "");
         if (!mgrPhone)
             return;
@@ -91,6 +94,13 @@ const createAppraisalsForEmployees = (employeeIds_1, cycle_1, ...args_1) => __aw
         }
         catch (e) {
             console.error("Appraisal create WA (manager) failed:", e);
+        }
+        const message = `A new appraisal has been created for ${employeeName} and assigned to you for review.\nKindly acknowledge and take appropriate action.`;
+        try {
+            yield (0, notifications_controller_1.createNotification)(mgr.id, message); // ✅ send SSE + DB notification
+        }
+        catch (e) {
+            console.error("Appraisal in-app notification failed:", e);
         }
     })));
     return created;
@@ -151,29 +161,33 @@ const getAllAppraisalsWithManagerReview = (req, res) => __awaiter(void 0, void 0
 exports.getAllAppraisalsWithManagerReview = getAllAppraisalsWithManagerReview;
 const saveManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const { appraisalId, communication, teamwork, problemSolving, initiative, reliability, comments, recommendations, overallScore, finalDecision, finalComments } = req.body;
-        const review = yield prisma.managerAppraisal.upsert({
+        const { appraisalId, qualityOfWorkRating, qualityOfWorkComments, knowledgeOfJobRating, knowledgeOfJobComments, teamworkRating, teamworkComments, independenceRating, independenceComments, recordsRating, recordsComments, guestServiceRating, guestServiceComments, safetyRating, safetyComments, attendanceRating, attendanceComments, leadershipRating, leadershipComments, overallScore, comments, recommendations, finalDecision, finalComments } = req.body;
+        yield prisma.managerAppraisal.upsert({
             where: { appraisalFormId: appraisalId },
             update: {
-                communication,
-                teamwork,
-                problemSolving,
-                initiative,
-                reliability,
-                comments,
-                recommendations,
-                overallScore
+                qualityOfWorkRating, qualityOfWorkComments,
+                knowledgeOfJobRating, knowledgeOfJobComments,
+                teamworkRating, teamworkComments,
+                independenceRating, independenceComments,
+                recordsRating, recordsComments,
+                guestServiceRating, guestServiceComments,
+                safetyRating, safetyComments,
+                attendanceRating, attendanceComments,
+                leadershipRating, leadershipComments,
+                overallScore, comments, recommendations
             },
             create: {
                 appraisalFormId: appraisalId,
-                communication,
-                teamwork,
-                problemSolving,
-                initiative,
-                reliability,
-                comments,
-                recommendations,
-                overallScore
+                qualityOfWorkRating, qualityOfWorkComments,
+                knowledgeOfJobRating, knowledgeOfJobComments,
+                teamworkRating, teamworkComments,
+                independenceRating, independenceComments,
+                recordsRating, recordsComments,
+                guestServiceRating, guestServiceComments,
+                safetyRating, safetyComments,
+                attendanceRating, attendanceComments,
+                leadershipRating, leadershipComments,
+                overallScore, comments, recommendations
             }
         });
         // Update final decision in AppraisalForm
@@ -186,7 +200,7 @@ const saveManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, functi
                 status: 'Reviewed'
             }
         });
-        res.json({ message: 'Manager review saved successfully', review });
+        res.json({ message: 'Manager review saved successfully' });
     }
     catch (error) {
         console.error(error);

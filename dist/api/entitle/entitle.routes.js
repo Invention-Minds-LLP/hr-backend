@@ -2,9 +2,10 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const entitle_controller_1 = require("./entitle.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = (0, express_1.Router)();
-router.get('/', entitle_controller_1.getAllEntitlementPolicies);
-router.get('/employee-usage-summary', entitle_controller_1.getEmployeeUsageSummary);
-router.get('/:id/requests', entitle_controller_1.getEmployeeRequests);
-router.get('/:year', entitle_controller_1.getEntitlementPolicyByYear);
+router.get('/', authMiddleware_1.authenticateToken, entitle_controller_1.getAllEntitlementPolicies);
+router.get('/employee-usage-summary', authMiddleware_1.authenticateToken, entitle_controller_1.getEmployeeUsageSummary);
+router.get('/:id/requests', authMiddleware_1.authenticateToken, entitle_controller_1.getEmployeeRequests);
+router.get('/:year', authMiddleware_1.authenticateToken, entitle_controller_1.getEntitlementPolicyByYear);
 exports.default = router;

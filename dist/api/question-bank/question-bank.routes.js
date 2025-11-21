@@ -2,10 +2,11 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const question_bank_controller_1 = require("./question-bank.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = (0, express_1.Router)();
-router.get('/', question_bank_controller_1.getAllQuestionBanks);
-router.post('/', question_bank_controller_1.createQuestionBank);
-router.get('/:id', question_bank_controller_1.getQuestionBankById);
-router.put('/:id', question_bank_controller_1.updateQuestionBank);
-router.delete('/:id', question_bank_controller_1.deleteQuestionBank);
+router.get('/', authMiddleware_1.authenticateToken, question_bank_controller_1.getAllQuestionBanks);
+router.post('/', authMiddleware_1.authenticateToken, question_bank_controller_1.createQuestionBank);
+router.get('/:id', authMiddleware_1.authenticateToken, question_bank_controller_1.getQuestionBankById);
+router.put('/:id', authMiddleware_1.authenticateToken, question_bank_controller_1.updateQuestionBank);
+router.delete('/:id', authMiddleware_1.authenticateToken, question_bank_controller_1.deleteQuestionBank);
 exports.default = router;

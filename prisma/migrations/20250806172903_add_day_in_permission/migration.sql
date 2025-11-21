@@ -5,4 +5,4 @@
 
 */
 -- AlterTable
-ALTER TABLE `permissionrequest` ADD COLUMN `day` DATETIME(3) NOT NULL;
+ALTER TABLE `PermissionRequest` ADD COLUMN `day` DATETIME(3) NOT NULL;

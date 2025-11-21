@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
+import cron from "node-cron";
+import { EmploymentStatus } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
@@ -32,6 +34,8 @@ export async function submitSurvey(req: Request, res: Response) {
     const survey = await prisma.employeeSurvey.create({
         data: {
           date: new Date(),
+          submittedAt: new Date(),
+          status: "SUBMITTED",
           employee: {
             connect: { id: Number(employeeId) } // or the correct unique field
           },
@@ -116,5 +120,98 @@ export async function getAllSurveys(_req: Request, res: Response) {
     return res
       .status(500)
       .json({ error: e?.message || "Failed to fetch surveys" });
+  }
+}
+/**
+ * Runs every day at midnight
+ * Creates surveys for employees whose next survey date == today
+ */
+export const initSurveyScheduler = () => {
+  cron.schedule("0 0 * * *", async () => {
+    console.log("🕐 Running 6-month Employee Survey Scheduler...");
+
+    try {
+      const today = new Date();
+      const todayStr = today.toISOString().split("T")[0]; // YYYY-MM-DD
+
+      // Get all active employees
+      const activeEmployees = await prisma.employee.findMany({
+        where: { employmentStatus: "ACTIVE" },
+        select: { id: true, dateOfJoining: true },
+      });
+
+      for (const emp of activeEmployees) {
+        // 1️⃣ Get the latest survey
+        const lastSurvey = await prisma.employeeSurvey.findFirst({
+          where: { employeeId: emp.id },
+          orderBy: { date: "desc" },
+        });
+
+        // 2️⃣ Determine reference date
+        const referenceDate = lastSurvey
+          ? new Date(lastSurvey.date)
+          : new Date(emp.dateOfJoining);
+
+        // 3️⃣ Calculate the exact next due date
+        const nextSurveyDate = new Date(referenceDate);
+        nextSurveyDate.setMonth(nextSurveyDate.getMonth() + 6);
+
+        const nextSurveyStr = nextSurveyDate.toISOString().split("T")[0];
+
+        // 4️⃣ If today == nextSurveyDate (by date only, not time)
+        if (todayStr === nextSurveyStr) {
+          await prisma.employeeSurvey.create({
+            data: {
+              employeeId: emp.id,
+              date: new Date(),
+            },
+          });
+          console.log(`✅ Created new survey for employee ${emp.id}`);
+        }
+      }
+
+      console.log("🎯 Employee survey scheduling complete.");
+    } catch (error) {
+      console.error("❌ Error running survey scheduler:", error);
+    }
+  });
+};
+// ================== GET DRAFT SURVEYS (BY EMPLOYEE) ==================
+export async function getDraftSurveys(req: Request, res: Response) {
+  try {
+    const employeeId = Number(req.query.employeeId);
+
+    if (!employeeId || Number.isNaN(employeeId)) {
+      return res.status(400).json({ error: "Invalid or missing employeeId" });
+    }
+
+    const drafts = await prisma.employeeSurvey.findMany({
+      where: {
+        employeeId,
+        status: "DRAFT",
+      },
+      include: {
+        responses: { include: { question: true } },
+        employee: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            employeeCode: true,
+            Department: {
+              select: { name: true },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    return res.json(drafts);
+  } catch (error: any) {
+    console.error("getDraftSurveys error:", error);
+    return res
+      .status(500)
+      .json({ error: error.message || "Failed to fetch draft surveys" });
   }
 }

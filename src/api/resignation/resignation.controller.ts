@@ -12,6 +12,8 @@ import { Client } from 'basic-ftp';
 import { AuthenticatedRequest } from '../../middleware/authMiddleware';
 import { ClearanceType } from '@prisma/client';
 const prisma = new PrismaClient();
+import cron from 'node-cron';
+import { sendHealthCheckReminders } from '../employee/employee.controller';
 
 type ClearanceRow = {
   type: string;                    // IT / Finance / HR / Admin / Security / Other
@@ -94,7 +96,7 @@ export async function listResignations(req: Request, res: Response) {
       where,
       orderBy: { createdAt: 'desc' },
       include: {
-        employee: { select: { id: true, firstName: true, lastName: true, departmentId: true, designation: true, reportingManager:true } },
+        employee: { select: { id: true, firstName: true, lastName: true, departmentId: true, designation: true, reportingManager: true } },
         handoverTasks: true,
         clearances: true,
         exitInterview: true,
@@ -160,7 +162,7 @@ export async function managerApprove(req: Request, res: Response) {
       managerDecision: 'APPROVED',
       managerDecidedAt: new Date(),
       managerNote: note,
-      status: 'APPROVED'
+      status: 'UNDER_REVIEW'
     };
     if (overrideLastWorkingDay) data.proposedLastWorkingDay = new Date(overrideLastWorkingDay);
 
@@ -200,6 +202,8 @@ export async function hrApprove(req: Request, res: Response) {
   try {
     const id = Number(req.params.id);
     const { note, actualLastWorkingDay } = req.body;
+
+    // Step 1: Approve the resignation and include employee info
     const upd = await prisma.resignationRequest.update({
       where: { id },
       data: {
@@ -207,15 +211,55 @@ export async function hrApprove(req: Request, res: Response) {
         hrDecidedAt: new Date(),
         hrNote: note,
         actualLastWorkingDay: actualLastWorkingDay ? new Date(actualLastWorkingDay) : undefined,
-        status: 'UNDER_REVIEW'
-      }
+        status: 'APPROVED',
+      },
+      include: {
+        employee: {
+          include: {
+            Department: true,
+            Branch: true,
+          },
+        },
+      },
     });
+
+    // Step 2: Update employee status → NOTICE_PERIOD
+    await prisma.employee.update({
+      where: { id: upd.employeeId },
+      data: { employmentStatus: 'NOTICE_PERIOD' },
+    });
+
+    // Step 3: Auto-create backfill job (if none exists)
+    const existingJob = await prisma.job.findFirst({
+      where: {
+        backfillForEmployeeId: upd.employeeId,
+        status: { in: ['OPEN', 'ON_HOLD'] },
+      },
+    });
+
+    if (!existingJob && upd.employee) {
+      const newJob = await prisma.job.create({
+        data: {
+          title: `${upd.employee.designation} - Replacement`,
+          departmentId: upd.employee.departmentId,
+          location: upd.employee.Branch?.location || 'Unknown',
+          headcount: 1,
+          status: 'OPEN',
+          createdBy: 0, // Fallback HR/system user ID
+          backfillForEmployeeId: upd.employeeId,
+        },
+      });
+
+      console.log(`✅ Created new job for replacement: Job ID ${newJob.id}`);
+    }
+
     res.json(upd);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'HR approval failed' });
   }
 }
+
 
 export async function hrReject(req: Request, res: Response) {
   try {
@@ -310,12 +354,12 @@ export async function upsertClearance(req: Request, res: Response) {
 
     const row = existing
       ? await prisma.resignationClearance.update({
-          where: { id: existing.id },
-          data: { decision, note, verifierId: verifierId ?? null, decidedAt: new Date() }
-        })
+        where: { id: existing.id },
+        data: { decision, note, verifierId: verifierId ?? null, decidedAt: new Date() }
+      })
       : await prisma.resignationClearance.create({
-          data: { resignationId: id, type, decision, note, verifierId: verifierId ?? null, decidedAt: new Date() }
-        });
+        data: { resignationId: id, type, decision, note, verifierId: verifierId ?? null, decidedAt: new Date() }
+      });
 
     res.json(row);
   } catch (e) {
@@ -341,7 +385,7 @@ export async function scheduleExitInterview(req: Request, res: Response) {
       where: { resignationId: id },
       create: {
         resignationId: id,
-        employeeId: resignation.employeeId, 
+        employeeId: resignation.employeeId,
         scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
         interviewerId: interviewerId ?? null,
         notes
@@ -349,7 +393,7 @@ export async function scheduleExitInterview(req: Request, res: Response) {
       update: {
         scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
         interviewerId: interviewerId ?? null,
-        employeeId: resignation.employeeId, 
+        employeeId: resignation.employeeId,
         notes
       }
     });
@@ -643,7 +687,7 @@ export const generateClearanceCertificate = async (req: Request, res: Response) 
   });
   if (!r) return res.status(404).json({ message: 'Resignation not found' });
 
-  
+
   // 2) Eligibility checks
   const allClearancesApproved = r.clearances.length > 0 && r.clearances.every(c => c.decision === 'APPROVED');
   const allTasksDone = r.handoverTasks.every(t => t.status === 'DONE');
@@ -696,13 +740,13 @@ export const generateClearanceCertificate = async (req: Request, res: Response) 
   // 7) Persist URL + code
   await prisma.resignationDocument.upsert({
     where: { resignationId: r.id },
-    create: { resignationId: r.id, clearanceCertificateUrl: publicUrl, clearanceCertificateCode: code, clearanceIssuedAt: new Date(),  },
+    create: { resignationId: r.id, clearanceCertificateUrl: publicUrl, clearanceCertificateCode: code, clearanceIssuedAt: new Date(), },
     update: { clearanceCertificateUrl: publicUrl, clearanceCertificateCode: code, clearanceIssuedAt: new Date() },
   });
-  
+
 
   // 8) Cleanup temp
-  try { await fsp.unlink(filePath); } catch {}
+  try { await fsp.unlink(filePath); } catch { }
 
   return res.json({ url: publicUrl, code });
 };
@@ -748,12 +792,12 @@ async function generateClearancePdf(input: ClearanceCertInput): Promise<{ filePa
   }
 
   doc.font('Helvetica-Bold').fontSize(18).fillColor('#111827')
-     .text(input.companyName, M, cursorY, { width: w - 2 * M, align: 'center' });
+    .text(input.companyName, M, cursorY, { width: w - 2 * M, align: 'center' });
   cursorY = doc.y;
 
   if (input.companyTagline) {
     doc.font('Helvetica').fontSize(10).fillColor('#6b7280')
-       .text(input.companyTagline, M, cursorY + 2, { width: w - 2 * M, align: 'center' });
+      .text(input.companyTagline, M, cursorY + 2, { width: w - 2 * M, align: 'center' });
     cursorY = doc.y;
   }
 
@@ -767,7 +811,7 @@ async function generateClearancePdf(input: ClearanceCertInput): Promise<{ filePa
   // Title
   doc.moveDown(0.6);
   doc.font('Helvetica-Bold').fontSize(22).fillColor('#1f2937')
-     .text('CLEARANCE CERTIFICATE', M, cursorY, { width: w - 2 * M, align: 'center' });
+    .text('CLEARANCE CERTIFICATE', M, cursorY, { width: w - 2 * M, align: 'center' });
   cursorY = doc.y + 8;
 
   // Employee Panel
@@ -796,8 +840,8 @@ async function generateClearancePdf(input: ClearanceCertInput): Promise<{ filePa
 
   // Statement
   doc.font('Helvetica').fontSize(12).fillColor('#374151')
-     .text('This is to certify that the above employee has completed the exit formalities and has no dues pending with the company as on the date of issue.',
-           M, cursorY, { width: w - 2 * M, align: 'left' });
+    .text('This is to certify that the above employee has completed the exit formalities and has no dues pending with the company as on the date of issue.',
+      M, cursorY, { width: w - 2 * M, align: 'left' });
   cursorY = doc.y + 10;
 
   // Table
@@ -839,8 +883,8 @@ async function generateClearancePdf(input: ClearanceCertInput): Promise<{ filePa
   doc.moveTo(M + 30, sigY).lineTo(M + 180, sigY).stroke('#9ca3af');
   doc.moveTo(M + 230, sigY).lineTo(M + 380, sigY).stroke('#9ca3af');
   doc.font('Helvetica').fontSize(10).fillColor('#374151')
-     .text('HR Representative', M + 30, sigY + 6, { width: 150, align: 'center' })
-     .text('Department Head', M + 230, sigY + 6, { width: 150, align: 'center' });
+    .text('HR Representative', M + 30, sigY + 6, { width: 150, align: 'center' })
+    .text('Department Head', M + 230, sigY + 6, { width: 150, align: 'center' });
 
   doc.font('Helvetica').fontSize(10).fillColor('#6b7280');
   doc.text('This is a system-generated document and does not require a physical signature.', M, h - 70, {
@@ -998,8 +1042,8 @@ export async function listResignationsWithClearances(req: AuthenticatedRequest, 
           }
         },
         clearances: allowedClearanceType
-        ? { where: { type: allowedClearanceType as ClearanceType } } // ✅ Cast it to the enum
-        : false,
+          ? { where: { type: allowedClearanceType as ClearanceType } } // ✅ Cast it to the enum
+          : false,
       },
       orderBy: { createdAt: 'desc' }
     });
@@ -1009,4 +1053,55 @@ export async function listResignationsWithClearances(req: AuthenticatedRequest, 
     console.error(err);
     res.status(500).json({ error: 'Failed to load resignation clearances' });
   }
+}
+export const initNoticePeriodSchedular = () => {
+  cron.schedule('0 2 * * *', async () => {
+    console.log('⏰ [Cron] Checking employees whose notice period has ended...');
+
+    try {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      // 1️⃣ Find all resignation requests that are approved and whose actual LWD < today
+      const dueResignations = await prisma.resignationRequest.findMany({
+        where: {
+          status: 'APPROVED',
+          actualLastWorkingDay: { lt: today },
+          employee: {
+            employmentStatus: 'NOTICE_PERIOD',
+          },
+        },
+        include: {
+          employee: true,
+        },
+      });
+
+      console.log(`📋 Found ${dueResignations.length} employees with ended notice period.`);
+
+      // 2️⃣ Update each employee to 'RESIGNED'
+      for (const resignation of dueResignations) {
+        await prisma.employee.update({
+          where: { id: resignation.employeeId },
+          data: { employmentStatus: 'RESIGNED' },
+        });
+
+        console.log(`✅ Employee ID ${resignation.employeeId} marked as RESIGNED.`);
+
+        // // Optional: also update the resignation request status → COMPLETED
+        // await prisma.resignationRequest.update({
+        //   where: { id: resignation.id },
+        //   data: { status: 'COMPLETED' },
+        // });
+      }
+
+      console.log('🎉 [Cron] Notice period check completed.');
+      console.log("⏰ Running Health Check Reminder...");
+      await sendHealthCheckReminders();
+      console.log("🎉 Health Check Reminder Completed.");
+    } catch (error) {
+      console.error('❌ [Cron] Error in notice period check:', error);
+    } finally {
+      await prisma.$disconnect();
+    }
+  });
 }

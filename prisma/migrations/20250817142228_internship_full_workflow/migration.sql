@@ -5,13 +5,13 @@
 
 */
 -- DropForeignKey
-ALTER TABLE `internship` DROP FOREIGN KEY `Internship_employeeId_fkey`;
+ALTER TABLE `Internship` DROP FOREIGN KEY `Internship_employeeId_fkey`;
 
 -- DropIndex
-DROP INDEX `Internship_employeeId_fkey` ON `internship`;
+DROP INDEX `Internship_employeeId_fkey` ON `Internship`;
 
 -- AlterTable
-ALTER TABLE `internship` ADD COLUMN `candidateName` VARCHAR(191) NOT NULL,
+ALTER TABLE `Internship` ADD COLUMN `candidateName` VARCHAR(191) NOT NULL,
     ADD COLUMN `email` VARCHAR(191) NULL,
     ADD COLUMN `phone` VARCHAR(191) NULL,
     ADD COLUMN `stipend` INTEGER NULL,

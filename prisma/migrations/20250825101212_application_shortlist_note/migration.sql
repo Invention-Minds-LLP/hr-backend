@@ -1,2 +1,2 @@
 -- AlterTable
-ALTER TABLE `application` ADD COLUMN `shortlistNote` VARCHAR(191) NULL;
+ALTER TABLE `Application` ADD COLUMN `shortlistNote` VARCHAR(191) NULL;

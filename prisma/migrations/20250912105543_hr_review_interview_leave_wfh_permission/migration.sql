@@ -1,12 +1,12 @@
 -- AlterTable
-ALTER TABLE `candidate` ADD COLUMN `address` VARCHAR(191) NULL;
+ALTER TABLE `Candidate` ADD COLUMN `address` VARCHAR(191) NULL;
 
 -- AlterTable
-ALTER TABLE `interviewhrreview` ADD COLUMN `expectedDoj` DATETIME(3) NULL,
+ALTER TABLE `InterviewHRReview` ADD COLUMN `expectedDoj` DATETIME(3) NULL,
     ADD COLUMN `noticePeriod` INTEGER NULL;
 
 -- AlterTable
-ALTER TABLE `leaverequest` ADD COLUMN `hodDecidedAt` DATETIME(3) NULL,
+ALTER TABLE `LeaveRequest` ADD COLUMN `hodDecidedAt` DATETIME(3) NULL,
     ADD COLUMN `hodDecision` ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'PENDING',
     ADD COLUMN `hodNote` VARCHAR(191) NULL,
     ADD COLUMN `hrDecidedAt` DATETIME(3) NULL,
@@ -14,7 +14,7 @@ ALTER TABLE `leaverequest` ADD COLUMN `hodDecidedAt` DATETIME(3) NULL,
     ADD COLUMN `hrNote` VARCHAR(191) NULL;
 
 -- AlterTable
-ALTER TABLE `permissionrequest` ADD COLUMN `hodDecidedAt` DATETIME(3) NULL,
+ALTER TABLE `PermissionRequest` ADD COLUMN `hodDecidedAt` DATETIME(3) NULL,
     ADD COLUMN `hodDecision` ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'PENDING',
     ADD COLUMN `hodNote` VARCHAR(191) NULL,
     ADD COLUMN `hrDecidedAt` DATETIME(3) NULL,
@@ -22,7 +22,7 @@ ALTER TABLE `permissionrequest` ADD COLUMN `hodDecidedAt` DATETIME(3) NULL,
     ADD COLUMN `hrNote` VARCHAR(191) NULL;
 
 -- AlterTable
-ALTER TABLE `wfhrequest` ADD COLUMN `hodDecidedAt` DATETIME(3) NULL,
+ALTER TABLE `WFHRequest` ADD COLUMN `hodDecidedAt` DATETIME(3) NULL,
     ADD COLUMN `hodDecision` ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'PENDING',
     ADD COLUMN `hodNote` VARCHAR(191) NULL,
     ADD COLUMN `hrDecidedAt` DATETIME(3) NULL,
