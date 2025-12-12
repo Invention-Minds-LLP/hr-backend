@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
-import { PrismaClient, PermissionStatus } from "@prisma/client";
-const prisma = new PrismaClient();
+// import { PrismaClient, PermissionStatus } from "@prisma/client";
+// const prisma = new PrismaClient();
+import { prisma } from "../../lib/prisma";
 
 
 export const createIncident = async (req: any, res: Response) => {

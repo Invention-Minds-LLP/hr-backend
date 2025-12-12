@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
-const prisma = new PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+import { prisma } from "../../lib/prisma";
 
 
 import bcrypt from "bcryptjs";
@@ -87,6 +88,7 @@ export const loginUser = async (req: Request, res: Response) => {
           departmentId: true,
           photoUrl: true,
           designation: true,
+          roleId: true
         }
     })
 
@@ -131,9 +133,11 @@ export const loginUser = async (req: Request, res: Response) => {
       empId: employee.id,
       deptId: employee.departmentId,
       designation: employee.designation,
-      photoUrl: employee.photoUrl || null
+      photoUrl: employee.photoUrl || null,
+      roleId: employee.roleId,
     });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Login failed" });
   }
 };

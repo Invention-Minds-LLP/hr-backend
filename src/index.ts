@@ -35,6 +35,14 @@ import attendanceCalendarRoutes from "./api/attendance/attendance.routes";
 import { initSurveyScheduler } from "./api/survey/survery.controller";
 import { initNoticePeriodSchedular } from "./api/resignation/resignation.controller";
 import incidentRouter from "./api/incident/incident.routes";
+import { initLeaveEndSchedular } from "./api/leave/leave.controller";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { startSchedulers } from "./schedulers/scheduler";
+
+
+
+
 
 
 
@@ -43,6 +51,12 @@ const port = 3002;
 
 dotenv.config();
 const app = express();
+app.use(helmet());
+// app.use("/api/", rateLimit({
+//   windowMs: 10 * 60 * 1000, 
+//   max: 300
+// }));
+
 
 app.use(cors({
     origin: ["http://localhost:4200",
@@ -89,6 +103,7 @@ app.get("/", (req, res) => {
     res.send("✅ HR Management API is running!");
   });
 
+  startSchedulers();
   
   
   // Error handler middleware (optional, but good practice)
@@ -97,9 +112,6 @@ app.get("/", (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   });
 
-  initSurveyScheduler();
-  initNoticePeriodSchedular();
-  
   // Start the server
   app.listen(port, '0.0.0.0',() => {
     console.log(`🚀 Server running at http://127.0.0.1:${port}/`);

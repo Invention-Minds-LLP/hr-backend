@@ -116,15 +116,67 @@ export async function getResignationById(req: Request, res: Response) {
     const id = Number(req.params.id);
     const row = await prisma.resignationRequest.findUnique({
       where: { id },
-      include: {
-        employee: true,
-        handoverTasks: true,
-        clearances: true,
-        exitInterview: true,
-        finalSettlement: true,
-        documents: true
+      select: {
+        id: true,
+    
+        // Only the minimal employee info you use
+        employee: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true
+          }
+        },
+    
+        // Tasks
+        handoverTasks: {
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            assigneeId: true,
+            dueDate: true,
+            status: true,
+            completedAt: true
+          }
+        },
+    
+        // Clearances
+        clearances: {
+          select: {
+            id: true,
+            type: true,
+            decision: true,
+            note: true,
+            verifierId: true,
+            verifier: {
+              select: {
+                firstName: true,
+                lastName: true
+              }
+            }
+          }
+        },
+    
+        // Exit Interview
+        exitInterview: {
+          select: {
+            scheduledAt: true,
+            interviewerId: true,
+            notes: true
+          }
+        },
+    
+        // Final Settlement
+        finalSettlement: {
+          select: {
+            status: true,
+            note: true
+          }
+        }
       }
     });
+    
     if (!row) return res.status(404).json({ error: 'Resignation not found' });
     res.json(row);
   } catch (e) {
@@ -1100,8 +1152,6 @@ export const initNoticePeriodSchedular = () => {
       console.log("🎉 Health Check Reminder Completed.");
     } catch (error) {
       console.error('❌ [Cron] Error in notice period check:', error);
-    } finally {
-      await prisma.$disconnect();
     }
   });
 }

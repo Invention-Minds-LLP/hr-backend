@@ -1,8 +1,11 @@
 import { Request, Response } from "express";
-import { PrismaClient, LeaveStatus } from "@prisma/client";
+// import { PrismaClient, LeaveStatus } from "@prisma/client";
 import axios from "axios";
-const prisma = new PrismaClient();
+// const prisma = new PrismaClient();
+import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
+import cron from "node-cron";
+import { da } from "date-fns/locale";
 
 const LEAVE_APPLY_TEMPLATE_ID = "890321";
 const LEAVE_STATUS_TEMPLATE_ID = "909803";
@@ -26,7 +29,7 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
         year: leaveYear,
       }
     });
-    
+
 
     if (!balance) {
       return res.status(400).json({
@@ -112,7 +115,15 @@ export const getLeaveRequests = async (_req: Request, res: Response) => {
       where: {
         status: "PENDING" // only approved leave requests
       },
-      include: { leaveType: true, employee: true },
+      include: {
+        leaveType: true,
+        employee: {
+          include: {
+            Department: true,    // Gives departmentId + department name
+            role: true           // Gives roleId + role name
+          }
+        }
+      },
       orderBy: { createdAt: "desc" }
     });
     res.json(leaves);
@@ -153,117 +164,328 @@ export const getLeaveTypes = async (_req: Request, res: Response) => {
   }
 };
 
+// export const updateLeaveStatus = async (req: Request, res: Response) => {
+//   try {
+//     const { id } = req.params;
+//     const { role, status, userId } = req.body;
+//     // role = "MANAGER" or "HR"
+
+//     if (!['MANAGER', 'HR'].includes(role)) {
+//       return res.status(400).json({ error: 'Invalid role' });
+//     }
+
+//     if (!["Approved", "Declined"].includes(status)) {
+//       return res.status(400).json({ error: "Invalid status value" });
+//     }
+
+//     const leave = await prisma.leaveRequest.findUnique({ where: { id: Number(id) } });
+//     if (!leave) return res.status(404).json({ error: "Leave request not found" });
+
+//     const data: any = {};
+
+//     // --- Manager decision first ---
+//     if (role === "MANAGER") {
+//       if (leave.hodDecision !== "PENDING") {
+//         return res.status(400).json({ error: "Manager already decided" });
+//       }
+//       data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+//       data.hodDecidedAt = new Date();
+
+//       if (data.hodDecision === "REJECTED") {
+//         data.status = LeaveStatus.REJECTED;
+//         data.declinedBy = userId;
+//         data.declinedDate = new Date();
+//       }
+//     }
+
+//     // --- HR decision second ---
+//     else if (role === "HR") {
+//       if (leave.hodDecision !== "APPROVED") {
+//         return res.status(400).json({ error: "Manager approval required first" });
+//       }
+//       if (leave.hrDecision !== "PENDING") {
+//         return res.status(400).json({ error: "HR already decided" });
+//       }
+
+//       data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+//       data.hrDecidedAt = new Date();
+
+//       if (data.hrDecision === "APPROVED") {
+//         data.status = LeaveStatus.APPROVED;
+//         data.approvedBy = userId;
+//         data.approvedDate = new Date();
+//         const leaveYear = leave.startDate.getFullYear();
+//         const days = daysInclusive(leave.startDate, leave.endDate);
+
+//         await prisma.employeeLeaveBalance.updateMany({
+//           where: {
+//             employeeId: leave.employeeId,
+//             leaveTypeId: leave.leaveTypeId,
+//             year: leaveYear
+//           },
+//           data: {
+//             used: { increment: days }
+//           }
+//         });
+
+//       } else {
+//         data.status = LeaveStatus.REJECTED;
+//         data.declinedBy = userId;
+//         data.declinedDate = new Date();
+//       }
+//     }
+
+//     const updatedLeave = await prisma.leaveRequest.update({
+//       where: { id: Number(id) },
+//       data,
+//       include: { employee: true, leaveType: true },
+//     });
+
+//     // --- WhatsApp notify employee ---
+//     const employee = updatedLeave.employee;
+//     const employeePhone = formatPhoneNumber(employee?.phone || "");
+//     const employeeName = [employee?.firstName, employee?.lastName].filter(Boolean).join(" ");
+//     const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
+//     const start = fmtDate(updatedLeave.startDate);
+//     const end = fmtDate(updatedLeave.endDate);
+//     const statusLabel =
+//       updatedLeave.status === LeaveStatus.APPROVED ? "Approved" :
+//         updatedLeave.status === LeaveStatus.REJECTED ? "Declined" : "Pending";
+
+//     const message = `Your leave application for ${days} day(s), from ${start} to ${end}, has been ${statusLabel}. Please contact the concerned person for more details.`;
+
+//     if(statusLabel === "Approved" || statusLabel === "Declined") {
+//       await createNotification(updatedLeave.employeeId, message);
+//     }
+
+//     if (employeePhone && updatedLeave.status === "APPROVED" ||
+//       (updatedLeave.status === "REJECTED" && (role === "HR" || role === "MANAGER"))) {
+//       try {
+//         await sendWhatsAppTemplate({
+//           to: employeePhone,
+//           templateId: LEAVE_STATUS_TEMPLATE_ID,
+//           placeholders: [employeeName, days, start, end, statusLabel],
+//         });
+//       } catch (e: any) {
+//         console.error("Leave status WA send failed:", e?.message || e);
+//       }
+//     }
+
+//     res.json(updatedLeave);
+//   } catch (error) {
+//     console.error("Error updating leave status:", error);
+//     res.status(500).json({ error: "Failed to update leave status" });
+//   }
+// };
 export const updateLeaveStatus = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { role, status, userId } = req.body;
-    // role = "MANAGER" or "HR"
-
-    if (!['MANAGER', 'HR'].includes(role)) {
-      return res.status(400).json({ error: 'Invalid role' });
-    }
+    // role = "REPORTING_MANAGER", "HR_MANAGER", "MANAGEMENT"
 
     if (!["Approved", "Declined"].includes(status)) {
-      return res.status(400).json({ error: "Invalid status value" });
+      return res.status(400).json({ error: "Invalid status" });
     }
 
-    const leave = await prisma.leaveRequest.findUnique({ where: { id: Number(id) } });
-    if (!leave) return res.status(404).json({ error: "Leave request not found" });
+    // Fetch leave with employee and department
+    const leave = await prisma.leaveRequest.findUnique({
+      where: { id: Number(id) },
+      include: {
+        employee: {
+          include: {
+            Department: true
+          }
+        }
+      }
+    });
+
+    if (!leave) return res.status(404).json({ error: "Leave not found" });
+
+    const emp = leave.employee;
+
+    const roleId = emp.roleId;               // 1=HR Manager, 2=Employee, 3=Reporting Manager, 4=Management
+    const deptId = emp.departmentId;         // HR department = 1
+    const isHRDept = deptId === 1;           // HR Employee or HR Manager
 
     const data: any = {};
 
-    // --- Manager decision first ---
-    if (role === "MANAGER") {
-      if (leave.hodDecision !== "PENDING") {
-        return res.status(400).json({ error: "Manager already decided" });
+    // ================================================================
+    //  1️⃣ HR EMPLOYEE (dept = 1, roleId ≠ HR Manager)
+    // ================================================================
+    if (isHRDept && roleId !== 1) {
+      // Only HR Manager can approve at Level 1
+      if (role !== "HR_MANAGER") {
+        return res.status(400).json({ error: "Only HR Manager can approve HR employees" });
       }
+
       data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
       data.hodDecidedAt = new Date();
 
-      if (data.hodDecision === "REJECTED") {
-        data.status = LeaveStatus.REJECTED;
+    
+      data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+      data.hrDecidedAt = new Date();
+      data.status = status === "Approved" ? "APPROVED" : "REJECTED";
+
+      if (status === "Declined") {
         data.declinedBy = userId;
         data.declinedDate = new Date();
+        data.declineReason = req.body.declineReason || null;
       }
     }
 
-    // --- HR decision second ---
-    else if (role === "HR") {
-      if (leave.hodDecision !== "APPROVED") {
-        return res.status(400).json({ error: "Manager approval required first" });
+    // ================================================================
+    //  2️⃣ HR MANAGER (roleId = 1)
+    // ================================================================
+    else if (roleId === 1) {
+      if (role !== "MANAGEMENT") {
+        return res.status(400).json({ error: "Only Management can approve HR Manager leave" });
       }
-      if (leave.hrDecision !== "PENDING") {
-        return res.status(400).json({ error: "HR already decided" });
-      }
+
+      data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+      data.hodDecidedAt = new Date();
+
+      // No HR step for HR Manager
 
       data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
       data.hrDecidedAt = new Date();
+      data.status = status === "Approved" ? "APPROVED" : "REJECTED";
 
-      if (data.hrDecision === "APPROVED") {
-        data.status = LeaveStatus.APPROVED;
-        data.approvedBy = userId;
-        data.approvedDate = new Date();
-        const leaveYear = leave.startDate.getFullYear();
-        const days = daysInclusive(leave.startDate, leave.endDate);
-    
-        await prisma.employeeLeaveBalance.updateMany({
-          where: {
-            employeeId: leave.employeeId,
-            leaveTypeId: leave.leaveTypeId,
-            year: leaveYear
-          },
-          data: {
-            used: { increment: days }
-          }
-        });
-        
-      } else {
-        data.status = LeaveStatus.REJECTED;
+      if (status === "Declined") {
         data.declinedBy = userId;
         data.declinedDate = new Date();
+        data.declineReason = req.body.declineReason || null;
       }
     }
 
+    // ================================================================
+    //  3️⃣ REPORTING MANAGERS (roleId = 3) AND HOD (same logic)
+    //    Level 1 = Management
+    //    Level 2 = HR Manager
+    // ================================================================
+    else if (roleId === 3 || roleId === 5 /* HOD role if exists */) {
+
+      // Level 1: Management
+      if (role === "MANAGEMENT") {
+        data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+        data.hodDecidedAt = new Date();
+
+        if (status === "Declined") {
+          data.status = "REJECTED";
+          data.declinedBy = userId;
+          data.declinedDate = new Date();
+          data.declineReason = req.body.declineReason || null;
+        }
+      }
+
+      // Level 2: HR Manager
+      else if (role === "HR_MANAGER") {
+        if (leave.hodDecision !== "APPROVED") {
+          return res.status(400).json({ error: "Management approval required first" });
+        }
+
+        data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+        data.hrDecidedAt = new Date();
+
+        data.status = status === "Approved" ? "APPROVED" : "REJECTED";
+
+        if (status === "Declined") {
+          data.declinedBy = userId;
+          data.declinedDate = new Date();
+          data.declineReason = req.body.declineReason || null;
+        }
+      }
+
+      else {
+        return res.status(400).json({ error: "Invalid approver for Reporting Manager/HOD" });
+      }
+    }
+
+    // ================================================================
+    //  4️⃣ NORMAL EMPLOYEE (roleId = 2)
+    //    Level 1 = Reporting Manager
+    //    Level 2 = HR Manager
+    // ================================================================
+    else if (roleId === 2) {
+      // Level 1: Reporting Manager
+      if (role === "REPORTING_MANAGER") {
+        data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+        data.hodDecidedAt = new Date();
+
+        if (status === "Declined") {
+          data.status = "REJECTED";
+          data.declinedBy = userId;
+          data.declinedDate = new Date();
+          data.declineReason = req.body.declineReason || null;
+        }
+      }
+
+      // Level 2: HR Manager
+      else if (role === "HR_MANAGER") {
+        if (leave.hodDecision !== "APPROVED") {
+          return res.status(400).json({ error: "Manager approval required first" });
+        }
+
+        data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+        data.hrDecidedAt = new Date();
+
+        data.status = status === "Approved" ? "APPROVED" : "REJECTED";
+
+        if (status === "Declined") {
+          data.declinedBy = userId;
+          data.declinedDate = new Date();
+          data.declineReason = req.body.declineReason || null;
+        }
+      }
+
+      else {
+        return res.status(400).json({ error: "Unauthorized approver" });
+      }
+    }
+
+    // ================================================================
+    //  SAVE UPDATED LEAVE & UPDATE BALANCES
+    // ================================================================
     const updatedLeave = await prisma.leaveRequest.update({
       where: { id: Number(id) },
       data,
-      include: { employee: true, leaveType: true },
+      include: { employee: true, leaveType: true }
     });
 
-    // --- WhatsApp notify employee ---
-    const employee = updatedLeave.employee;
-    const employeePhone = formatPhoneNumber(employee?.phone || "");
-    const employeeName = [employee?.firstName, employee?.lastName].filter(Boolean).join(" ");
-    const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
+    // If fully approved → deduct leave balance
+    if (updatedLeave.status === "APPROVED") {
+      const year = updatedLeave.startDate.getFullYear();
+      const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
+
+      await prisma.employeeLeaveBalance.updateMany({
+        where: {
+          employeeId: updatedLeave.employeeId,
+          leaveTypeId: updatedLeave.leaveTypeId,
+          year
+        },
+        data: {
+          used: { increment: days }
+        }
+      });
+    }
+
+    // Notifications (optional)
+    const employeePhone = formatPhoneNumber(updatedLeave.employee.phone);
+    const employeeName = `${updatedLeave.employee.firstName} ${updatedLeave.employee.lastName}`;
     const start = fmtDate(updatedLeave.startDate);
     const end = fmtDate(updatedLeave.endDate);
-    const statusLabel =
-      updatedLeave.status === LeaveStatus.APPROVED ? "Approved" :
-        updatedLeave.status === LeaveStatus.REJECTED ? "Declined" : "Pending";
+    const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
+    const statusLabel = updatedLeave.status;
 
-    const message = `Your leave application for ${days} day(s), from ${start} to ${end}, has been ${statusLabel}. Please contact the concerned person for more details.`;
-
-    if(statusLabel === "Approved" || statusLabel === "Declined") {
-      await createNotification(updatedLeave.employeeId, message);
-    }
-
-    if (employeePhone && updatedLeave.status === "APPROVED" ||
-      (updatedLeave.status === "REJECTED" && (role === "HR" || role === "MANAGER"))) {
-      try {
-        await sendWhatsAppTemplate({
-          to: employeePhone,
-          templateId: LEAVE_STATUS_TEMPLATE_ID,
-          placeholders: [employeeName, days, start, end, statusLabel],
-        });
-      } catch (e: any) {
-        console.error("Leave status WA send failed:", e?.message || e);
-      }
-    }
+    await createNotification(
+      updatedLeave.employeeId,
+      `Your leave request from ${start} to ${end} (${days} days) has been ${statusLabel}.`
+    );
 
     res.json(updatedLeave);
+
   } catch (error) {
-    console.error("Error updating leave status:", error);
-    res.status(500).json({ error: "Failed to update leave status" });
+    console.error("Error updating leave:", error);
+    res.status(500).json({ error: "Failed to update leave" });
   }
 };
 
@@ -549,3 +771,56 @@ export const getLeaveBalance = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to fetch leave balance" });
   }
 };
+export const initLeaveEndSchedular = () => {
+  cron.schedule("0 9 * * *", async () => {
+    console.log("Running leave reminder cron...");
+
+    const today = new Date();
+
+    const leaves = await prisma.leaveRequest.findMany({
+      where: {
+        status: "APPROVED",
+        endDate: today
+      },
+      include: {
+        employee: true,
+        leaveType: true,
+      }
+    });
+
+    for (const leave of leaves) {
+      const start = new Date(leave.startDate);
+      const end = new Date(leave.endDate);
+
+      const duration =
+        Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+
+      console.log(`Checking leave ID ${leave.id} for ${leave.employee.firstName}: ${fmtDate(start)} to ${fmtDate(end)} (${duration} days)`);
+
+      // RULE: Only send if leave duration > 1 day
+      if (duration <= 1) continue;
+
+      // Last day check
+      if (isSameDate(today, end)) {
+        const emp = leave.employee;
+
+        if (!emp.phone) continue;
+
+        const message = `Hello ${emp.firstName}, today is the *last day of your approved leave*. Please be prepared to report tomorrow.`;
+
+        console.log(`Leave End Reminder to ${emp.firstName} (${emp.phone}): ${message}`);
+
+        // await sendWhatsAppMessage(emp.phone, message);
+      }
+    }
+  });
+
+}
+
+function isSameDate(date1: Date, date2: Date): boolean {
+  return (
+    date1.getFullYear() === date2.getFullYear() &&
+    date1.getMonth() === date2.getMonth() &&
+    date1.getDate() === date2.getDate()
+  );
+}

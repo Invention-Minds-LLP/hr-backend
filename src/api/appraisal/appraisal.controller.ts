@@ -1,7 +1,8 @@
 import { Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+// import { PrismaClient } from "@prisma/client";
 import cron from 'node-cron';
-const prisma = new PrismaClient();
+// const prisma = new PrismaClient();
+import { prisma } from "../../lib/prisma";
 import { sendWhatsAppTemplate } from "../leave/leave.controller";
 import { createNotification } from "../notifications/notifications.controller";
 
@@ -107,21 +108,36 @@ export const createAppraisalsForEmployees = async (
   return created;
 };
 
-cron.schedule('0 0 1 */3 *', async () => {
-  console.log('Running quarterly appraisal creation job...');
-  const activeEmployees = await prisma.employee.findMany({
-    where: { employmentStatus: 'ACTIVE' },
-    select: { id: true }
+export const initQuarterlyAppraisalScheduler = () => {
+  cron.schedule("0 0 1 */3 *", async () => {
+    console.log("📅 Running quarterly appraisal creation job...");
+
+    try {
+      const activeEmployees = await prisma.employee.findMany({
+        where: { employmentStatus: "ACTIVE" },
+        select: { id: true }
+      });
+
+      if (!activeEmployees.length) {
+        console.log("⚠️ No active employees. Skipping appraisal creation.");
+        return;
+      }
+
+      const ids = activeEmployees.map(e => e.id);
+
+      // Determine quarter name
+      const now = new Date();
+      const quarter = Math.floor(now.getMonth() / 3) + 1;
+      const cycle = `Quarter ${quarter} ${now.getFullYear()}`;
+
+      await createAppraisalsForEmployees(ids, cycle, "Draft");
+
+      console.log(`✅ Appraisals created for ${ids.length} employees`);
+    } catch (error) {
+      console.error("❌ Error during quarterly appraisal scheduler:", error);
+    }
   });
-
-  if (!activeEmployees.length) return;
-
-  const ids = activeEmployees.map(e => e.id);
-  const cycle = `Quarter ${Math.floor((new Date().getMonth() / 3) + 1)} ${new Date().getFullYear()}`;
-
-  await createAppraisalsForEmployees(ids, cycle, 'Draft');
-  console.log(`Appraisals created for ${ids.length} active employees`);
-});
+};
 export const getAllAppraisalsWithManagerReview = async (req: Request, res: Response) => {
   try {
     const appraisals = await prisma.appraisalForm.findMany({

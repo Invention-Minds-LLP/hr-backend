@@ -503,7 +503,14 @@ export class DashboardController {
             listPendingClearances().then(arr => arr.length),
 
         ]);
-        const probationSoon = employees.filter((e) => e.probationEndDate && e.probationEndDate <= addDays(todayEnd, 7)).length;
+        // const probationSoon = employees.filter((e) => e.probationEndDate && e.probationEndDate <= addDays(todayEnd, 7)).length;
+        const probationSoon = employees.filter(
+            (e) =>
+              e.probationEndDate &&
+              e.probationEndDate >= todayStart &&
+              e.probationEndDate <= addDays(todayEnd, 7)
+          ).length;
+          
 
         // ---- Recruiting pipeline mini bars
         const pipeline = await this.pipelineMiniBars();
@@ -629,7 +636,12 @@ export class DashboardController {
             (async () => {
                 const allEmp = await prisma.employee.findMany({
                     where: { id: { in: employeeIds } },
-                    include: { documents: true },
+                    select: {
+                        id: true,
+                        documents: {
+                          select: { title: true }
+                        }
+                    },
                 });
                 const mandatoryDocs = ['AADHAAR', 'PAN', 'BANK'];
                 return allEmp.filter(emp => {
@@ -720,7 +732,7 @@ export class DashboardController {
                 ['Employees eligible for appraisal (this month)', String(eligibleIds.length)],
                 ['Pending Manager Review', String(appraisalPendingMgr), appraisalPendingMgr ? 'warn' : 'good'],
                 ['Submitted appraisals', String(appraisalSubmitted)],
-                ['Resignation – Exit form not filled', String(resignationNoExit), resignationNoExit ? 'warn' : 'good'],
+                ['Resignation - Exit form not filled', String(resignationNoExit), resignationNoExit ? 'warn' : 'good'],
                 ['Employees missing mandatory documents', String(missingDocs), missingDocs ? 'warn' : 'good'],
             ],
 

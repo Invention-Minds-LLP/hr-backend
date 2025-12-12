@@ -1,9 +1,10 @@
 import { Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+// import { PrismaClient } from "@prisma/client";
 import cron from "node-cron";
 import { EmploymentStatus } from "@prisma/client";
 
-const prisma = new PrismaClient();
+// const prisma = new PrismaClient();
+import { prisma } from "../../lib/prisma";
 
 // ================== GET QUESTIONS ==================
 export async function getSurveyQuestions(req: Request, res: Response) {
@@ -21,42 +22,90 @@ export async function getSurveyQuestions(req: Request, res: Response) {
 }
 
 // ================== SUBMIT SURVEY ==================
-export async function submitSurvey(req: Request, res: Response) {
-  try {
-    const { employeeId, answers } = req.body;
+// export async function submitSurvey(req: Request, res: Response) {
+//   try {
+//     const { employeeId, answers } = req.body;
 
-    if (!employeeId || !Array.isArray(answers) || !answers.length) {
-      return res
-        .status(400)
-        .json({ error: "employeeId and answers[] are required" });
-    }
+//     if (!employeeId || !Array.isArray(answers) || !answers.length) {
+//       return res
+//         .status(400)
+//         .json({ error: "employeeId and answers[] are required" });
+//     }
 
-    const survey = await prisma.employeeSurvey.create({
-        data: {
-          date: new Date(),
-          submittedAt: new Date(),
-          status: "SUBMITTED",
-          employee: {
-            connect: { id: Number(employeeId) } // or the correct unique field
-          },
-          responses: {
-            create: answers.map((a: any) => ({
-              questionId: a.questionId,
-              answer: a.answer,
-            })),
-          },
-        },
-      });
+//     const survey = await prisma.employeeSurvey.create({
+//         data: {
+//           date: new Date(),
+//           submittedAt: new Date(),
+//           status: "SUBMITTED",
+//           employee: {
+//             connect: { id: Number(employeeId) } // or the correct unique field
+//           },
+//           responses: {
+//             create: answers.map((a: any) => ({
+//               questionId: a.questionId,
+//               answer: a.answer,
+//             })),
+//           },
+//         },
+//       });
       
 
-    return res.json({ success: true, surveyId: survey.id });
+//     return res.json({ success: true, surveyId: survey.id });
+//   } catch (e: any) {
+//     console.error("submitSurvey error:", e);
+//     return res
+//       .status(500)
+//       .json({ error: e?.message || "Failed to submit survey" });
+//   }
+// }
+export async function submitSurvey(req: Request, res: Response) {
+  try {
+    const { surveyId, employeeId, answers } = req.body;
+
+    if (!surveyId || !employeeId || !Array.isArray(answers) || !answers.length) {
+      return res.status(400).json({ error: "surveyId, employeeId and answers[] are required" });
+    }
+
+    // 1️⃣ Check if survey exists and is still DRAFT
+    const survey = await prisma.employeeSurvey.findUnique({
+      where: { id: Number(surveyId) },
+    });
+
+    if (!survey) {
+      return res.status(404).json({ error: "Survey not found" });
+    }
+
+    if (survey.status !== "DRAFT") {
+      return res.status(400).json({ error: "Survey already submitted" });
+    }
+
+    // 2️⃣ Update survey + create responses
+    const updatedSurvey = await prisma.employeeSurvey.update({
+      where: { id: Number(surveyId) },
+      data: {
+        status: "SUBMITTED",
+        submittedAt: new Date(),
+        responses: {
+          create: answers.map((a: any) => ({
+            questionId: a.questionId,
+            answer: a.answer,
+          })),
+        },
+      },
+    });
+
+    return res.json({
+      success: true,
+      surveyId: updatedSurvey.id,
+      message: "Survey submitted successfully",
+    });
+
   } catch (e: any) {
     console.error("submitSurvey error:", e);
-    return res
-      .status(500)
-      .json({ error: e?.message || "Failed to submit survey" });
+    return res.status(500).json({ error: e.message || "Failed to submit survey" });
   }
 }
+
 
 // ================== GET SURVEY RESULTS ==================
 export async function getSurveyResults(req: Request, res: Response) {
@@ -164,6 +213,7 @@ export const initSurveyScheduler = () => {
             data: {
               employeeId: emp.id,
               date: new Date(),
+              status: "DRAFT",
             },
           });
           console.log(`✅ Created new survey for employee ${emp.id}`);

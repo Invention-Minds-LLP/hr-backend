@@ -1,7 +1,8 @@
 import { Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+// import { PrismaClient } from "@prisma/client";
 
-const prisma = new PrismaClient();
+// const prisma = new PrismaClient();
+import { prisma } from "../../lib/prisma";
 
 export const createRequisition = async (req: Request, res: Response) => {
   try {
@@ -134,7 +135,7 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
           };
         break;
 
-      case "SMO":
+      case "COO":
         updateData = reject
           ? {
             smoRejectedBy: approverName,
@@ -147,7 +148,7 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
             smoSign: signature,
             approvedBySMODate: now,
             approvedBySMOComments: comments,
-            status: "SMO_APPROVED",
+            status: "COO_APPROVED",
           };
         break;
 

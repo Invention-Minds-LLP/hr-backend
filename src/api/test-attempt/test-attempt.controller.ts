@@ -1,10 +1,11 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from "@prisma/client";
+// import { PrismaClient } from "@prisma/client";
 import formidable from 'formidable';
 import fs from 'fs';
 import path from 'path';
 import { Client } from 'basic-ftp';
-const prisma = new PrismaClient();
+// const prisma = new PrismaClient();
+import { prisma } from "../../lib/prisma";
 
 const FTP_CONFIG = {
   host: "srv680.main-hosting.eu",  // Your FTP hostname
@@ -24,7 +25,9 @@ export async function getAssignedTest(req: Request, res: Response) {
   const assignment = await prisma.assignedTest.findUnique({
     where: { id: assignmentId },
     include: {
-      test: true
+      test: {
+        include: { questions: false } // No need here, you load questionBank separately
+      }
     }
   });
 
@@ -38,8 +41,16 @@ export async function getAssignedTest(req: Request, res: Response) {
     include: { options: true }
   });
 
+  const totalAttempts = assignment.test.maxAttempts; // Allowed attempts from test
+  const attemptsTaken = assignment.attempts; // Attempts used
+
   res.json({
     ...assignment,
+    attemptsInfo: {
+      totalAttempts,
+      attemptsTaken,
+      attemptsLeft: totalAttempts - attemptsTaken
+    },
     test: {
       ...assignment.test,
       questions // attach questions dynamically

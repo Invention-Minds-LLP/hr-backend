@@ -192,15 +192,11 @@ export const getEmployeeRequests = async (req: Request, res: Response) => {
       if (!policy) return res.status(404).json({ error: `EntitlementPolicy not found for ${year}` });
   
       // 2) Fetch APPROVED rows (you can keep your includes)
-      const [leaveRequests, wfhRequests, permissionRequests] = await Promise.all([
+      const [leaveRequests, permissionRequests] = await Promise.all([
         prisma.leaveRequest.findMany({
           where: { employeeId, status: 'APPROVED' },
           orderBy: { startDate: 'desc' },
           include: { leaveType: { select: { name: true } } },
-        }),
-        prisma.wFHRequest.findMany({
-          where: { employeeId, status: 'APPROVED' },
-          orderBy: { startDate: 'desc' },
         }),
         prisma.permissionRequest.findMany({
           where: { employeeId, status: 'APPROVED' },
@@ -214,18 +210,12 @@ export const getEmployeeRequests = async (req: Request, res: Response) => {
         return { ...r, daysApproved: daysInclusive({ s, e }) };
       });
   
-      const wfhWithDays = wfhRequests.map(r => {
-        const { s, e } = clampRangeToYear(r.startDate, r.endDate, yearStart, yearEnd);
-        return { ...r, daysApproved: daysInclusive({ s, e }) };
-      });
-  
       const permissionWithHours = permissionRequests.map(r => {
         return { ...r, hoursApproved: permissionHours(r.startTime, r.endTime, r.timing as any) };
       });
   
       // 4) Totals (within year)
       const totalLeaveDays = leaveWithDays.reduce((sum, r) => sum + (r.daysApproved || 0), 0);
-      const totalWFHDays   = wfhWithDays.reduce((sum, r) => sum + (r.daysApproved || 0), 0);
       const totalPermissionHours = permissionWithHours.reduce((sum, r) => sum + (r.hoursApproved || 0), 0);
   
       // 5) Prorate entitlements from DOJ month (month-based, matches your example:
@@ -235,13 +225,11 @@ export const getEmployeeRequests = async (req: Request, res: Response) => {
       return res.json({
         // detailed rows with computed fields
         leaveRequests: leaveWithDays,
-        wfhRequests: wfhWithDays,
         permissionRequests: permissionWithHours,
   
         // totals
         totals: {
           totalLeaveDays,
-          totalWFHDays,
           totalPermissionHours,
         },
   

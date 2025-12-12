@@ -5,6 +5,8 @@ import formidable, { File as FormidableFile } from "formidable";
 import fs from "fs";
 import { Client } from 'basic-ftp';
 import bcrypt from "bcryptjs";
+import nodemailer from "nodemailer";
+
 
 const prisma = new PrismaClient();
 
@@ -14,6 +16,17 @@ const FTP_CONFIG = {
   password: "Bsrenuk@1993", // Your FTP password
   secure: false // Set to true if using FTPS
 };
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  host: "smtp.gmail.com",
+  port: 587,
+  secure: false,
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  }
+});
+
 async function uploadToFTP(localFilePath: string, remoteFileName: string): Promise<any> {
   const client = new Client();
   client.ftp.verbose = false;
@@ -145,7 +158,7 @@ export class RecruitingController {
 
   /** POST /candidates (raw) */
   createCandidate = asyncHandler(async (req, res) => {
-    const { name, email, phone, source, resumeUrl,address } = req.body || {};
+    const { name, email, phone, source, resumeUrl, address } = req.body || {};
     if (!name || !email) return bad(res, 'name and email are required');
     const cand = await prisma.candidate.create({ data: { name, email, phone, source, resumeUrl, address } });
     res.status(201).json(cand);
@@ -179,36 +192,36 @@ export class RecruitingController {
   //   res.status(201).json(app);
   // });
 
-  
+
   createApplication = asyncHandler(async (req, res) => {
     const form = formidable({ multiples: false });
-  
+
     form.parse(req, async (err, fields, files) => {
       if (err) {
         console.error("Form parse error:", err);
         return res.status(400).json({ error: "File upload failed" });
       }
-  
+
       try {
         // fields can be string | string[] | undefined
         const jobId = fields.jobId
           ? Number(Array.isArray(fields.jobId) ? fields.jobId[0] : fields.jobId)
           : undefined;
-  
+
         const candidateId = fields.candidateId
           ? Number(Array.isArray(fields.candidateId) ? fields.candidateId[0] : fields.candidateId)
           : undefined;
-  
+
         const candidateRaw = fields.candidate
           ? Array.isArray(fields.candidate)
             ? fields.candidate[0]
             : fields.candidate
           : "{}";
-  
+
         const candidate = JSON.parse(candidateRaw);
-  
+
         if (!jobId) return res.status(400).json({ error: "jobId is required" });
-  
+
         const resumeField = files.resume as FormidableFile | FormidableFile[] | undefined;
         let resumeUrl: string | undefined;
         let resumeFile: FormidableFile | undefined;
@@ -217,37 +230,37 @@ export class RecruitingController {
         } else {
           resumeFile = resumeField;
         }
-        
+
         if (resumeFile) {
           const filePath = resumeFile.filepath;
           const fileName = `${Date.now()}_${resumeFile.originalFilename}`;
           const remoteFilePath = `/public_html/resume/${fileName}`;
-        
+
           await uploadToFTP(filePath, remoteFilePath);
           resumeUrl = `https://hrproindia.in/resume/${fileName}`;
           console.log("Uploaded resume URL:", resumeUrl);
-        
+
           fs.unlinkSync(filePath);
         }
-        
+
         console.log("Resume URL to save:", resumeUrl);
-        
-  
+
+
         // --- Transaction ---
         const app = await prisma.$transaction(async (tx) => {
           let candId = candidateId;
-  
+
           if (!candId) {
             if (!candidate?.name || !candidate?.email) {
               throw new Error("candidate.name and candidate.email are required");
             }
-  
+
             // Upsert by email
             const cand = await tx.candidate.upsert({
               where: { email: candidate.email },
               update: {
                 name: candidate.name,
-                phone: candidate.phone,
+                phone: candidate.phone.toString(),
                 source: candidate.source,
                 resumeUrl: resumeUrl || candidate.resumeUrl,
                 experience: candidate.experience?.toString(),
@@ -257,7 +270,7 @@ export class RecruitingController {
               create: {
                 name: candidate.name,
                 email: candidate.email,
-                phone: candidate.phone,
+                phone: candidate.phone.toString(),
                 source: candidate.source,
                 resumeUrl: resumeUrl || candidate.resumeUrl,
                 experience: candidate.experience?.toString(),
@@ -265,10 +278,10 @@ export class RecruitingController {
                 address: candidate.address,
               },
             });
-  
+
             candId = cand.id;
           }
-  
+
           return tx.application.create({
             data: {
               jobId,
@@ -278,7 +291,7 @@ export class RecruitingController {
             include: { candidate: true, job: true },
           });
         });
-  
+
         res.status(201).json(app);
       } catch (error) {
         console.error("Error creating application:", error);
@@ -286,7 +299,7 @@ export class RecruitingController {
       }
     });
   });
-  
+
 
   /** GET /applications?jobId=..&status=..&q=.. */
   listApplications = asyncHandler(async (req, res) => {
@@ -349,7 +362,7 @@ export class RecruitingController {
         shortlistNote: to === ApplicationStatus.SHORTLISTED ? shortListNote : app.shortlistNote,
       },
     });
-    
+
 
     res.json(updated);
   });
@@ -388,120 +401,149 @@ export class RecruitingController {
   /** POST /applications/:id/interviews  
  * body: { stage, startTime, endTime, panelUserIds: number[], feedbackDue? }
  */
-scheduleInterview = asyncHandler(async (req, res) => {
-  const applicationId = Number(req.params.id);
-  const { stage, startTime, endTime, panelUserIds, feedbackDue } = req.body || {};
+  scheduleInterview = asyncHandler(async (req, res) => {
+    const applicationId = Number(req.params.id);
+    const { stage, startTime, endTime, panelUserIds, feedbackDue } = req.body || {};
 
-  if (!stage || !startTime || !endTime) return bad(res, 'stage, startTime, endTime are required');
+    if (!stage || !startTime || !endTime) return bad(res, 'stage, startTime, endTime are required');
 
-  const app = await prisma.application.findUnique({ where: { id: applicationId } });
-  if (!app) return bad(res, 'Application not found', 404);
+    const app = await prisma.application.findUnique({
+      where: { id: applicationId },
+      include: {
+        candidate: true,
+        job: true,
+      }
+    });
+    if (!app) return bad(res, 'Application not found', 404);
 
-  // ✅ Step 1: Parse panelUserIds safely
-  const panels: number[] = Array.isArray(panelUserIds)
-    ? panelUserIds.map(Number)
-    : typeof panelUserIds === 'string'
-      ? panelUserIds.split(',').map(s => Number(s.trim()))
-      : [];
+    // ✅ Step 1: Parse panelUserIds safely
+    const panels: number[] = Array.isArray(panelUserIds)
+      ? panelUserIds.map(Number)
+      : typeof panelUserIds === 'string'
+        ? panelUserIds.split(',').map(s => Number(s.trim()))
+        : [];
 
-  if (!panels.length) return bad(res, 'At least one panel member is required');
+    if (!panels.length) return bad(res, 'At least one panel member is required');
 
-  const start = new Date(startTime);
-  const end = new Date(endTime);
+    const panelEmployees = await prisma.employee.findMany({
+      where: { id: { in: panels } },
+      select: { firstName: true, lastName: true }
+    });
+  
+    const panelNames = panelEmployees
+    .map(e => `${e.firstName} ${e.lastName}`)
+    .join(', ');
+    const start = new Date(startTime);
+    const end = new Date(endTime);
 
-  // ✅ Step 2: Check for overlapping interviews
-  const overlaps = await prisma.interview.findMany({
-    where: {
-      AND: [
-        {
-          OR: panels.map(pid => ({
-            panelUserIds: { contains: pid.toString() },
-          })),
-        },
-        {
-          startTime: { lt: end },
-          endTime: { gt: start },
-        },
-      ],
-    },
-    include: {
-      application: {
-        include: {
-          candidate: { select: { name: true } },
-          job: { select: { title: true } },
+    // ✅ Step 2: Check for overlapping interviews
+    const overlaps = await prisma.interview.findMany({
+      where: {
+        AND: [
+          {
+            OR: panels.map(pid => ({
+              panelUserIds: { contains: pid.toString() },
+            })),
+          },
+          {
+            startTime: { lt: end },
+            endTime: { gt: start },
+          },
+        ],
+      },
+      include: {
+        application: {
+          include: {
+            candidate: { select: { name: true } },
+            job: { select: { title: true } },
+          },
         },
       },
-    },
-  });
-
-  // ✅ Step 3: If overlaps found → find which employee(s)
-  if (overlaps.length > 0) {
-    const allPanelIdsInConflicts = new Set<number>();
-
-    overlaps.forEach(o => {
-      (o.panelUserIds || '')
-        .split(',')
-        .map(id => Number(id.trim()))
-        .filter(id => panels.includes(id))
-        .forEach(id => allPanelIdsInConflicts.add(id));
     });
 
-    // Get employee names for the conflicting panel members
-    const conflictingEmployees = await prisma.employee.findMany({
-      where: { id: { in: Array.from(allPanelIdsInConflicts) } },
-      select: { id: true, firstName: true, lastName: true, employeeCode: true },
-    });
+    // ✅ Step 3: If overlaps found → find which employee(s)
+    if (overlaps.length > 0) {
+      const allPanelIdsInConflicts = new Set<number>();
 
-    // Build detailed message list
-    const conflicts = overlaps.map(o => {
-      const overlappingPanelIds = (o.panelUserIds || '')
-        .split(',')
-        .map(id => Number(id.trim()))
-        .filter(id => panels.includes(id));
+      overlaps.forEach(o => {
+        (o.panelUserIds || '')
+          .split(',')
+          .map(id => Number(id.trim()))
+          .filter(id => panels.includes(id))
+          .forEach(id => allPanelIdsInConflicts.add(id));
+      });
 
-      const names = conflictingEmployees
-        .filter(e => overlappingPanelIds.includes(e.id))
-        .map(e => `${e.firstName} ${e.lastName}${e.employeeCode ? ` (${e.employeeCode})` : ''}`)
-        .join(', ');
+      // Get employee names for the conflicting panel members
+      const conflictingEmployees = await prisma.employee.findMany({
+        where: { id: { in: Array.from(allPanelIdsInConflicts) } },
+        select: { id: true, firstName: true, lastName: true, employeeCode: true },
+      });
 
-      const startT = new Date(o.startTime).toLocaleString();
-      const endT = new Date(o.endTime).toLocaleString();
-      return `🕒 ${names} already scheduled for "${o.application.job.title}" with candidate "${o.application.candidate.name}" from ${startT} to ${endT}`;
-    });
+      // Build detailed message list
+      const conflicts = overlaps.map(o => {
+        const overlappingPanelIds = (o.panelUserIds || '')
+          .split(',')
+          .map(id => Number(id.trim()))
+          .filter(id => panels.includes(id));
 
-    return res.status(409).json({
-      warning: true,
-      message: 'Some panel members already have interviews scheduled during this time.',
-      conflicts,
-    });
-  }
+        const names = conflictingEmployees
+          .filter(e => overlappingPanelIds.includes(e.id))
+          .map(e => `${e.firstName} ${e.lastName}${e.employeeCode ? ` (${e.employeeCode})` : ''}`)
+          .join(', ');
 
-  // ✅ Step 4: No conflicts → create the interview
-  const itv = await prisma.$transaction(async (tx) => {
-    if (
-      app.status === ApplicationStatus.SHORTLISTED ||
-      app.status === ApplicationStatus.SCREENING
-    ) {
-      await tx.application.update({
-        where: { id: applicationId },
-        data: { status: ApplicationStatus.INTERVIEW_SCHEDULED },
+        const startT = new Date(o.startTime).toLocaleString();
+        const endT = new Date(o.endTime).toLocaleString();
+        return `🕒 ${names} already scheduled for "${o.application.job.title}" with candidate "${o.application.candidate.name}" from ${startT} to ${endT}`;
+      });
+
+      return res.status(409).json({
+        warning: true,
+        message: 'Some panel members already have interviews scheduled during this time.',
+        conflicts,
       });
     }
 
-    return tx.interview.create({
-      data: {
-        applicationId,
-        stage,
-        startTime: start,
-        endTime: end,
-        panelUserIds: panels.join(','), // store CSV
-        feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
-      },
-    });
-  });
+    // ✅ Step 4: No conflicts → create the interview
+    const itv = await prisma.$transaction(async (tx) => {
+      if (
+        app.status === ApplicationStatus.SHORTLISTED ||
+        app.status === ApplicationStatus.SCREENING
+      ) {
+        await tx.application.update({
+          where: { id: applicationId },
+          data: { status: ApplicationStatus.INTERVIEW_SCHEDULED },
+        });
+      }
 
-  res.status(201).json(itv);
-});
+      return tx.interview.create({
+        data: {
+          applicationId,
+          stage,
+          startTime: start,
+          endTime: end,
+          panelUserIds: panels.join(','), // store CSV
+          feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
+        },
+      });
+
+
+    });
+
+    await sendInterviewMail({
+      to: app.candidate.email!,
+      candidateName: app.candidate.name,
+      jobTitle: app.job.title,
+      stage,
+      startTime: start.toLocaleString(),
+      endTime: end.toLocaleString(),
+      panelNames,
+      hospitalName: process.env.HOSPITAL_NAME!,
+      hospitalAddress: process.env.HOSPITAL_ADDRESS!,
+      googleLocationUrl: process.env.HOSPITAL_GOOGLE_MAP!,
+    });
+
+    res.status(201).json(itv);
+  });
 
 
   /** PATCH /interviews/:id/feedback  { result, feedbackUrl?, feedbackAt? } */
@@ -649,10 +691,10 @@ scheduleInterview = asyncHandler(async (req, res) => {
   //   res.json(updated);
   // });
 
-  
+
   markJoined = asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-  
+
     const offer = await prisma.offer.findUnique({
       where: { id },
       include: {
@@ -662,27 +704,27 @@ scheduleInterview = asyncHandler(async (req, res) => {
       }
     });
     if (!offer) return bad(res, 'Offer not found', 404);
-  
+
     const updated = await prisma.$transaction(async (tx) => {
       // 1. Update offer + application
       const of = await tx.offer.update({
         where: { id },
         data: { joinOutcome: JoinOutcome.JOINED }
       });
-  
+
       await tx.application.update({
         where: { id: offer.applicationId },
         data: { status: ApplicationStatus.HIRED }
       });
-  
+
       // 2. Auto-create Employee if not already exists
       const { candidate, job } = offer.application;
-  
+
       // // generate employeeCode e.g., EMP001, EMP002
       // const count = await tx.employee.count();
       // const employeeCode = `EMP${String(count + 1).padStart(3, "0")}`;
       const employeeCode = await generateEmployeeCode();
-  
+
       const employee = await tx.employee.create({
         data: {
           employeeCode,
@@ -692,10 +734,10 @@ scheduleInterview = asyncHandler(async (req, res) => {
           gender: Gender.OTHER, // maybe derive from candidate if stored
           dob: new Date("2000-01-01"), // 🔹 placeholder, or collect from candidate form
           photoUrl: null,
-  
+
           phone: candidate.phone || "",
           email: candidate.email,
-  
+
           designation: job.title,
           departmentId: job.departmentId,
           branchId: 1, // 🔹 set default or map from job
@@ -703,21 +745,21 @@ scheduleInterview = asyncHandler(async (req, res) => {
           employmentType: EmploymentType.PERMANENT,
           employmentStatus: EmploymentStatus.ACTIVE,
           employeeType: "NONCLINICAL", // or map from job/department
-  
+
           roleId: 3, // 🔹 default role, e.g., "Employee"
-  
+
           reportingManager: null,
           age: null,
           bloodGroup: null,
         }
       });
-  
+
       return { ...of, employee };
     });
-  
+
     res.json(updated);
   });
-  
+
 
   /** POST /offers/:id/mark-no-show  { reason? } -> Application NO_SHOW + JoinOutcome NO_SHOW */
   markNoShow = asyncHandler(async (req, res) => {
@@ -827,7 +869,7 @@ scheduleInterview = asyncHandler(async (req, res) => {
     if (!app.candidate.passwordHash) {
       const plainPassword = app.candidate.email.toLowerCase(); // email as password
       const hash = await bcrypt.hash(plainPassword, 10);
-    
+
       await prisma.candidate.update({
         where: { id: app.candidateId },
         data: { passwordHash: hash }
@@ -940,7 +982,7 @@ scheduleInterview = asyncHandler(async (req, res) => {
   /** GET /candidate/tests/:assignedId */
   getAssignedTestDetail = asyncHandler(async (req, res) => {
     const aid = Number(req.params.assignedId);
-  
+
     const assigned = await prisma.candidateAssignedTest.findUnique({
       where: { id: aid },
       include: {
@@ -948,13 +990,13 @@ scheduleInterview = asyncHandler(async (req, res) => {
       },
     });
     if (!assigned) return res.status(404).json({ error: 'Assigned test not found' });
-  
+
     // ✅ Fetch questions via QuestionBank
     const questions = await prisma.question.findMany({
       where: { questionBankId: assigned.test.questionBankId },
       include: { options: true },
     });
-  
+
     // sanitize output
     const q = questions.map(q => ({
       id: q.id,
@@ -963,7 +1005,7 @@ scheduleInterview = asyncHandler(async (req, res) => {
       weight: q.weight,
       options: q.options.map(o => ({ id: o.id, text: o.text })),
     }));
-  
+
     res.json({
       assignedId: assigned.id,
       testId: assigned.test.id,
@@ -974,7 +1016,7 @@ scheduleInterview = asyncHandler(async (req, res) => {
       questions: q,
     });
   });
-  
+
   // ===== Start (attempt counter + startedAt) =====
   /** POST /candidate/tests/:assignedId/start */
   startCandidateAssignedTest = asyncHandler(async (req, res) => {
@@ -1116,7 +1158,7 @@ scheduleInterview = asyncHandler(async (req, res) => {
     res.json(rows);
   });
 
-   getApplicationSummary = asyncHandler(async (req, res) => {
+  getApplicationSummary = asyncHandler(async (req, res) => {
     try {
       const app = await prisma.application.findUnique({
         where: { id: Number(req.params.id) },
@@ -1230,7 +1272,7 @@ async function generateEmployeeCode() {
 // POST /api/interviews/:id/hr-review
 export const saveHrReview = asyncHandler(async (req, res) => {
   const interviewId = Number(req.params.id);
-  const { presentSalary, payslip, expectedSalary, grossOffer, conclusion, remarks, reviewerUserId,expectedDoj, noticePeriod} = req.body;
+  const { presentSalary, payslip, expectedSalary, grossOffer, conclusion, remarks, reviewerUserId, expectedDoj, noticePeriod } = req.body;
 
   const review = await prisma.interviewHRReview.upsert({
     where: { interviewId },
@@ -1294,67 +1336,146 @@ export const getSummary = asyncHandler(async (req, res) => {
 });
 // recruitingRouter.get('/interview', listInterviews);
 // GET /recruiting/interview
+// export const listInterviews = asyncHandler(async (req, res) => {
+//   const items = await prisma.interview.findMany({
+//     orderBy: [{ startTime: 'desc' }, { id: 'desc' }],
+//     include: {
+//       application: {
+//         select: {
+//           id: true,
+//           candidate: { select: { id: true, name: true, email: true, phone: true, experience: true, qualification: true } },
+//           job: { select: { id: true, title: true, department: { select: { id: true, name: true } } } }
+//         }
+//       },
+//       candidateAssignedTest: {   // ✅ add this
+//         select: {
+//           id: true,
+//           status: true,
+//           score: true,
+//           reviewedAt: true,
+//           reviewDecision: true,
+//           completedAt: true,
+//           test: { select: { id: true, name: true } }
+//         }
+//       },
+
+//       // ⬇️ bring HR review (one record max)
+//       InterviewHRReview: {
+//         select: {
+//           presentSalary: true,
+//           payslip: true,
+//           expectedSalary: true,
+//           grossOffer: true,
+//           conclusion: true,
+//           remarks: true,
+//           reviewerUserId: true,
+//           reviewedAt: true,
+//         }
+//       },
+
+//       // ⬇️ bring all panel feedback rows (you can filter to SUBMITTED if you like)
+//       InterviewFeedback: {
+//         where: { status: 'SUBMITTED' },           // drop this line if you want drafts too
+//         orderBy: { submittedAt: 'desc' },
+//         select: {
+//           id: true,
+//           panelUserId: true,
+//           name: true,
+//           designation: true,
+//           jobSkills: true,
+//           jobKnowledge: true,
+//           attitude: true,
+//           communication: true,
+//           average: true,
+//           notes: true,
+//           status: true,
+//           submittedAt: true,
+//         }
+//       },
+//     },
+//   });
+
+//   res.json(items);
+// });
 export const listInterviews = asyncHandler(async (req, res) => {
-  const items = await prisma.interview.findMany({
-    orderBy: [{ startTime: 'desc' }, { id: 'desc' }],
-    include: {
-      application: {
-        select: {
-          id: true,
-          candidate: { select: { id: true, name: true, email: true, phone: true, experience:true, qualification: true } },
-          job: { select: { id: true, title: true, department: { select: { id: true, name: true } } } }
-        }
-      },
-      candidateAssignedTest: {   // ✅ add this
-        select: {
-          id: true,
-          status: true,
-          score: true,
-          reviewedAt: true,
-          reviewDecision: true,
-          completedAt: true,
-          test: { select: { id: true, name: true } }
-        }
-      },
+  const page = Number(req.query.page ?? 1);
+  const pageSize = Math.min(50, Number(req.query.pageSize ?? 10));
+  const skip = (page - 1) * pageSize;
 
-      // ⬇️ bring HR review (one record max)
-      InterviewHRReview: {
-        select: {
-          presentSalary: true,
-          payslip: true,
-          expectedSalary: true,
-          grossOffer: true,
-          conclusion: true,
-          remarks: true,
-          reviewerUserId: true,
-          reviewedAt: true,
-        }
-      },
+  const where: any = {}; // empty: no filters
 
-      // ⬇️ bring all panel feedback rows (you can filter to SUBMITTED if you like)
-      InterviewFeedback: {
-        where: { status: 'SUBMITTED' },           // drop this line if you want drafts too
-        orderBy: { submittedAt: 'desc' },
-        select: {
-          id: true,
-          panelUserId: true,
-          name: true,
-          designation: true,
-          jobSkills: true,
-          jobKnowledge: true,
-          attitude: true,
-          communication: true,
-          average: true,
-          notes: true,
-          status: true,
-          submittedAt: true,
+  const [items, total] = await Promise.all([
+    prisma.interview.findMany({
+      skip,
+      take: pageSize,
+      orderBy: [{ startTime: "desc" }, { id: "desc" }],
+      include: {
+        application: {
+          select: {
+            id: true,
+            candidate: { select: { id: true, name: true, email: true, phone: true, experience: true, qualification: true } },
+            job: { select: { id: true, title: true, department: { select: { id: true, name: true } } } }
+          }
+        },
+
+        candidateAssignedTest: {
+          select: {
+            id: true,
+            status: true,
+            score: true,
+            reviewedAt: true,
+            reviewDecision: true,
+            completedAt: true,
+            test: { select: { id: true, name: true } }
+          }
+        },
+
+        InterviewHRReview: {
+          select: {
+            presentSalary: true,
+            payslip: true,
+            expectedSalary: true,
+            grossOffer: true,
+            conclusion: true,
+            remarks: true,
+            reviewerUserId: true,
+            reviewedAt: true,
+          }
+        },
+
+        InterviewFeedback: {
+          where: { status: "SUBMITTED" },
+          orderBy: { submittedAt: "desc" },
+          select: {
+            id: true,
+            panelUserId: true,
+            name: true,
+            designation: true,
+            jobSkills: true,
+            jobKnowledge: true,
+            attitude: true,
+            communication: true,
+            average: true,
+            notes: true,
+            status: true,
+            submittedAt: true,
+          }
         }
-      },
-    },
+      }
+    }),
+
+    prisma.interview.count({ where })
+  ]);
+
+  res.json({
+    data: items,
+    total,
+    page,
+    pageSize,
+    totalPages: Math.ceil(total / pageSize),
   });
-
-  res.json(items);
 });
+
 
 export const listEmployeeInterviews = asyncHandler(async (req, res) => {
   const { employeeId } = req.params;
@@ -1364,7 +1485,7 @@ export const listEmployeeInterviews = asyncHandler(async (req, res) => {
     throw new Error('Employee ID is required');
   }
 
-  const all  = await prisma.interview.findMany({
+  const all = await prisma.interview.findMany({
     where: {
       panelUserIds: {
         contains: employeeId.toString(), // match employeeId in CSV
@@ -1445,3 +1566,79 @@ export const listEmployeeInterviews = asyncHandler(async (req, res) => {
 
   res.json(items);
 });
+
+export async function sendInterviewMail(props: any) {
+  const {
+    to,
+    candidateName,
+    jobTitle,
+    stage,
+    startTime,
+    endTime,
+    hospitalName,
+    hospitalAddress,
+    googleLocationUrl,
+    panelNames,
+  } = props;
+
+  // Convert to CSV if array
+  const recipients = Array.isArray(to) ? to.join(", ") : to;
+
+  const text = `
+Interview Scheduled
+
+Candidate Name: ${candidateName}
+Job Title: ${jobTitle}
+Stage: ${stage}
+
+Start Time: ${startTime}
+End Time: ${endTime}
+
+Panel Members: ${panelNames}
+
+Venue:
+${hospitalName}
+${hospitalAddress}
+
+Google Maps:
+${googleLocationUrl}
+
+Best Regards,
+HR Team
+`;
+
+  const html = `
+  <h2>Interview Scheduled</h2>
+  <p>Dear <b>${candidateName}</b>,</p>
+
+  <p>Your interview has been scheduled for the position of <b>${jobTitle}</b>.</p>
+
+  <h3>📅 Interview Details</h3>
+  <ul>
+    <li><b>Stage:</b> ${stage}</li>
+    <li><b>Start Time:</b> ${startTime}</li>
+    <li><b>End Time:</b> ${endTime}</li>
+    <li><b>Panel:</b> ${panelNames}</li>
+  </ul>
+
+  <h3>📍 Venue</h3>
+  <p><b>${hospitalName}</b><br>${hospitalAddress}</p>
+
+  <p>
+    <a href="${googleLocationUrl}" target="_blank">
+      📌 View Location on Google Maps
+    </a>
+  </p>
+
+  <br>
+  <p>Best Regards,<br>HR Team</p>
+  `;
+
+  await transporter.sendMail({
+    from: process.env.SMTP_USER,
+    to: recipients,
+    subject: `Interview Scheduled – ${jobTitle}`,
+    text,
+    html,
+  });
+}

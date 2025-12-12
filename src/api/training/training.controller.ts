@@ -1,8 +1,10 @@
 import { Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
-const prisma = new PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import test from "node:test";
 
 /* ======================================================
    TRAINING CRUD + ASSIGNMENT
@@ -49,6 +51,8 @@ export const createTraining = async (req: AuthenticatedRequest, res: Response) =
             testId: t.testId,
             isMandatory: t.isMandatory ?? true,
             orderNo: t.orderNo ?? index + 1,
+            testDate: t.testDate ? new Date(t.testDate) : null,
+            deadlineDate: t.deadlineDate ? new Date(t.deadlineDate) : null,
           })),
         },
         
@@ -101,6 +105,10 @@ export const assignTraining = async (req: Request, res: Response) => {
             employeeId: empId,
             assignedBy,
             status: "NotStarted",
+            trainingAssignmentId: assignment.id,
+            testDate: test.testDate ? new Date(test.testDate) : null,
+            deadlineDate: test.deadlineDate ? new Date(test.deadlineDate) : null,
+
           },
         });
       }

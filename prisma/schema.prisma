@@ -222,6 +222,15 @@ model Employee {
   TrainingAttendance       TrainingAttendance[]
   incidentAsEmployee       Incident[]                 @relation("IncidentEmployee")
   incidentAsReporter       Incident[]                 @relation("IncidentReporter")
+  ResignationClearance     ResignationClearance[]
+
+  @@index([employmentStatus])
+  @@index([departmentId])
+  @@index([branchId])
+  @@index([roleId])
+  @@index([firstName])
+  @@index([lastName])
+  @@index([reportingManager])
 }
 
 model EmergencyContact {
@@ -330,18 +339,24 @@ model Permission {
 // ----------------------
 
 model Attendance {
-  id         Int       @id @default(autoincrement())
-  employeeId Int
-  date       DateTime
-  status     String // Present, Absent, Late, HalfDay, etc.
-  checkIn    DateTime?
-  checkOut   DateTime?
-  createdBy  Int? // HR/admin who modified manually
-  reason     String?
+  id                 Int       @id @default(autoincrement())
+  employeeId         Int
+  date               DateTime
+  status             String // Present, Absent, Late, HalfDay, etc.
+  checkIn            DateTime?
+  checkOut           DateTime?
+  createdBy          Int? // HR/admin who modified manually
+  reason             String?
+  attendanceApproval String?
+  approvedBy         Int?
+  approvedAt         DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
   employee  Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId, date])
+  @@index([status])
 }
 
 model LeaveType {
@@ -377,6 +392,12 @@ model LeaveRequest {
   updatedAt   DateTime         @default(now()) @updatedAt
   employee    Employee         @relation(fields: [employeeId], references: [id])
   leaveType   LeaveType        @relation(fields: [leaveTypeId], references: [id])
+
+  @@index([employeeId])
+  @@index([leaveTypeId])
+  @@index([startDate])
+  @@index([endDate])
+  @@index([status])
 }
 
 // ----------------------
@@ -406,6 +427,9 @@ model ShiftAssignment {
 
   createdAt DateTime? @default(now())
   updatedAt DateTime? @default(now()) @updatedAt
+
+  @@index([shiftId])
+  @@index([employeeId, date])
 }
 
 // ----------------------
@@ -559,6 +583,8 @@ model AssignedTest {
   test                 EvaluationTest      @relation(fields: [testId], references: [id])
   TrainingAssignment   TrainingAssignment? @relation(fields: [trainingAssignmentId], references: [id])
   trainingAssignmentId Int?
+
+  @@index([employeeId])
 }
 
 // ----------------------
@@ -914,6 +940,7 @@ model ResignationClearance {
   decidedAt     DateTime?
 
   resignation ResignationRequest @relation(fields: [resignationId], references: [id])
+  verifier    Employee?          @relation(fields: [verifierId], references: [id])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -1089,6 +1116,7 @@ model Job {
 
   @@index([status])
   @@index([departmentId])
+  @@index([title])
 }
 
 model Candidate {
@@ -1112,6 +1140,7 @@ model Candidate {
 
   @@index([name])
   @@index([source])
+  @@index([email])
 }
 
 model CandidateLoginHistory {
@@ -1153,6 +1182,8 @@ model Application {
   @@index([jobId, status])
   @@index([candidateId])
   @@index([updatedAt])
+  @@index([status])
+  @@index([jobId])
 }
 
 model Interview {
@@ -1178,6 +1209,8 @@ model Interview {
 
   @@index([startTime])
   @@index([applicationId])
+  @@index([stage])
+  @@index([candidateAssignedTestId])
 }
 
 model Offer {
@@ -1345,6 +1378,7 @@ model InterviewFeedback {
   @@unique([interviewId, panelUserId]) // one feedback per panelist per interview
   @@index([interviewId])
   @@index([panelUserId])
+  @@index([status])
 }
 
 model InterviewHRReview {
@@ -1368,6 +1402,8 @@ model InterviewHRReview {
   updatedAt DateTime @default(now()) @updatedAt
 
   interview Interview @relation(fields: [interviewId], references: [id])
+
+  @@index([reviewerUserId])
 }
 
 model OvertimeApproval {
@@ -1467,6 +1503,10 @@ model PerformanceResponse {
   employee   Employee            @relation(fields: [employeeId], references: [id])
   question   PerformanceQuestion @relation(fields: [questionId], references: [id])
   department Department          @relation(fields: [departmentId], references: [id])
+
+  @@index([employeeId])
+  @@index([departmentId])
+  @@index([cycle])
 }
 
 model PerformanceSummary {
@@ -1486,6 +1526,9 @@ model PerformanceSummary {
 
   employee   Employee   @relation(fields: [employeeId], references: [id])
   department Department @relation(fields: [departmentId], references: [id])
+
+  @@index([employeeId, cycle])
+  @@index([departmentId])
 }
 
 model PerformanceFinalReview {
@@ -1619,6 +1662,8 @@ model Grievance {
   employee                 Employee                   @relation(fields: [employeeId], references: [id])
   comments                 GrievanceComment[]
   ComplaintAcknowledgement ComplaintAcknowledgement[]
+
+  @@index([status])
 }
 
 model GrievanceComment {
@@ -1655,6 +1700,8 @@ model PoshCase {
   accused                  Employee                   @relation("AccusedCases", fields: [accusedId], references: [id])
   hearings                 PoshHearing[]
   ComplaintAcknowledgement ComplaintAcknowledgement[]
+
+  @@index([status])
 }
 
 model PoshHearing {
@@ -1712,16 +1759,22 @@ model Training {
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @default(now()) @updatedAt
   TrainingAttendance TrainingAttendance[]
+
+  @@index([status])
+  @@index([departmentId])
+  @@index([trainerId])
 }
 
 model TrainingTest {
-  id          Int            @id @default(autoincrement())
-  trainingId  Int
-  testId      Int
-  isMandatory Boolean        @default(true)
-  orderNo     Int?
-  training    Training       @relation(fields: [trainingId], references: [id])
-  test        EvaluationTest @relation(fields: [testId], references: [id])
+  id           Int            @id @default(autoincrement())
+  trainingId   Int
+  testId       Int
+  isMandatory  Boolean        @default(true)
+  orderNo      Int?
+  testDate     DateTime?
+  deadlineDate DateTime?
+  training     Training       @relation(fields: [trainingId], references: [id])
+  test         EvaluationTest @relation(fields: [testId], references: [id])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -1747,6 +1800,7 @@ model TrainingAssignment {
   updatedAt DateTime @default(now()) @updatedAt
 
   @@unique([trainingId, employeeId])
+  @@index([status])
 }
 
 model TrainingFeedback {

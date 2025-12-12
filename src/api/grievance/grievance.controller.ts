@@ -1,7 +1,8 @@
 import { Request, Response } from "express";
 import asyncHandler from "express-async-handler";
-import { PrismaClient, PermissionStatus } from "@prisma/client";
-const prisma = new PrismaClient();
+// import { PrismaClient, PermissionStatus } from "@prisma/client";
+// const prisma = new PrismaClient();
+import { prisma } from "../../lib/prisma";
 
 // --- Create grievance
 export const createGrievance = asyncHandler(async (req: Request, res: Response) => {
