@@ -1256,15 +1256,17 @@ export const upsertFeedback = asyncHandler(async (req, res) => {
   res.json(fb);
 });
 async function generateEmployeeCode() {
+  const prefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+  const startNumber = process.env.EMPLOYEE_CODE_START || '001';
   const lastEmployee = await prisma.employee.findFirst({
     orderBy: { employeeCode: 'desc' },
     select: { employeeCode: true }
   });
 
-  let newCode = 'EMP001';
+  let newCode = `${prefix}${startNumber}`;
   if (lastEmployee?.employeeCode) {
     const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
-    newCode = `EMP${String(lastNumber + 1).padStart(3, '0')}`;
+    newCode = `${prefix}${String(lastNumber + 1).padStart(3, '0')}`;
   }
   return newCode;
 }
