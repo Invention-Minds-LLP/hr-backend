@@ -59,8 +59,10 @@ app.use(helmet());
 
 
 app.use(cors({
-    origin: ["http://localhost:4200",
-      "https://demo.hrproindia.in"
+    origin: ["http://localhost:4300",
+      "https://demo.hrproindia.in",
+      "http://192.168.3.25:4300"
+
     ], // Allow your Angular app
     credentials: true               // Optional: if you plan to send cookies
   }));
