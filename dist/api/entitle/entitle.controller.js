@@ -69,10 +69,11 @@ const getEmployeeUsageSummary = (req, res) => __awaiter(void 0, void 0, void 0, 
                 permissions: {
                     where: { status: client_1.PermissionStatus.APPROVED },
                 },
+                designation: true
             },
         });
         const summary = employees.map(emp => {
-            var _a;
+            var _a, _b, _c;
             const totalLeaveDays = emp.leaveRequests.reduce((sum, leave) => {
                 const days = Math.ceil((leave.endDate.getTime() - leave.startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1;
                 return sum + days;
@@ -97,6 +98,7 @@ const getEmployeeUsageSummary = (req, res) => __awaiter(void 0, void 0, void 0, 
                         return sum;
                 }
             }, 0);
+            const designationName = (_b = (_a = emp.designation) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : 'Default';
             return {
                 id: emp.id,
                 name: `${emp.firstName} ${emp.lastName}`,
@@ -104,9 +106,9 @@ const getEmployeeUsageSummary = (req, res) => __awaiter(void 0, void 0, void 0, 
                 phone: emp.phone,
                 employeeCode: emp.employeeCode,
                 department: emp.departmentId,
-                designation: emp.designation,
+                designation: designationName,
                 employmentType: emp.employmentType,
-                shiftType: ((_a = emp.shifts[0]) === null || _a === void 0 ? void 0 : _a.shift.shiftType) || 'N/A',
+                shiftType: ((_c = emp.shifts[0]) === null || _c === void 0 ? void 0 : _c.shift.shiftType) || 'N/A',
                 totalLeaveDays,
                 totalWFHDays,
                 totalPermissionHours,
@@ -183,15 +185,11 @@ const getEmployeeRequests = (req, res) => __awaiter(void 0, void 0, void 0, func
         if (!policy)
             return res.status(404).json({ error: `EntitlementPolicy not found for ${year}` });
         // 2) Fetch APPROVED rows (you can keep your includes)
-        const [leaveRequests, wfhRequests, permissionRequests] = yield Promise.all([
+        const [leaveRequests, permissionRequests] = yield Promise.all([
             prisma.leaveRequest.findMany({
                 where: { employeeId, status: 'APPROVED' },
                 orderBy: { startDate: 'desc' },
                 include: { leaveType: { select: { name: true } } },
-            }),
-            prisma.wFHRequest.findMany({
-                where: { employeeId, status: 'APPROVED' },
-                orderBy: { startDate: 'desc' },
             }),
             prisma.permissionRequest.findMany({
                 where: { employeeId, status: 'APPROVED' },
@@ -203,16 +201,11 @@ const getEmployeeRequests = (req, res) => __awaiter(void 0, void 0, void 0, func
             const { s, e } = clampRangeToYear(r.startDate, r.endDate, yearStart, yearEnd);
             return Object.assign(Object.assign({}, r), { daysApproved: daysInclusive({ s, e }) });
         });
-        const wfhWithDays = wfhRequests.map(r => {
-            const { s, e } = clampRangeToYear(r.startDate, r.endDate, yearStart, yearEnd);
-            return Object.assign(Object.assign({}, r), { daysApproved: daysInclusive({ s, e }) });
-        });
         const permissionWithHours = permissionRequests.map(r => {
             return Object.assign(Object.assign({}, r), { hoursApproved: permissionHours(r.startTime, r.endTime, r.timing) });
         });
         // 4) Totals (within year)
         const totalLeaveDays = leaveWithDays.reduce((sum, r) => sum + (r.daysApproved || 0), 0);
-        const totalWFHDays = wfhWithDays.reduce((sum, r) => sum + (r.daysApproved || 0), 0);
         const totalPermissionHours = permissionWithHours.reduce((sum, r) => sum + (r.hoursApproved || 0), 0);
         // 5) Prorate entitlements from DOJ month (month-based, matches your example:
         //    join Feb -> 11 months left -> 22 if 24/yr)
@@ -220,12 +213,10 @@ const getEmployeeRequests = (req, res) => __awaiter(void 0, void 0, void 0, func
         return res.json({
             // detailed rows with computed fields
             leaveRequests: leaveWithDays,
-            wfhRequests: wfhWithDays,
             permissionRequests: permissionWithHours,
             // totals
             totals: {
                 totalLeaveDays,
-                totalWFHDays,
                 totalPermissionHours,
             },
             // month-based prorated entitlements for the year

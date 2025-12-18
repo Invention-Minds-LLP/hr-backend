@@ -10,13 +10,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.deleteDepartment = exports.updateDepartment = exports.getDepartmentById = exports.getDepartments = exports.createDepartment = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 // CREATE Department
 const createDepartment = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { name } = req.body;
-        const department = yield prisma.department.create({
+        const department = yield prisma_1.prisma.department.create({
             data: { name }
         });
         res.status(201).json(department);
@@ -30,7 +31,7 @@ exports.createDepartment = createDepartment;
 // GET all Departments
 const getDepartments = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const departments = yield prisma.department.findMany();
+        const departments = yield prisma_1.prisma.department.findMany();
         res.json(departments);
     }
     catch (error) {
@@ -42,7 +43,7 @@ exports.getDepartments = getDepartments;
 const getDepartmentById = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { id } = req.params;
-        const department = yield prisma.department.findUnique({
+        const department = yield prisma_1.prisma.department.findUnique({
             where: { id: Number(id) }
         });
         if (!department)
@@ -59,7 +60,7 @@ const updateDepartment = (req, res) => __awaiter(void 0, void 0, void 0, functio
     try {
         const { id } = req.params;
         const { name } = req.body;
-        const updatedDepartment = yield prisma.department.update({
+        const updatedDepartment = yield prisma_1.prisma.department.update({
             where: { id: Number(id) },
             data: { name }
         });
@@ -74,7 +75,7 @@ exports.updateDepartment = updateDepartment;
 const deleteDepartment = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { id } = req.params;
-        yield prisma.department.delete({
+        yield prisma_1.prisma.department.delete({
             where: { id: Number(id) }
         });
         res.json({ message: "Department deleted successfully" });

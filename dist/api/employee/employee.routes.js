@@ -7,6 +7,8 @@ const router = (0, express_1.Router)();
 router.post("/", authMiddleware_1.authenticateToken, employee_controller_1.createEmployee);
 router.get("/", authMiddleware_1.authenticateToken, employee_controller_1.getEmployees);
 router.get("/by-departments", authMiddleware_1.authenticateToken, employee_controller_1.getEmployeesByDepartments);
+router.get("/absent-without-leave", employee_controller_1.getUnreportedAbsentees);
+router.post('/bulk-upload', authMiddleware_1.authenticateToken, employee_controller_1.bulkUploadEmployees);
 router.post('/:employeeId/documents/upload', authMiddleware_1.authenticateToken, employee_controller_1.uploadEmployeeDocuments);
 router.post('/:employeeId/photo', authMiddleware_1.authenticateToken, employee_controller_1.uploadEmployeePhoto);
 router.get("/specific-roles", authMiddleware_1.authenticateToken, employee_controller_1.getSpecificRoles);

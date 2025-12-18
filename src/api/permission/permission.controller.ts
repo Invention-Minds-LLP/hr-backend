@@ -47,7 +47,7 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
         year
       }
     });
-    
+
 
     if (!balance) {
       return res.status(400).json({ error: "Permission balance not configured." });
@@ -138,7 +138,15 @@ export const getPermissionRequests = async (_req: Request, res: Response) => {
       where: {
         status: "PENDING" // only approved leave requests
       },
-      include: { employee: true },
+      include: {
+        employee: {
+          include: {
+            Department: true,    // Gives departmentId + department name
+            role: true,
+            designation: true,      // Gives roleId + role name
+          }
+        }
+      },
       orderBy: { createdAt: "desc" }
     });
     res.json(requests);
@@ -272,7 +280,7 @@ export const getPermissionRequests = async (_req: Request, res: Response) => {
 //       data.hrDecidedAt = new Date();
 
 //       if (status === "APPROVED") {
-        
+
 //         data.status = "APPROVED";
 //         data.approvedBy = userId;
 //         data.approvedDate = new Date();
@@ -286,13 +294,13 @@ export const getPermissionRequests = async (_req: Request, res: Response) => {
 //           permissionType: perm.permissionType,
 //           year
 //         };
-        
+
 
 //         // Fetch balance
 //         const balance = await prisma.employeeLeaveBalance.findFirst({
 //           where: balanceKey
 //         });
-        
+
 
 //         if (!balance) {
 //           return res.status(400).json({
@@ -315,7 +323,7 @@ export const getPermissionRequests = async (_req: Request, res: Response) => {
 //             used: { increment: units }
 //           }
 //         });
-        
+
 
 //       } else {
 //         data.status = "REJECTED";
@@ -374,7 +382,7 @@ export const getPermissionRequests = async (_req: Request, res: Response) => {
 export const updatePermissionStatus = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { status, userId, role, declineReason } = req.body; 
+    const { status, userId, role, declineReason } = req.body;
     // role = REPORTING_MANAGER | HR_MANAGER | MANAGEMENT
 
     if (!["APPROVED", "REJECTED"].includes(status)) {

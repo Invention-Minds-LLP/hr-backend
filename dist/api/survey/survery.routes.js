@@ -11,4 +11,5 @@ router.post("/submit", authMiddleware_1.authenticateToken, survery_controller_1.
 router.get("/results/:surveyId", authMiddleware_1.authenticateToken, survery_controller_1.getSurveyResults);
 // admin fetch all
 router.get("/all", authMiddleware_1.authenticateToken, survery_controller_1.getAllSurveys);
+router.get("/drafts", authMiddleware_1.authenticateToken, survery_controller_1.getDraftSurveys);
 exports.default = router;

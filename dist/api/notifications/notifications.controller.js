@@ -10,8 +10,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.deleteNotification = exports.markAsRead = exports.getNotifications = exports.createNotification = exports.broadcastNotification = exports.registerForNotifications = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 // --- SSE Client list (for live updates) ---
 let clients = [];
 /**
@@ -63,7 +64,7 @@ exports.broadcastNotification = broadcastNotification;
 // -------------------------
 const createNotification = (employeeId, message) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const notification = yield prisma.notification.create({
+        const notification = yield prisma_1.prisma.notification.create({
             data: {
                 employeeId,
                 message,
@@ -85,7 +86,7 @@ const getNotifications = (req, res) => __awaiter(void 0, void 0, void 0, functio
     try {
         const { employeeId } = req.query;
         console.log(employeeId);
-        const notifications = yield prisma.notification.findMany({
+        const notifications = yield prisma_1.prisma.notification.findMany({
             where: {
                 employeeId: Number(employeeId),
                 isRead: false,
@@ -104,7 +105,7 @@ exports.getNotifications = getNotifications;
 const markAsRead = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { id } = req.params;
-        const updated = yield prisma.notification.update({
+        const updated = yield prisma_1.prisma.notification.update({
             where: { id: Number(id) },
             data: { isRead: true },
         });
@@ -119,7 +120,7 @@ exports.markAsRead = markAsRead;
 const deleteNotification = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { id } = req.params;
-        yield prisma.notification.delete({
+        yield prisma_1.prisma.notification.delete({
             where: { id: Number(id) },
         });
         res.json({ message: "Notification deleted successfully" });

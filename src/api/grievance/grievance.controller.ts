@@ -3,6 +3,7 @@ import asyncHandler from "express-async-handler";
 // import { PrismaClient, PermissionStatus } from "@prisma/client";
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
+import { createNotification } from "../notifications/notifications.controller";
 
 // --- Create grievance
 export const createGrievance = asyncHandler(async (req: Request, res: Response) => {
@@ -11,6 +12,21 @@ export const createGrievance = asyncHandler(async (req: Request, res: Response) 
   const grievance = await prisma.grievance.create({
     data: { employeeId, title, description, category }
   });
+    // 🔔 Notify HR
+    const hrEmployees = await prisma.employee.findMany({
+      where: {
+        departmentId: 1   // ✅ HR department
+      },
+      select: { id: true }
+    });
+    
+  
+    for (const hr of hrEmployees) {
+      await createNotification(
+        hr.id,
+        'New grievance submitted — requires acknowledgment'
+      );
+    }
   res.json(grievance);
 });
 

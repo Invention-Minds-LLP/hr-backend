@@ -39,6 +39,7 @@ import { initLeaveEndSchedular } from "./api/leave/leave.controller";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { startSchedulers } from "./schedulers/scheduler";
+import designationRoutes from "./api/designation/designation.routes";
 
 
 
@@ -58,14 +59,49 @@ app.use(helmet());
 // }));
 
 
-app.use(cors({
-    origin: ["http://localhost:4300",
-      "https://demo.hrproindia.in",
-      "http://192.168.3.25:4300"
+// app.use(cors({
+//   origin: ["http://localhost:4300",
+//     "https://demo.hrproindia.in",
+//     "http://192.168.3.25:4300",
+//     'http://localhost',
+//     'https://localhost',
+//     'capacitor://localhost'
 
-    ], // Allow your Angular app
-    credentials: true               // Optional: if you plan to send cookies
-  }));
+//   ],
+//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+//   allowedHeaders: [
+//     'Content-Type',
+//     'Authorization',
+//     'X-Requested-With'
+//   ],// Allow your Angular app
+//   credentials: true               // Optional: if you plan to send cookies
+// }));
+const allowedOrigins = [
+  'http://localhost:4300',     // Angular web
+  'http://192.168.3.25:4300',  // LAN testing
+  'https://demo.hrproindia.in',
+  'http://localhost',          // Capacitor Android
+  'capacitor://localhost'      // Capacitor iOS
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow mobile apps, Postman, curl (no origin)
+    if (!origin) return callback(null, true);
+
+    console.log('CORS origin:', origin);
+
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS blocked origin: ${origin}`));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
+
 app.use(express.json());
 
 // Routes
@@ -99,24 +135,26 @@ app.use('/api/notifications', notificationRouter);
 app.use('/api/trainings', trainingRouter);
 app.use('/api/attendance', attendanceCalendarRoutes);
 app.use('/api/incidents', incidentRouter);
+app.use("/api/designation", designationRoutes);
+
 
 // Default route
 app.get("/", (req, res) => {
-    res.send("✅ HR Management API is running!");
-  });
+  res.send("✅ HR Management API is running!");
+});
 
-  startSchedulers();
-  
-  
-  // Error handler middleware (optional, but good practice)
-  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error(err.stack);
-    res.status(500).json({ error: "Internal Server Error" });
-  });
+startSchedulers();
 
-  // Start the server
-  app.listen(port, '0.0.0.0',() => {
-    console.log(`🚀 Server running at http://127.0.0.1:${port}/`);
-  });
+
+// Error handler middleware (optional, but good practice)
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error(err.stack);
+  res.status(500).json({ error: "Internal Server Error" });
+});
+
+// Start the server
+app.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 Server running at http://127.0.0.1:${port}/`);
+});
 
 export default app;

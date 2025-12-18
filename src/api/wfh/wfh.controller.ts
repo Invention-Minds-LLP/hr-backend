@@ -318,12 +318,13 @@ export async function getWhoIsOnWFHBuckets(req: Request, res: Response) {
     const seenNext = new Set<number>();
 
     for (const r of rows) {
+      const designationName = r.employee.designation?.name ?? 'Default';
       const s = new Date(r.startDate);
       const e = new Date(r.endDate);
       const person: Person = {
         id: r.employee.id,
         name: `${r.employee.firstName} ${r.employee.lastName}`,
-        title: r.employee.designation,
+        title: designationName,
         photoUrl: r.employee.photoUrl || null,
         startDate: s.toISOString(),
         endDate: e.toISOString(),

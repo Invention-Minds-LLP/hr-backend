@@ -23,11 +23,12 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getEmployeesByDepartments = exports.uploadVaccineProof = exports.getEmployeeRequests = exports.getActiveEmployees = exports.getSpecificRoles = exports.uploadEmployeeDisabilityProof = exports.uploadEmployeePhoto = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
+exports.getBulkUploadProgress = exports.bulkUploadEmployees = exports.downloadEmployeeTemplate = exports.getUnreportedAbsentees = exports.sendHealthCheckReminders = exports.getEmployeesByDepartments = exports.uploadVaccineProof = exports.getEmployeeRequests = exports.getActiveEmployees = exports.getSpecificRoles = exports.uploadEmployeeDisabilityProof = exports.uploadEmployeePhoto = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
 exports.getAccruals = getAccruals;
 exports.getEmployeeAccrualsController = getEmployeeAccrualsController;
 exports.getTodayCelebrants = getTodayCelebrants;
 exports.listMentors = listMentors;
+exports.mapExcelRowToEmployee = mapExcelRowToEmployee;
 const client_1 = require("@prisma/client");
 const prisma = new client_1.PrismaClient();
 const formidable_1 = __importDefault(require("formidable"));
@@ -35,6 +36,8 @@ const fs_1 = __importDefault(require("fs"));
 const basic_ftp_1 = require("basic-ftp");
 const path_1 = __importDefault(require("path"));
 const client_2 = require("@prisma/client");
+const notifications_controller_1 = require("../notifications/notifications.controller");
+const xlsx_1 = __importDefault(require("xlsx"));
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu", // Your FTP hostname
     user: "u948610439.hrproindia.in", // Your FTP username
@@ -47,14 +50,16 @@ if (!fs_1.default.existsSync(TEMP_FOLDER)) {
 }
 function generateEmployeeCode() {
     return __awaiter(this, void 0, void 0, function* () {
+        const prefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+        const startNumber = process.env.EMPLOYEE_CODE_START || '001';
         const lastEmployee = yield prisma.employee.findFirst({
             orderBy: { employeeCode: 'desc' },
             select: { employeeCode: true }
         });
-        let newCode = 'EMP001';
+        let newCode = `${prefix}${startNumber}`;
         if (lastEmployee === null || lastEmployee === void 0 ? void 0 : lastEmployee.employeeCode) {
             const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
-            newCode = `EMP${String(lastNumber + 1).padStart(3, '0')}`;
+            newCode = `${prefix}${String(lastNumber + 1).padStart(3, '0')}`;
         }
         return newCode;
     });
@@ -63,7 +68,7 @@ function generateEmployeeCode() {
 const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a, _b;
     try {
-        const { employeeCode, referenceCode, firstName, lastName, gender, dob, photoUrl, phone, email, designation, departmentId, branchId, dateOfJoining, employmentType, probationEndDate, employmentStatus, emergencyContacts, qualifications, addresses, roleId, bloodGroup, reportingManager, age, shiftMode, // 'FIXED' | 'ROTATIONAL' (optional)
+        const { employeeCode, referenceCode, firstName, lastName, gender, dob, photoUrl, phone, email, designation, designationId, departmentId, branchId, dateOfJoining, employmentType, probationEndDate, employmentStatus, emergencyContacts, qualifications, addresses, roleId, bloodGroup, reportingManager, age, shiftMode, // 'FIXED' | 'ROTATIONAL' (optional)
         fixedShiftId, // optional
         rotationPatternId, // optional
         rotationStartDate, // optional
@@ -88,7 +93,8 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     photoUrl,
                     phone,
                     email,
-                    designation,
+                    // designation,
+                    // designationId: designationId ?? null, // ✅ THIS IS THE FIX
                     dateOfJoining: new Date(dateOfJoining),
                     employmentType,
                     probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
@@ -128,6 +134,7 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     Department: { connect: { id: departmentId } },
                     Branch: { connect: { id: branchId } },
                     role: { connect: { id: roleId } },
+                    designation: { connect: { id: designationId } },
                     Address: {
                         create: addresses === null || addresses === void 0 ? void 0 : addresses.map((a) => ({
                             type: a.type,
@@ -164,6 +171,7 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     Branch: true,
                     role: true,
                     Address: true,
+                    designation: true,
                 }
             });
         }
@@ -182,7 +190,8 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                         photoUrl,
                         phone,
                         email,
-                        designation,
+                        // designation,
+                        designationId: designationId !== null && designationId !== void 0 ? designationId : null, // ✅ THIS IS THE FIX
                         dateOfJoining: new Date(dateOfJoining),
                         employmentType,
                         probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
@@ -230,6 +239,7 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                         Branch: true,
                         role: true,
                         Address: true,
+                        designation: true
                     }
                 });
             }
@@ -268,32 +278,155 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
 });
 exports.createEmployee = createEmployee;
 // GET all employees
+// export const getEmployees = async (req: Request, res: Response) => {
+//   try {
+//     const employees = await prisma.employee.findMany({
+//       include: {
+//         Address: true,
+//         emergencyContacts: true,
+//         qualifications: true,
+//         documents: true,
+//         Department: true,
+//         EmployeeShiftSetting: true,
+//         shifts: {
+//           orderBy: { date: 'desc' }, // Most recent first
+//           take: 1,                   // Only 1 record
+//           include: {
+//             shift: true              // Include shift template details (name, timings)
+//           }
+//         }
+//       }
+//     });
+//     const formatted = employees.map(emp => ({
+//       ...emp,
+//       latestShiftAssignment: emp.shifts[0] || null,
+//       departmentName: emp.Department?.name || null, // ✅ extract department name
+//     }));
+//     res.json(formatted);
+//   } catch (error) {
+//     res.status(500).json({ error: "Failed to fetch employees" });
+//   }
+// };
 const getEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     try {
-        const employees = yield prisma.employee.findMany({
-            include: {
-                Address: true,
-                emergencyContacts: true,
-                qualifications: true,
-                documents: true,
-                Department: true,
-                EmployeeShiftSetting: true,
-                shifts: {
-                    orderBy: { date: 'desc' }, // Most recent first
-                    take: 1, // Only 1 record
-                    include: {
-                        shift: true // Include shift template details (name, timings)
+        const page = Number((_a = req.query.page) !== null && _a !== void 0 ? _a : 1);
+        const pageSize = Math.min(Number((_b = req.query.pageSize) !== null && _b !== void 0 ? _b : 10), 50); // max = 50
+        const skip = (page - 1) * pageSize;
+        const where = {};
+        const filter = req.query.filter;
+        const search = req.query.search;
+        if (search && filter) {
+            switch (filter) {
+                case "name":
+                    where.OR = [
+                        { firstName: { contains: search } },
+                        { lastName: { contains: search } }
+                    ];
+                    break;
+                case "employeeCode":
+                    where.employeeCode = { contains: search };
+                    break;
+                case "branch":
+                    where.Branch = {
+                        name: { contains: search }
+                    };
+                    break;
+                case "department":
+                    where.Department = {
+                        name: { contains: search }
+                    };
+                    break;
+                case "employmentStatus": {
+                    const statuses = [
+                        "ACTIVE",
+                        "TERMINATED",
+                        "SUSPENDED",
+                        "NOTICE_PERIOD",
+                        "RESIGNED"
+                    ];
+                    const match = statuses.filter(s => s.toLowerCase().includes(search.toLowerCase()));
+                    if (match.length > 0) {
+                        where.employmentStatus = { in: match };
                     }
+                    else {
+                        where.employmentStatus = { in: [] }; // return empty
+                    }
+                    break;
                 }
+                case "employmentType":
+                    where.employmentType = { contains: search };
+                    break;
+                case "shift":
+                    where.shifts = {
+                        some: {
+                            shift: {
+                                name: { contains: search }
+                            }
+                        }
+                    };
+                    break;
+                case 'employeeType':
+                    where.employeeType = { contains: search };
+                    break;
             }
+        }
+        // // optional filters
+        // if (req.query.search) {
+        //   const search = String(req.query.search);
+        //   where.OR = [
+        //     { firstName: { contains: search, mode: "insensitive" } },
+        //     { lastName: { contains: search, mode: "insensitive" } },
+        //     { employeeCode: { contains: search, mode: "insensitive" } },
+        //     { email: { contains: search, mode: "insensitive" } },
+        //   ];
+        // }
+        // if (req.query.departmentId) {
+        //   where.departmentId = Number(req.query.departmentId);
+        // }
+        // if (req.query.branchId) {
+        //   where.branchId = Number(req.query.branchId);
+        // }
+        const [employees, total] = yield Promise.all([
+            prisma.employee.findMany({
+                skip,
+                take: pageSize,
+                where,
+                select: {
+                    id: true,
+                    employeeCode: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                    phone: true,
+                    designation: true,
+                    employmentType: true,
+                    employmentStatus: true,
+                    branchId: true,
+                    departmentId: true,
+                    roleId: true,
+                    photoUrl: true,
+                    Department: { select: { id: true, name: true } },
+                    Branch: { select: { id: true, name: true } },
+                    shifts: {
+                        orderBy: { date: "desc" },
+                        take: 1,
+                        include: { shift: true },
+                    },
+                },
+            }),
+            prisma.employee.count({ where }),
+        ]);
+        res.json({
+            data: employees,
+            page,
+            pageSize,
+            total,
+            totalPages: Math.ceil(total / pageSize),
         });
-        const formatted = employees.map(emp => {
-            var _a;
-            return (Object.assign(Object.assign({}, emp), { latestShiftAssignment: emp.shifts[0] || null, departmentName: ((_a = emp.Department) === null || _a === void 0 ? void 0 : _a.name) || null }));
-        });
-        res.json(formatted);
     }
     catch (error) {
+        console.log(error);
         res.status(500).json({ error: "Failed to fetch employees" });
     }
 });
@@ -312,6 +445,7 @@ const getEmployeeById = (req, res) => __awaiter(void 0, void 0, void 0, function
                 Address: true,
                 EmployeeShiftSetting: true,
                 Department: true,
+                designation: true,
                 shifts: {
                     orderBy: { date: 'desc' }, // Most recent first
                     take: 1, // Only 1 record
@@ -339,11 +473,11 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
     try {
         const { id } = req.params;
         const data = req.body;
-        const { addresses, emergencyContacts, qualifications, departmentId, branchId, roleId, shiftMode, // 'FIXED' | 'ROTATIONAL' | undefined
+        const { addresses, emergencyContacts, qualifications, departmentId, designationId, branchId, roleId, shiftMode, // 'FIXED' | 'ROTATIONAL' | undefined
         fixedShiftId, // number | undefined
         rotationPatternId, // number | undefined
         rotationStartDate, // ISO string | undefined
-        dob, dateOfJoining, probationEndDate } = data, employeeFields = __rest(data, ["addresses", "emergencyContacts", "qualifications", "departmentId", "branchId", "roleId", "shiftMode", "fixedShiftId", "rotationPatternId", "rotationStartDate", "dob", "dateOfJoining", "probationEndDate"]);
+        dob, dateOfJoining, probationEndDate } = data, employeeFields = __rest(data, ["addresses", "emergencyContacts", "qualifications", "departmentId", "designationId", "branchId", "roleId", "shiftMode", "fixedShiftId", "rotationPatternId", "rotationStartDate", "dob", "dateOfJoining", "probationEndDate"]);
         const toDate = (v) => (v ? new Date(v) : null);
         employeeFields.dob = (_a = toDate(dob)) !== null && _a !== void 0 ? _a : undefined;
         employeeFields.dateOfJoining = (_b = toDate(dateOfJoining)) !== null && _b !== void 0 ? _b : undefined;
@@ -352,7 +486,9 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
             where: { id: Number(id) },
             data: Object.assign(Object.assign({}, employeeFields), { 
                 // Health & Wellness fields
-                preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null, height: data.height ? parseFloat(data.height) : null, weight: data.weight ? parseFloat(data.weight) : null, bmi: data.bmi ? parseFloat(data.bmi) : null, bloodPressure: data.bloodPressure, bloodSugar: data.bloodSugar, cholesterol: data.cholesterol, sameAsPermanent: data.sameAsPermanent, allergies: data.allergies, chronicConditions: data.chronicConditions, smoking: data.smoking, alcohol: data.alcohol, visionType: data.visionType, usesGlasses: data.usesGlasses, visionRemarks: data.visionRemarks, hasDisability: data.hasDisability, disabilityType: data.disabilityType, disabilityDescription: data.disabilityDescription, disabilityProofFile: data.disabilityProofFile, disabilityProofFileName: data.disabilityProofFileName, disabilityProofUrl: data.disabilityProofUrl, preferredHospital: data.preferredHospital, primaryPhysician: data.primaryPhysician, emergencyNotes: data.emergencyNotes, healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined, vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined, Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, Address: {
+                preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null, height: data.height ? parseFloat(data.height) : null, weight: data.weight ? parseFloat(data.weight) : null, bmi: data.bmi ? parseFloat(data.bmi) : null, bloodPressure: data.bloodPressure, bloodSugar: data.bloodSugar, cholesterol: data.cholesterol, sameAsPermanent: data.sameAsPermanent, allergies: data.allergies, chronicConditions: data.chronicConditions, 
+                // designationId: designationId ?? null, // ✅ THIS IS THE FIX
+                smoking: data.smoking, alcohol: data.alcohol, visionType: data.visionType, usesGlasses: data.usesGlasses, visionRemarks: data.visionRemarks, hasDisability: data.hasDisability, disabilityType: data.disabilityType, disabilityDescription: data.disabilityDescription, disabilityProofFile: data.disabilityProofFile, disabilityProofFileName: data.disabilityProofFileName, disabilityProofUrl: data.disabilityProofUrl, preferredHospital: data.preferredHospital, primaryPhysician: data.primaryPhysician, emergencyNotes: data.emergencyNotes, healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined, vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined, Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, designation: { connect: { id: designationId } }, Address: {
                     deleteMany: {},
                     create: addresses === null || addresses === void 0 ? void 0 : addresses.map((a) => ({
                         type: a.type,
@@ -383,6 +519,7 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 emergencyContacts: true,
                 qualifications: true,
                 EmployeeShiftSetting: true,
+                designation: true
             }
         });
         // 2) upsert EmployeeShiftSetting (simple & type-safe)
@@ -666,26 +803,15 @@ function getAccruals(employeeId_1) {
         // 3) prorate months (to mid-month precision)
         const monthsProrated = proratedMonths(startAccrual, endAccrual); // e.g., 6.45
         const leaveAccrued = round(policy.leaveEntitlement / 12 * monthsProrated, 2);
-        const wfhAccrued = round(policy.wfhEntitlement / 12 * monthsProrated, 2);
+        // const wfhAccrued = round(policy.wfhEntitlement / 12 * monthsProrated, 2);
         const permissionAccrued = round(policy.permissionEntitlement / 12 * monthsProrated, 2); // hours
         // 4) usage (only APPROVED within year)
-        const [leaves, wfhs, perms] = yield Promise.all([
+        const [leaves, perms] = yield Promise.all([
             prisma.leaveRequest.findMany({
                 where: {
                     employeeId,
                     status: 'APPROVED',
                     // overlap with year
-                    AND: [
-                        { endDate: { gte: yearStart } },
-                        { startDate: { lte: yearEnd } },
-                    ],
-                },
-                select: { startDate: true, endDate: true },
-            }),
-            prisma.wFHRequest.findMany({
-                where: {
-                    employeeId,
-                    status: 'APPROVED',
                     AND: [
                         { endDate: { gte: yearStart } },
                         { startDate: { lte: yearEnd } },
@@ -705,12 +831,10 @@ function getAccruals(employeeId_1) {
             }),
         ]);
         const leaveDaysUsed = leaves.reduce((sum, r) => sum + daysInclusive(clampRangeToYear(r.startDate, r.endDate, yearStart, yearEnd)), 0);
-        const wfhDaysUsed = wfhs.reduce((sum, r) => sum + daysInclusive(clampRangeToYear(r.startDate, r.endDate, yearStart, yearEnd)), 0);
         const permissionHoursUsed = perms.reduce((sum, r) => sum + permissionHours(r.startTime, r.endTime, r.timing), 0);
         // 5) rows
         const rows = [
             row('Leave', policy.leaveEntitlement, leaveAccrued, leaveDaysUsed),
-            row('WFH', policy.wfhEntitlement, wfhAccrued, wfhDaysUsed),
             row('Permission', policy.permissionEntitlement, permissionAccrued, permissionHoursUsed),
         ];
         return rows;
@@ -989,3 +1113,658 @@ const getEmployeesByDepartments = (req, res) => __awaiter(void 0, void 0, void 0
     }
 });
 exports.getEmployeesByDepartments = getEmployeesByDepartments;
+const sendHealthCheckReminders = () => __awaiter(void 0, void 0, void 0, function* () {
+    const today = new Date();
+    const currentYear = today.getFullYear();
+    const employees = yield prisma.employee.findMany({
+        where: {
+            preEmploymentCheckDate: { not: null },
+            OR: [
+                { healthCheckReminderYear: null },
+                { healthCheckReminderYear: { not: currentYear } }
+            ]
+        }
+    });
+    for (const emp of employees) {
+        const nextCheckDate = new Date(emp.preEmploymentCheckDate);
+        nextCheckDate.setFullYear(nextCheckDate.getFullYear() + 1);
+        // Not yet time → skip
+        if (today < nextCheckDate)
+            continue;
+        // ✔ Ready to send reminder
+        const message = `
+Hello ${emp.firstName} - ${emp.employeeCode},
+
+Your annual Health Check is due.
+
+Please schedule your medical check-up at the earliest.
+
+- HR Team
+`;
+        // Send WhatsApp
+        // try {
+        //   const formattedPhone = formatPhoneNumber(emp.phone);
+        //   await sendWhatsAppTemplate({
+        //     to: formattedPhone,
+        //     templateId: HEALTH_CHECK_REMINDER_TEMPLATE_ID,
+        //     placeholders: [emp.firstName]
+        //   });
+        // } catch (err) {
+        //   console.error("WhatsApp sending failed:", err);
+        // }
+        // Create notification
+        yield (0, notifications_controller_1.createNotification)(emp.id, message);
+        // Update the year reminder sent
+        yield prisma.employee.update({
+            where: { id: emp.id },
+            data: {
+                healthCheckReminderYear: currentYear,
+                healthCheckReminderSent: true
+            }
+        });
+        console.log(`Health check reminder sent to ${emp.firstName}`);
+    }
+});
+exports.sendHealthCheckReminders = sendHealthCheckReminders;
+function startOfDayIST(d = new Date()) {
+    const x = new Date(d.toLocaleString('en-US', { timeZone: IST }));
+    x.setHours(0, 0, 0, 0);
+    return x;
+}
+function endOfDayIST(d = new Date()) {
+    const x = new Date(d.toLocaleString('en-US', { timeZone: IST }));
+    x.setHours(23, 59, 59, 999);
+    return x;
+}
+const IST = 'Asia/Kolkata';
+// export const getUnreportedAbsentees = async (req: Request, res: Response) => {
+//   try {
+//     const { date } = req.query;
+//     if (!date) {
+//       return res.status(400).json({ message: "Date is required ?date=YYYY-MM-DD" });
+//     }
+//     const targetDate = new Date(date as string);
+//     const start = new Date(targetDate);
+//     start.setHours(0, 0, 0, 0);
+//     const end = new Date(targetDate);
+//     end.setHours(23, 59, 59, 999);
+//     // STEP 1: Get all active employees
+//     const allEmployees = await prisma.employee.findMany({
+//       where: { employmentStatus: "ACTIVE" },
+//       select: {
+//         id: true,
+//         employeeCode: true,
+//         firstName: true,
+//         lastName: true,
+//         designation: true,
+//         Department: { select: { name: true, id: true } },
+//       }
+//     });
+//     const employeeIds = allEmployees.map(e => e.id);
+//     // STEP 2: Get attendance, shift assignment, shift settings
+//     const [attendance, shiftAssignments, shiftSettings, leaves] = await Promise.all([
+//       prisma.attendance.findMany({
+//         where: { employeeId: { in: employeeIds }, date: { gte: start, lte: end } },
+//         select: { employeeId: true, checkIn: true }
+//       }),
+//       prisma.shiftAssignment.findMany({
+//         where: { employeeId: { in: employeeIds }, date: { gte: start, lte: end } },
+//         select: {
+//           employeeId: true,
+//           shift: { select: { id: true, startTime: true, endTime: true } }
+//         }
+//       }),
+//       prisma.employeeShiftSetting.findMany({
+//         where: { employeeId: { in: employeeIds } },
+//         select: {
+//           employeeId: true,
+//           mode: true,
+//           startDate: true,
+//           fixedShift: { select: { id: true, startTime: true, endTime: true } },
+//           rotationPattern: {
+//             select: {
+//               cycleDays: true,
+//               items: {
+//                 select: {
+//                   dayIndex: true,
+//                   shift: { select: { id: true, startTime: true, endTime: true } }
+//                 }
+//               }
+//             }
+//           }
+//         }
+//       }),
+//       prisma.leaveRequest.findMany({
+//         where: {
+//           status: { in: ["PENDING", "APPROVED"] },
+//           startDate: { lte: end },
+//           endDate: { gte: start }
+//         },
+//         select: { employeeId: true }
+//       })
+//     ]);
+//     // Extract present and leave IDs
+//     const checkedInIds = attendance.filter(a => a.checkIn).map(a => a.employeeId);
+//     const leaveIds = leaves.map(l => l.employeeId);
+//     // Helper: compute shift
+//     function computeShift(empId: number) {
+//       // 1. Direct shift assignment for the date
+//       const assigned = shiftAssignments.find(a => a.employeeId === empId);
+//       if (assigned?.shift) return assigned.shift;
+//       const setting = shiftSettings.find(s => s.employeeId === empId);
+//       if (!setting) return null;
+//       // 2. Fixed shift
+//       if (setting.mode === "FIXED" && setting.fixedShift)
+//         return setting.fixedShift;
+//       // 3. Rotation mode
+//       if (setting.mode === "ROTATIONAL" && setting.rotationPattern) {
+//         const cycleDays = setting.rotationPattern.cycleDays;
+//         const startDate = new Date(setting.startDate);
+//         const diff = Math.floor(
+//           (targetDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)
+//         );
+//         const cycleIndex = diff % cycleDays;
+//         const shiftItem = setting.rotationPattern.items.find(
+//           i => i.dayIndex === cycleIndex
+//         );
+//         if (shiftItem?.shift) return shiftItem.shift;
+//       }
+//       return null;
+//     }
+//     // Filter absentees without leave
+//     const absentees = allEmployees
+//       .filter(emp =>
+//         !checkedInIds.includes(emp.id) &&
+//         !leaveIds.includes(emp.id)
+//       )
+//       .map(emp => {
+//         const shift = computeShift(emp.id);
+//         return {
+//           ...emp,
+//           shiftStartTime: shift?.startTime ?? null,
+//           shiftEndTime: shift?.endTime ?? null
+//         };
+//       });
+//     return res.json(absentees);
+//   } catch (error) {
+//     console.error(error);
+//     return res.status(500).json({ message: "Internal error" });
+//   }
+// };
+// Convert Excel serial number → JS Date
+const getUnreportedAbsentees = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { date } = req.query;
+        if (!date) {
+            return res.status(400).json({
+                message: "Date is required ?date=YYYY-MM-DD",
+            });
+        }
+        // IST-safe day range
+        const target = new Date(date);
+        const start = startOfDayIST(target);
+        const end = endOfDayIST(target);
+        // 1️⃣ Shift assignments define expected employees
+        const assignments = yield prisma.shiftAssignment.findMany({
+            where: { date: { gte: start, lte: end } },
+            select: {
+                employeeId: true,
+                shift: { select: { startTime: true, endTime: true, name: true } },
+                employee: {
+                    select: {
+                        employeeCode: true,
+                        firstName: true,
+                        lastName: true,
+                        designation: true,
+                        Department: true,
+                    },
+                },
+            },
+        });
+        if (!assignments.length) {
+            return res.json([]); // nobody was scheduled
+        }
+        const employeeIds = assignments.map(a => a.employeeId);
+        // 2️⃣ Attendance for the day
+        const attendance = yield prisma.attendance.findMany({
+            where: {
+                employeeId: { in: employeeIds },
+                date: { gte: start, lte: end },
+            },
+            select: { employeeId: true, checkIn: true },
+        });
+        // 3️⃣ Approved / pending leave, WFH, permission
+        const [leaves, wfh, perms] = yield Promise.all([
+            prisma.leaveRequest.findMany({
+                where: {
+                    employeeId: { in: employeeIds },
+                    status: { in: ["PENDING", "APPROVED"] },
+                    startDate: { lte: end },
+                    endDate: { gte: start },
+                },
+                select: { employeeId: true },
+            }),
+            prisma.wFHRequest.findMany({
+                where: {
+                    employeeId: { in: employeeIds },
+                    status: { in: ["PENDING", "APPROVED"] },
+                    startDate: { lte: end },
+                    endDate: { gte: start },
+                },
+                select: { employeeId: true },
+            }),
+            prisma.permissionRequest.findMany({
+                where: {
+                    employeeId: { in: employeeIds },
+                    status: { in: ["PENDING", "APPROVED"] },
+                    OR: [
+                        { day: { gte: start, lte: end } },
+                        { startTime: { lte: end }, endTime: { gte: start } },
+                    ],
+                },
+                select: { employeeId: true },
+            }),
+        ]);
+        // 4️⃣ Fast lookup sets
+        const checkedInSet = new Set(attendance.filter(a => a.checkIn).map(a => a.employeeId));
+        const excusedSet = new Set([
+            ...leaves.map(x => x.employeeId),
+            ...wfh.map(x => x.employeeId),
+            ...perms.map(x => x.employeeId),
+        ]);
+        // 5️⃣ Final unreported absentees
+        const absentees = assignments
+            .filter(a => !checkedInSet.has(a.employeeId) &&
+            !excusedSet.has(a.employeeId))
+            .map(a => {
+            var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
+            return ({
+                employeeId: a.employeeId,
+                employeeCode: a.employee.employeeCode,
+                name: `${a.employee.firstName} ${a.employee.lastName}`,
+                department: (_b = (_a = a.employee.Department) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : null,
+                departmentId: (_d = (_c = a.employee.Department) === null || _c === void 0 ? void 0 : _c.id) !== null && _d !== void 0 ? _d : null,
+                designation: (_e = a.employee.designation) !== null && _e !== void 0 ? _e : null,
+                shiftName: (_g = (_f = a.shift) === null || _f === void 0 ? void 0 : _f.name) !== null && _g !== void 0 ? _g : null,
+                shiftStartTime: (_j = (_h = a.shift) === null || _h === void 0 ? void 0 : _h.startTime) !== null && _j !== void 0 ? _j : null,
+                shiftEndTime: (_l = (_k = a.shift) === null || _k === void 0 ? void 0 : _k.endTime) !== null && _l !== void 0 ? _l : null,
+            });
+        });
+        return res.json(absentees);
+    }
+    catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Internal error" });
+    }
+});
+exports.getUnreportedAbsentees = getUnreportedAbsentees;
+function excelDateToJSDate(serial) {
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const days = Math.floor(serial);
+    const ms = days * 86400000;
+    return new Date(excelEpoch.getTime() + ms);
+}
+function parseDate(value) {
+    if (!value)
+        return null;
+    if (typeof value === "number") {
+        return excelDateToJSDate(value);
+    }
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? null : d;
+}
+const uploadProgress = new Map();
+function findOrCreateByName(model_1, name_1) {
+    return __awaiter(this, arguments, void 0, function* (model, name, extraData = {}) {
+        const trimmed = name === null || name === void 0 ? void 0 : name.trim();
+        if (!trimmed) {
+            throw new Error("Name is required");
+        }
+        // Case-insensitive lookup
+        const existing = yield model.findFirst({
+            where: {
+                name: {
+                    equals: trimmed,
+                    mode: "insensitive",
+                },
+            },
+        });
+        if (existing)
+            return existing;
+        return model.create({
+            data: Object.assign({ name: trimmed }, extraData),
+        });
+    });
+}
+// export async function mapExcelRowToEmployee(
+//   row: Record<string, any>
+// ): Promise<Prisma.EmployeeCreateInput> {
+//   // Required lookups
+//   const dept = await prisma.department.findUnique({
+//     where: { name: row.departmentName?.trim() },
+//   });
+//   const branch = await prisma.branch.findUnique({
+//     where: { name: row.branchName?.trim() },
+//   });
+//   const role = await prisma.role.findUnique({
+//     where: { name: row.roleName?.trim() },
+//   });
+//   const manager =
+//     row.reportingManagerCode
+//       ? await prisma.employee.findUnique({
+//         where: { employeeCode: row.reportingManagerCode },
+//       })
+//       : null;
+//   if (!dept) throw new Error(`Invalid Department: ${row.departmentName}`);
+//   if (!branch) throw new Error(`Invalid Branch: ${row.branchName}`);
+//   if (!role) throw new Error(`Invalid Role: ${row.roleName}`);
+//   const dob = parseDate(row.dob);
+//   if (!dob) throw new Error("Invalid DOB");
+//   const doj = parseDate(row.dateOfJoining);
+//   if (!doj) throw new Error("Invalid Date of Joining");
+//   const probationEnd = parseDate(row.probationEndDate);
+//   return {
+//     employeeCode: row.employeeCode,
+//     referenceCode: row.referenceCode || null,
+//     firstName: row.firstName,
+//     lastName: row.lastName,
+//     gender: row.gender,
+//     dob,
+//     dateOfJoining: doj,
+//     probationEndDate: probationEnd,
+//     phone: row.phone?.toString() || "",
+//     email: row.email?.toString() || "",
+//     designation: row.designation,
+//     employmentType: row.employmentType,
+//     employmentStatus: row.employmentStatus,
+//     employeeType: row.employeeType || "Full-Time",
+//     bloodGroup: row.bloodGroup || null,
+//     reportingManager: manager ? manager.id : null,
+//     // Required Relations
+//     Department: { connect: { id: dept.id } },
+//     Branch: { connect: { id: branch.id } },
+//     role: { connect: { id: role.id } },
+//   };
+// }
+function ensureDirExists(dirPath) {
+    if (!fs_1.default.existsSync(dirPath)) {
+        fs_1.default.mkdirSync(dirPath, { recursive: true });
+    }
+}
+function mapExcelRowToEmployee(row) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c, _d;
+        const departmentName = (_a = row.departmentName) === null || _a === void 0 ? void 0 : _a.trim();
+        const branchName = (_b = row.branchName) === null || _b === void 0 ? void 0 : _b.trim();
+        const roleName = (_c = row.roleName) === null || _c === void 0 ? void 0 : _c.trim();
+        const designationName = (_d = row.designationName) === null || _d === void 0 ? void 0 : _d.trim();
+        if (!departmentName || !branchName || !roleName || !designationName) {
+            throw new Error("Department, Branch, Role and Designation are required");
+        }
+        const [dept, branch, role, designation] = yield Promise.all([
+            prisma.department.upsert({
+                where: { name: departmentName },
+                update: {},
+                create: { name: departmentName },
+            }),
+            prisma.branch.upsert({
+                where: { name: branchName },
+                update: {},
+                create: { name: branchName },
+            }),
+            prisma.role.upsert({
+                where: { name: roleName },
+                update: {},
+                create: { name: roleName },
+            }),
+            prisma.designation.upsert({
+                where: { name: designationName },
+                update: {},
+                create: { name: designationName },
+            }),
+        ]);
+        const manager = row.reportingManagerCode
+            ? yield prisma.employee.findUnique({
+                where: { employeeCode: normalizeCode(row.reportingManagerCode) },
+            })
+            : null;
+        const dob = parseDate(row.dob);
+        const doj = parseDate(row.dateOfJoining);
+        if (!dob || !doj)
+            throw new Error("Invalid DOB or Date of Joining");
+        return {
+            employeeCode: normalizeCode(row.employeeCode),
+            referenceCode: row.referenceCode || null,
+            firstName: row.firstName,
+            lastName: row.lastName,
+            gender: row.gender,
+            dob,
+            dateOfJoining: doj,
+            phone: String(row.phone),
+            email: String(row.email),
+            employmentType: row.employmentType,
+            employmentStatus: row.employmentStatus,
+            employeeType: row.employeeType || "CLINICAL",
+            reportingManager: manager ? manager.id : null,
+            Department: { connect: { id: dept.id } },
+            Branch: { connect: { id: branch.id } },
+            role: { connect: { id: role.id } },
+            designation: { connect: { id: designation.id } },
+        };
+    });
+}
+function toDate(value) {
+    if (!value)
+        throw new Error(`Missing required date field`);
+    const d = new Date(value);
+    if (isNaN(d.getTime()))
+        throw new Error(`Invalid date: ${value}`);
+    return d;
+}
+// export const bulkUploadEmployees = async (req: Request, res: Response) => {
+//   try {
+//     const form = formidable({ multiples: false, keepExtensions: true });
+//     form.parse(req, async (err, fields, files) => {
+//       if (err) return res.status(500).json({ error: "File parsing error" });
+//       const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
+//       if (!fileObj) {
+//         return res.status(400).json({ error: "No file uploaded" });
+//       }
+//       // Read Excel file
+//       const workbook = XLSX.readFile(fileObj.filepath);
+//       const sheet = workbook.Sheets[workbook.SheetNames[0]];
+//       const rawRows = XLSX.utils.sheet_to_json(sheet);
+//       const errorRows: ErrorRow[] = [];
+//       const logs: string[] = [];
+//       const createOps: Prisma.PrismaPromise<any>[] = [];
+//       let successCount = 0;
+//       for (let i = 0; i < rawRows.length; i++) {
+//         const raw = rawRows[i] as Record<string, any>;
+//         try {
+//           const mapped = await mapExcelRowToEmployee(raw);
+//           // Push create operation (no long transaction)
+//           createOps.push(prisma.employee.create({ data: mapped }));
+//           successCount++;
+//           logs.push(`Row ${i + 1}: SUCCESS (${mapped.employeeCode})`);
+//         } catch (error: any) {
+//           const message = error?.message || "Unknown error";
+//           errorRows.push({
+//             rowNumber: i + 1,
+//             error: message,
+//             ...raw,
+//           });
+//           logs.push(`Row ${i + 1}: FAILED → ${message}`);
+//         }
+//       }
+//       // If more than 20% rows failed → rollback (don't insert anything)
+//       if (errorRows.length > rawRows.length * 0.2) {
+//         return res.status(400).json({
+//           successCount: 0,
+//           failedCount: rawRows.length,
+//           logs,
+//           error: `Rollback triggered: ${errorRows.length} of ${rawRows.length} rows failed`,
+//         });
+//       }
+//       // Execute all successful row inserts
+//       if (createOps.length > 0) {
+//         await prisma.$transaction(createOps);
+//       }
+//       // Generate error report Excel
+//       let errorReportUrl: string | null = null;
+//       if (errorRows.length > 0) {
+//         const errorSheet = XLSX.utils.json_to_sheet(errorRows);
+//         const errorWB = XLSX.utils.book_new();
+//         XLSX.utils.book_append_sheet(errorWB, errorSheet, "Errors");
+//         const fileName = `employee-error-report-${Date.now()}.xlsx`;
+//         const filePath = path.join(__dirname, "../../reports", fileName);
+//         XLSX.writeFile(errorWB, filePath);
+//         errorReportUrl = `/reports/${fileName}`;
+//       }
+//       return res.json({
+//         successCount,
+//         failedCount: errorRows.length,
+//         logs,
+//         errors: errorReportUrl,
+//       });
+//     });
+//   } catch (error: any) {
+//     return res.status(500).json({ error: error.message || "Server error" });
+//   }
+// };
+const downloadEmployeeTemplate = (_req, res) => {
+    const headers = [{
+            employeeCode: "",
+            referenceCode: "",
+            firstName: "",
+            lastName: "",
+            gender: "MALE | FEMALE | OTHER",
+            dob: "YYYY-MM-DD",
+            dateOfJoining: "YYYY-MM-DD",
+            departmentName: "",
+            branchName: "",
+            roleName: "",
+            designationName: "",
+            reportingManagerCode: "",
+            employmentType: "PERMANENT | CONTRACT | PROBATION",
+            employmentStatus: "ACTIVE | TERMINATED | SUSPENDED",
+            phone: "",
+            email: "",
+        }];
+    const sheet = xlsx_1.default.utils.json_to_sheet(headers);
+    const wb = xlsx_1.default.utils.book_new();
+    xlsx_1.default.utils.book_append_sheet(wb, sheet, "Employees");
+    res.setHeader("Content-Disposition", "attachment; filename=employee-upload-template.xlsx");
+    res.end(xlsx_1.default.write(wb, { type: "buffer", bookType: "xlsx" }));
+};
+exports.downloadEmployeeTemplate = downloadEmployeeTemplate;
+function normalizeCode(code) {
+    return String(code || "").trim().toUpperCase();
+}
+const bulkUploadEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const form = (0, formidable_1.default)({ multiples: false, keepExtensions: true });
+        form.parse(req, (err, fields, files) => __awaiter(void 0, void 0, void 0, function* () {
+            if (err)
+                return res.status(500).json({ error: "File parsing error" });
+            const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
+            if (!fileObj)
+                return res.status(400).json({ error: "No file uploaded" });
+            const workbook = xlsx_1.default.readFile(fileObj.filepath);
+            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+            const rawRows = xlsx_1.default.utils.sheet_to_json(sheet);
+            if (!rawRows.length) {
+                return res.status(400).json({ error: "Empty Excel file" });
+            }
+            const errorRows = [];
+            const logs = [];
+            const createOps = [];
+            /** ---------------------------
+             * 1️⃣ Collect employeeCodes
+             ----------------------------*/
+            const excelCodes = rawRows.map((r) => normalizeCode(r.employeeCode));
+            /** ---------------------------
+             * 2️⃣ Find existing codes in DB
+             ----------------------------*/
+            const existingEmployees = yield prisma.employee.findMany({
+                where: { employeeCode: { in: excelCodes } },
+                select: { employeeCode: true },
+            });
+            const existingCodeSet = new Set(existingEmployees.map(e => e.employeeCode.toUpperCase()));
+            /** ---------------------------
+             * 3️⃣ Detect duplicates in Excel
+             ----------------------------*/
+            const seenExcelCodes = new Set();
+            for (let i = 0; i < rawRows.length; i++) {
+                const row = rawRows[i];
+                const employeeCode = normalizeCode(row.employeeCode);
+                try {
+                    if (!employeeCode) {
+                        throw new Error("EmployeeCode is required");
+                    }
+                    // Duplicate inside Excel
+                    if (seenExcelCodes.has(employeeCode)) {
+                        throw new Error(`Duplicate employeeCode in Excel: ${employeeCode}`);
+                    }
+                    seenExcelCodes.add(employeeCode);
+                    // Duplicate in DB
+                    if (existingCodeSet.has(employeeCode)) {
+                        throw new Error(`EmployeeCode already exists: ${employeeCode}`);
+                    }
+                    // Map & create
+                    const mapped = yield mapExcelRowToEmployee(row);
+                    createOps.push(prisma.employee.create({ data: mapped }));
+                    logs.push(`Row ${i + 1}: SUCCESS (${employeeCode})`);
+                }
+                catch (error) {
+                    errorRows.push(Object.assign({ rowNumber: i + 1, employeeCode, error: error.message }, row));
+                    logs.push(`Row ${i + 1}: FAILED → ${error.message}`);
+                }
+            }
+            /** ---------------------------
+             * 4️⃣ Execute inserts
+             ----------------------------*/
+            if (createOps.length > 0) {
+                yield prisma.$transaction(createOps);
+            }
+            /** ---------------------------
+             * 5️⃣ Error Excel
+             ----------------------------*/
+            let errorReportUrl = null;
+            if (errorRows.length > 0) {
+                const errorSheet = xlsx_1.default.utils.json_to_sheet(errorRows);
+                const errorWB = xlsx_1.default.utils.book_new();
+                xlsx_1.default.utils.book_append_sheet(errorWB, errorSheet, "Errors");
+                const reportsDir = path_1.default.join(__dirname, "../../reports");
+                if (!fs_1.default.existsSync(reportsDir)) {
+                    fs_1.default.mkdirSync(reportsDir, { recursive: true });
+                }
+                const fileName = `employee-upload-errors-${Date.now()}.xlsx`;
+                const filePath = path_1.default.join(reportsDir, fileName);
+                xlsx_1.default.writeFile(errorWB, filePath);
+                errorReportUrl = `/reports/${fileName}`;
+            }
+            return res.json({
+                totalRows: rawRows.length,
+                successCount: createOps.length,
+                failedCount: errorRows.length,
+                errorReport: errorReportUrl,
+                logs,
+            });
+        }));
+    }
+    catch (e) {
+        console.error(e);
+        return res.status(500).json({ error: "Bulk upload failed" });
+    }
+});
+exports.bulkUploadEmployees = bulkUploadEmployees;
+/* ============================================================
+   PROGRESS API
+============================================================ */
+const getBulkUploadProgress = (req, res) => {
+    const progress = uploadProgress.get(req.params.uploadId);
+    if (!progress)
+        return res.status(404).json({ error: "Invalid uploadId" });
+    res.json(progress);
+};
+exports.getBulkUploadProgress = getBulkUploadProgress;

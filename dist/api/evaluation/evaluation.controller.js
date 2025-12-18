@@ -10,14 +10,15 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.updateTest = exports.getAllTests = exports.createTest = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 const createTest = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { name, questionBankId, duration, passingPercent, maxAttempts, role, level, purpose, // 'HIRING' | 'TRAINING' | 'ASSESSMENT' | 'OTHER'
         randomization, // 'NONE' | 'SHUFFLE_QUESTIONS' | 'SHUFFLE_OPTIONS' | 'BOTH'
         instructions, isPublished, activeFrom, activeTo } = req.body;
-        const test = yield prisma.evaluationTest.create({
+        const test = yield prisma_1.prisma.evaluationTest.create({
             data: {
                 name,
                 questionBankId,
@@ -43,11 +44,11 @@ const createTest = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
 exports.createTest = createTest;
 const getAllTests = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const tests = yield prisma.evaluationTest.findMany({
+        const tests = yield prisma_1.prisma.evaluationTest.findMany({
             include: { questions: true }
         });
         const bankIds = [...new Set(tests.map(t => t.questionBankId))];
-        const banks = yield prisma.questionBank.findMany({
+        const banks = yield prisma_1.prisma.questionBank.findMany({
             where: { id: { in: bankIds } },
             select: { id: true, name: true }
         });
@@ -68,7 +69,7 @@ const updateTest = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
     try {
         const id = Number(req.params.id);
         const { name, questionBankId, duration, passingPercent, maxAttempts, role, level, purpose, randomization, instructions, isPublished, activeFrom, activeTo } = req.body;
-        const updated = yield prisma.evaluationTest.update({
+        const updated = yield prisma_1.prisma.evaluationTest.update({
             where: { id },
             data: {
                 name,

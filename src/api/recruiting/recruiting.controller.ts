@@ -429,10 +429,10 @@ export class RecruitingController {
       where: { id: { in: panels } },
       select: { firstName: true, lastName: true }
     });
-  
+
     const panelNames = panelEmployees
-    .map(e => `${e.firstName} ${e.lastName}`)
-    .join(', ');
+      .map(e => `${e.firstName} ${e.lastName}`)
+      .join(', ');
     const start = new Date(startTime);
     const end = new Date(endTime);
 
@@ -725,6 +725,22 @@ export class RecruitingController {
       // const employeeCode = `EMP${String(count + 1).padStart(3, "0")}`;
       const employeeCode = await generateEmployeeCode();
 
+      // 🔹 STEP 1: resolve designation
+      const designationName = job.title?.trim() || 'Employee';
+
+      let designation = await tx.designation.findFirst({
+        where: { name: designationName }
+      });
+
+      if (!designation) {
+        designation = await tx.designation.create({
+          data: {
+            name: designationName,
+            isActive: true
+          }
+        });
+      }
+
       const employee = await tx.employee.create({
         data: {
           employeeCode,
@@ -737,9 +753,9 @@ export class RecruitingController {
 
           phone: candidate.phone || "",
           email: candidate.email,
-
-          designation: job.title,
           departmentId: job.departmentId,
+          designationId:designation.id,
+
           branchId: 1, // 🔹 set default or map from job
           dateOfJoining: offer.proposedJoinAt || new Date(),
           employmentType: EmploymentType.PERMANENT,
@@ -751,7 +767,8 @@ export class RecruitingController {
           reportingManager: null,
           age: null,
           bloodGroup: null,
-        }
+        },
+
       });
 
       return { ...of, employee };

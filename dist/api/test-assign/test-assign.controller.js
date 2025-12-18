@@ -10,8 +10,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getAssignedTestOverview = exports.getAssignedTests = exports.assignTestToEmployees = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 const leave_controller_1 = require("../leave/leave.controller");
 const notifications_controller_1 = require("../notifications/notifications.controller");
 const TEST_ASSIGNED_TEMPLATE_ID = '888289';
@@ -41,14 +42,14 @@ const assignTestToEmployees = (req, res) => __awaiter(void 0, void 0, void 0, fu
             testDate,
             status: 'NotStarted'
         }));
-        yield prisma.assignedTest.createMany({ data });
+        yield prisma_1.prisma.assignedTest.createMany({ data });
         // Fetch test name (and fallback schedule)
-        const test = yield prisma.evaluationTest.findUnique({
+        const test = yield prisma_1.prisma.evaluationTest.findUnique({
             where: { id: Number(testId) },
             select: { name: true, activeFrom: true }
         });
         // Fetch employees’ names & phones
-        const employees = yield prisma.employee.findMany({
+        const employees = yield prisma_1.prisma.employee.findMany({
             where: { id: { in: employeeIds } },
             select: { firstName: true, lastName: true, phone: true, id: true }
         });
@@ -102,7 +103,7 @@ exports.assignTestToEmployees = assignTestToEmployees;
 const getAssignedTests = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         // 1) Assignments with employee & test (need passingPercent)
-        const assignments = yield prisma.assignedTest.findMany({
+        const assignments = yield prisma_1.prisma.assignedTest.findMany({
             include: { employee: true, test: true },
             orderBy: { assignedAt: 'desc' },
         });
@@ -111,7 +112,7 @@ const getAssignedTests = (req, res) => __awaiter(void 0, void 0, void 0, functio
         // 2) Pull all attempts for the employee/test pairs, newest first
         const employeeIds = Array.from(new Set(assignments.map(a => a.employeeId)));
         const testIds = Array.from(new Set(assignments.map(a => a.testId)));
-        const attempts = yield prisma.evaluationAttempt.findMany({
+        const attempts = yield prisma_1.prisma.evaluationAttempt.findMany({
             where: {
                 employeeId: { in: employeeIds },
                 testId: { in: testIds },
@@ -150,14 +151,14 @@ const getAssignedTestOverview = (req, res) => __awaiter(void 0, void 0, void 0, 
     var _a;
     try {
         const assignedTestId = Number(req.params.id);
-        const assignment = yield prisma.assignedTest.findUnique({
+        const assignment = yield prisma_1.prisma.assignedTest.findUnique({
             where: { id: assignedTestId },
             include: { employee: true, test: true },
         });
         if (!assignment)
             return res.status(404).json({ error: 'Assignment not found' });
         // latest attempt for this employee+test
-        const attempt = yield prisma.evaluationAttempt.findFirst({
+        const attempt = yield prisma_1.prisma.evaluationAttempt.findFirst({
             where: { employeeId: assignment.employeeId, testId: assignment.testId },
             orderBy: { createdAt: 'desc' },
         });
@@ -177,7 +178,7 @@ const getAssignedTestOverview = (req, res) => __awaiter(void 0, void 0, void 0, 
             });
         }
         // questions from the bank used by this test
-        const questions = yield prisma.question.findMany({
+        const questions = yield prisma_1.prisma.question.findMany({
             where: { questionBankId: assignment.test.questionBankId },
             include: { options: true },
         });

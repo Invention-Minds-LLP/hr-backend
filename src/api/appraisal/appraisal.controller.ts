@@ -108,36 +108,112 @@ export const createAppraisalsForEmployees = async (
   return created;
 };
 
+function getEmployeeCycle(doj: Date, now: Date) {
+  const diffMonths = monthsDiff(doj, now);
+
+  if (diffMonths < 3) return null; // not eligible yet
+
+  const cycleIndex = Math.floor(diffMonths / 3) + 1; // 1,2,3,4...
+  const year = now.getFullYear();
+
+  return {
+    cycleIndex,
+    cycleName: `Cycle ${cycleIndex} ${year}`
+  };
+}
+function monthsDiff(from: Date, to: Date) {
+  return (
+    to.getFullYear() * 12 + to.getMonth()
+    - (from.getFullYear() * 12 + from.getMonth())
+  );
+}
+
+
+// export const initQuarterlyAppraisalScheduler = () => {
+//   cron.schedule("* * * * *", async () => {
+//     console.log("📅 Running quarterly appraisal creation job...");
+
+//     try {
+//       const activeEmployees = await prisma.employee.findMany({
+//         where: { employmentStatus: "ACTIVE" },
+//         select: { id: true }
+//       });
+
+//       if (!activeEmployees.length) {
+//         console.log("⚠️ No active employees. Skipping appraisal creation.");
+//         return;
+//       }
+
+//       const ids = activeEmployees.map(e => e.id);
+
+//       // Determine quarter name
+//       const now = new Date();
+//       const quarter = Math.floor(now.getMonth() / 3) + 1;
+//       const cycle = `Quarter ${quarter} ${now.getFullYear()}`;
+
+//       await createAppraisalsForEmployees(ids, cycle, "Draft");
+
+//       console.log(`✅ Appraisals created for ${ids.length} employees`);
+//     } catch (error) {
+//       console.error("❌ Error during quarterly appraisal scheduler:", error);
+//     }
+//   });
+// };
 export const initQuarterlyAppraisalScheduler = () => {
-  cron.schedule("0 0 1 */3 *", async () => {
-    console.log("📅 Running quarterly appraisal creation job...");
+  cron.schedule('0 2 * * *', async () => {
+    console.log('📅 [Cron] Running appraisal scheduler...');
+
+    const now = new Date();
 
     try {
-      const activeEmployees = await prisma.employee.findMany({
-        where: { employmentStatus: "ACTIVE" },
-        select: { id: true }
+      const employees = await prisma.employee.findMany({
+        where: { employmentStatus: 'ACTIVE' },
+        select: {
+          id: true,
+          dateOfJoining: true,
+          reportingManager: true,
+          firstName: true,
+          lastName: true
+        }
       });
 
-      if (!activeEmployees.length) {
-        console.log("⚠️ No active employees. Skipping appraisal creation.");
-        return;
+      for (const emp of employees) {
+        if (!emp.dateOfJoining) continue;
+
+        const cycleInfo = getEmployeeCycle(emp.dateOfJoining, now);
+        if (!cycleInfo) continue;
+
+        const { cycleIndex, cycleName } = cycleInfo;
+
+        // ❌ Only 4 cycles per year
+        if (cycleIndex > 4) continue;
+
+        // ❌ Skip if already exists
+        const exists = await prisma.appraisalForm.findFirst({
+          where: {
+            employeeId: emp.id,
+            cycle: cycleName
+          }
+        });
+
+        if (exists) continue;
+
+        // ✅ Create appraisal
+        await createAppraisalsForEmployees(
+          [emp.id],
+          cycleName,
+          'Draft'
+        );
+
+        console.log(`✅ Created appraisal for ${emp.firstName} (${cycleName})`);
       }
 
-      const ids = activeEmployees.map(e => e.id);
-
-      // Determine quarter name
-      const now = new Date();
-      const quarter = Math.floor(now.getMonth() / 3) + 1;
-      const cycle = `Quarter ${quarter} ${now.getFullYear()}`;
-
-      await createAppraisalsForEmployees(ids, cycle, "Draft");
-
-      console.log(`✅ Appraisals created for ${ids.length} employees`);
     } catch (error) {
-      console.error("❌ Error during quarterly appraisal scheduler:", error);
+      console.error('❌ Appraisal scheduler failed:', error);
     }
   });
 };
+
 export const getAllAppraisalsWithManagerReview = async (req: Request, res: Response) => {
   try {
     const appraisals = await prisma.appraisalForm.findMany({

@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { PrismaClient,ShiftAssignMode  } from "@prisma/client";
+import cron from 'node-cron';
 
 const prisma = new PrismaClient();
 
@@ -116,14 +117,14 @@ export const assignShift = async (req: Request, res: Response) => {
       }
     });
 
-    const employee = await  prisma.employee.update({
-        where:{
-            id: employeeId
-        },
-        data:{
-            shiftId: shiftId
-        }
-    })
+    // const employee = await  prisma.employee.update({
+    //     where:{
+    //         id: employeeId
+    //     },
+    //     data:{
+    //         shiftId: shiftId
+    //     }
+    // })
 
     res.status(201).json(assignment);
   } catch (error) {
@@ -416,3 +417,110 @@ export const listShiftTemplates = async (_req: Request, res: Response) => {
   }
 };
 
+export function startShiftCron() {
+  cron.schedule('5 0 * * *', async () => {
+    console.log('🕛 Running daily shift generation');
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const employees = await prisma.employee.findMany({
+      where: {
+        employmentStatus: 'ACTIVE',
+        EmployeeShiftSetting: { isNot: null }
+      },
+      include: {
+        EmployeeShiftSetting: true
+      }
+    });
+
+    for (const emp of employees) {
+      const setting = emp.EmployeeShiftSetting!;
+      let shiftId: number | null = null;
+
+      // FIXED
+      if (setting.mode === 'FIXED') {
+        shiftId = setting.fixedShiftId;
+      }
+
+      // ROTATIONAL
+      if (setting.mode === 'ROTATIONAL') {
+        shiftId = await getRotationalShiftId(
+          setting.rotationPatternId!,
+          setting.startDate,
+          today
+        );
+      }
+
+      if (!shiftId) continue;
+
+      // 🔎 Check if assignment already exists
+      const existing = await prisma.shiftAssignment.findFirst({
+        where: {
+          employeeId: emp.id,
+          date: today
+        }
+      });
+
+      // ✅ Do nothing if already exists (AUTO or MANUAL)
+      if (existing) continue;
+
+      // ✅ Create only if missing
+      await prisma.shiftAssignment.create({
+        data: {
+          employeeId: emp.id,
+          shiftId,
+          date: today,
+          // source: 'AUTO'
+        }
+      });
+    }
+  });
+}
+
+
+
+// const DAY_MS = 24 * 60 * 60 * 1000;
+
+export async function getRotationalShiftId(
+  patternId: number,
+  startDate: Date,
+  targetDate: Date
+): Promise<number | null> {
+
+  const pattern = await prisma.shiftRotationPattern.findUnique({
+    where: { id: patternId },
+    include: {
+      items: {
+        orderBy: { dayIndex: 'asc' }
+      }
+    }
+  });
+
+  if (!pattern || pattern.items.length === 0) {
+    return null;
+  }
+
+  const start = startOfDay(startDate);
+  const target = startOfDay(targetDate);
+
+  const diffDays = Math.floor(
+    (target.getTime() - start.getTime()) / DAY_MS
+  );
+
+  const cycleDays =
+    pattern.cycleDays > 0
+      ? pattern.cycleDays
+      : pattern.items.length;
+
+  const index = mod(diffDays, cycleDays);
+
+  // Prefer exact dayIndex match
+  const item =
+    pattern.items.find(i => i.dayIndex === index)
+    ?? pattern.items[index % pattern.items.length];
+
+  if (!item) return null;
+
+  return item.shiftId;
+}

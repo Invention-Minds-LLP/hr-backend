@@ -82,17 +82,17 @@ export const loginUser = async (req: Request, res: Response) => {
     });
 
     const employee = await prisma.employee.findUnique({
-        where: {employeeCode},
-        select: {
-          id: true,
-          departmentId: true,
-          photoUrl: true,
-          designation: true,
-          roleId: true
-        }
+      where: { employeeCode },
+      select: {
+        id: true,
+        departmentId: true,
+        photoUrl: true,
+        designation: true,
+        roleId: true
+      }
     })
 
-    if(!employee) return res.status(404).json({ error: "Employee not found" });
+    if (!employee) return res.status(404).json({ error: "Employee not found" });
 
     if (!user) return res.status(404).json({ error: "User not found" });
 
@@ -113,7 +113,7 @@ export const loginUser = async (req: Request, res: Response) => {
       employeeCode: user.employeeCode,
       username: user.username,
     };
-    
+
     const token = jwt.sign(payload, process.env.JWT_SECRET as string, { expiresIn: "12h" });
 
 
@@ -132,7 +132,7 @@ export const loginUser = async (req: Request, res: Response) => {
       role: user.role,
       empId: employee.id,
       deptId: employee.departmentId,
-      designation: employee.designation,
+      designation: employee?.designation?.name || '',
       photoUrl: employee.photoUrl || null,
       roleId: employee.roleId,
     });
@@ -207,14 +207,8 @@ export const listAllUsers = async (_req: Request, res: Response) => {
   try {
     const users = await prisma.user.findMany({
       orderBy: { createdAt: "desc" },
-      select: {
-        id: true,
-        employeeCode: true,
-        username: true,
-        role: true,
-        lastLogin: true,
-        createdAt: true,
-        updatedAt: true,
+
+      include: {
         employee: {
           select: {
             employeeCode: true,
@@ -225,6 +219,7 @@ export const listAllUsers = async (_req: Request, res: Response) => {
           }
         }
       }
+
     });
 
     res.json(users);
@@ -276,7 +271,7 @@ export const loginCandidate = async (req: Request, res: Response) => {
     const ok = await bcrypt.compare(password, candidate.passwordHash);
     await prisma.candidateLoginHistory.create({
       data: { candidateId: candidate.id, ipAddress, userAgent, success: !!ok }
-    }).catch(() => {});
+    }).catch(() => { });
 
     if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 

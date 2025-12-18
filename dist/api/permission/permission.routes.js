@@ -10,4 +10,5 @@ const router = express_1.default.Router();
 router.post("/", authMiddleware_1.authenticateToken, permission_controller_1.createPermissionRequest);
 router.get("/", authMiddleware_1.authenticateToken, permission_controller_1.getPermissionRequests);
 router.patch("/:id/status", authMiddleware_1.authenticateToken, permission_controller_1.updatePermissionStatus);
+router.get('/balance/:employeeId', authMiddleware_1.authenticateToken, permission_controller_1.getPermissionBalance);
 exports.default = router;

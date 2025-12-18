@@ -270,6 +270,7 @@ export async function hrApprove(req: Request, res: Response) {
           include: {
             Department: true,
             Branch: true,
+            designation: true
           },
         },
       },
@@ -278,7 +279,7 @@ export async function hrApprove(req: Request, res: Response) {
     // Step 2: Update employee status → NOTICE_PERIOD
     await prisma.employee.update({
       where: { id: upd.employeeId },
-      data: { employmentStatus: 'NOTICE_PERIOD' },
+      data: { employmentStatus: 'NOTICE_PERIOD' }
     });
 
     // Step 3: Auto-create backfill job (if none exists)
@@ -290,9 +291,10 @@ export async function hrApprove(req: Request, res: Response) {
     });
 
     if (!existingJob && upd.employee) {
+      const designationName = upd.employee.designation?.name ?? 'Default';
       const newJob = await prisma.job.create({
         data: {
-          title: `${upd.employee.designation} - Replacement`,
+          title: `${designationName} - Replacement`,
           departmentId: upd.employee.departmentId,
           location: upd.employee.Branch?.location || 'Unknown',
           headcount: 1,

@@ -255,6 +255,7 @@ function endOfNextMonth(d) { return new Date(d.getFullYear(), d.getMonth() + 2, 
 function overlaps(aStart, aEnd, bStart, bEnd) { return aEnd >= bStart && aStart <= bEnd; }
 function getWhoIsOnWFHBuckets(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b;
         try {
             const base = req.query.date ? new Date(String(req.query.date)) : new Date();
             // Ranges
@@ -291,12 +292,13 @@ function getWhoIsOnWFHBuckets(req, res) {
             const seenWeek = new Set();
             const seenNext = new Set();
             for (const r of rows) {
+                const designationName = (_b = (_a = r.employee.designation) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : 'Default';
                 const s = new Date(r.startDate);
                 const e = new Date(r.endDate);
                 const person = {
                     id: r.employee.id,
                     name: `${r.employee.firstName} ${r.employee.lastName}`,
-                    title: r.employee.designation,
+                    title: designationName,
                     photoUrl: r.employee.photoUrl || null,
                     startDate: s.toISOString(),
                     endDate: e.toISOString(),

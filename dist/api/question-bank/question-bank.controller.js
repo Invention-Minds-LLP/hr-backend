@@ -10,11 +10,12 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getQuestionBankById = exports.deleteQuestionBank = exports.updateQuestionBank = exports.createQuestionBank = exports.getAllQuestionBanks = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 const getAllQuestionBanks = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const banks = yield prisma.questionBank.findMany({
+        const banks = yield prisma_1.prisma.questionBank.findMany({
             include: { questions: true },
         });
         res.json(banks);
@@ -27,7 +28,7 @@ exports.getAllQuestionBanks = getAllQuestionBanks;
 const createQuestionBank = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { name, role, departmentId, difficulty, createdBy } = req.body;
-        const bank = yield prisma.questionBank.create({
+        const bank = yield prisma_1.prisma.questionBank.create({
             data: {
                 name,
                 role,
@@ -47,7 +48,7 @@ const updateQuestionBank = (req, res) => __awaiter(void 0, void 0, void 0, funct
     try {
         const { id } = req.params;
         const { name, role, departmentId, difficulty } = req.body;
-        const updated = yield prisma.questionBank.update({
+        const updated = yield prisma_1.prisma.questionBank.update({
             where: { id: Number(id) },
             data: { name, role, departmentId, difficulty },
         });
@@ -61,7 +62,7 @@ exports.updateQuestionBank = updateQuestionBank;
 const deleteQuestionBank = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { id } = req.params;
-        yield prisma.questionBank.delete({ where: { id: Number(id) } });
+        yield prisma_1.prisma.questionBank.delete({ where: { id: Number(id) } });
         res.json({ message: 'Deleted successfully' });
     }
     catch (error) {
@@ -75,7 +76,7 @@ const getQuestionBankById = (req, res) => __awaiter(void 0, void 0, void 0, func
         if (Number.isNaN(id)) {
             return res.status(400).json({ error: 'Invalid id' });
         }
-        const bank = yield prisma.questionBank.findUnique({
+        const bank = yield prisma_1.prisma.questionBank.findUnique({
             where: { id },
             include: {
                 questions: {

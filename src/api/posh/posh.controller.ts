@@ -3,6 +3,7 @@ import asyncHandler from "express-async-handler";
 // import { PrismaClient, PermissionStatus } from "@prisma/client";
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
+import { createNotification } from "../notifications/notifications.controller";
 
 // --- File POSH case
 export const createPoshCase = asyncHandler(async (req: Request, res: Response) => {
@@ -12,6 +13,20 @@ export const createPoshCase = asyncHandler(async (req: Request, res: Response) =
   const posh = await prisma.poshCase.create({
     data: { complainantId, accusedId, description }
   });
+  const hrEmployees = await prisma.employee.findMany({
+    where: {
+      departmentId: 1   // ✅ HR department
+    },
+    select: { id: true }
+  });
+  
+
+  for (const hr of hrEmployees) {
+    await createNotification(
+      hr.id,
+      'New posh submitted — requires acknowledgment.'
+    );
+  }
   res.json(posh);
 });
 

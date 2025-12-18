@@ -10,13 +10,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getAllSummaries = exports.assignFormToEmployee = exports.submitFullForm = exports.getEmployeeForm = exports.submitFinalReview = exports.submitSummary = exports.submitResponses = exports.getTemplateByDept = exports.createTemplate = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 // Create a template
 const createTemplate = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { departmentId, cycle, questions } = req.body;
-        const template = yield prisma.performanceFormTemplate.create({
+        const template = yield prisma_1.prisma.performanceFormTemplate.create({
             data: {
                 departmentId,
                 cycle,
@@ -35,7 +36,7 @@ exports.createTemplate = createTemplate;
 const getTemplateByDept = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { departmentId, cycle } = req.params; // or req.query if you switched
-        const template = yield prisma.performanceFormTemplate.findFirst({
+        const template = yield prisma_1.prisma.performanceFormTemplate.findFirst({
             where: { departmentId: Number(departmentId), cycle },
             include: {
                 questions: true,
@@ -53,7 +54,7 @@ exports.getTemplateByDept = getTemplateByDept;
 const submitResponses = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { employeeId, departmentId, cycle, responses } = req.body;
-        yield prisma.performanceResponse.createMany({
+        yield prisma_1.prisma.performanceResponse.createMany({
             data: responses.map((r) => ({
                 employeeId,
                 departmentId,
@@ -76,7 +77,7 @@ exports.submitResponses = submitResponses;
 const submitSummary = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { employeeId, departmentId, cycle, summaries } = req.body;
-        yield prisma.performanceSummary.createMany({
+        yield prisma_1.prisma.performanceSummary.createMany({
             data: summaries.map((s) => ({
                 employeeId,
                 departmentId,
@@ -100,7 +101,7 @@ exports.submitSummary = submitSummary;
 const submitFinalReview = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { employeeId, departmentId, cycle, appreciations, talents, overallComments, employeeSig, supervisorSig, hrSig } = req.body;
-        const review = yield prisma.performanceFinalReview.create({
+        const review = yield prisma_1.prisma.performanceFinalReview.create({
             data: { employeeId, departmentId, cycle, appreciations, talents, overallComments, employeeSig, supervisorSig, hrSig }
         });
         res.json(review);
@@ -113,23 +114,23 @@ exports.submitFinalReview = submitFinalReview;
 const getEmployeeForm = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { employeeId, departmentId, cycle } = req.params;
-        const template = yield prisma.performanceFormTemplate.findFirst({
+        const template = yield prisma_1.prisma.performanceFormTemplate.findFirst({
             where: { departmentId: Number(departmentId), cycle },
             include: { questions: true, department: true }
         });
         if (!template)
             return res.status(404).json({ error: "Template not found" });
-        const employee = yield prisma.employee.findUnique({
+        const employee = yield prisma_1.prisma.employee.findUnique({
             where: { id: Number(employeeId) },
             include: { Department: true }
         });
-        const responses = yield prisma.performanceResponse.findMany({
+        const responses = yield prisma_1.prisma.performanceResponse.findMany({
             where: { employeeId: Number(employeeId), departmentId: Number(departmentId), cycle }
         });
-        const summaries = yield prisma.performanceSummary.findMany({
+        const summaries = yield prisma_1.prisma.performanceSummary.findMany({
             where: { employeeId: Number(employeeId), departmentId: Number(departmentId), cycle }
         });
-        const finalReview = yield prisma.performanceFinalReview.findFirst({
+        const finalReview = yield prisma_1.prisma.performanceFinalReview.findFirst({
             where: { employeeId: Number(employeeId), departmentId: Number(departmentId), cycle }
         });
         res.json({
@@ -151,7 +152,7 @@ const submitFullForm = (req, res) => __awaiter(void 0, void 0, void 0, function*
         const data = req.body;
         // 1) Save question responses
         if ((_a = data.responses) === null || _a === void 0 ? void 0 : _a.length) {
-            yield prisma.performanceResponse.createMany({
+            yield prisma_1.prisma.performanceResponse.createMany({
                 data: data.responses.map((r) => ({
                     employeeId: data.employeeId,
                     departmentId: data.departmentId,
@@ -166,7 +167,7 @@ const submitFullForm = (req, res) => __awaiter(void 0, void 0, void 0, function*
         }
         // 2) Save overall summaries
         if ((_b = data.summaries) === null || _b === void 0 ? void 0 : _b.length) {
-            yield prisma.performanceSummary.createMany({
+            yield prisma_1.prisma.performanceSummary.createMany({
                 data: data.summaries.map((s) => ({
                     employeeId: data.employeeId,
                     departmentId: data.departmentId,
@@ -182,7 +183,7 @@ const submitFullForm = (req, res) => __awaiter(void 0, void 0, void 0, function*
         }
         // 3) Save final review
         if (data.finalReview) {
-            yield prisma.performanceFinalReview.create({
+            yield prisma_1.prisma.performanceFinalReview.create({
                 data: {
                     employeeId: data.employeeId,
                     departmentId: data.departmentId,
@@ -213,11 +214,11 @@ const assignFormToEmployee = (req, res) => __awaiter(void 0, void 0, void 0, fun
         const results = [];
         for (const id of ids) {
             // check if already assigned
-            const exists = yield prisma.performanceSummary.findFirst({
+            const exists = yield prisma_1.prisma.performanceSummary.findFirst({
                 where: { employeeId: id, departmentId, cycle, period }
             });
             if (!exists) {
-                const summary = yield prisma.performanceSummary.create({
+                const summary = yield prisma_1.prisma.performanceSummary.create({
                     data: {
                         employeeId: id,
                         departmentId,
@@ -241,7 +242,7 @@ exports.assignFormToEmployee = assignFormToEmployee;
 // Get all summaries with employee & department
 const getAllSummaries = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const summaries = yield prisma.performanceSummary.findMany({
+        const summaries = yield prisma_1.prisma.performanceSummary.findMany({
             include: {
                 employee: {
                     select: {
@@ -250,7 +251,8 @@ const getAllSummaries = (req, res) => __awaiter(void 0, void 0, void 0, function
                         firstName: true,
                         lastName: true,
                         email: true,
-                        dateOfJoining: true
+                        dateOfJoining: true,
+                        reportingManager: true
                     }
                 },
                 department: {

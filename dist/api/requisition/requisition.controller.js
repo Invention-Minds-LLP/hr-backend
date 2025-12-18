@@ -10,8 +10,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.listRequisitions = exports.updateRequisitionStatus = exports.createRequisition = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 const createRequisition = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         console.log("Request Body:", req.body); // Debugging line
@@ -20,7 +21,7 @@ const createRequisition = (req, res) => __awaiter(void 0, void 0, void 0, functi
         // Approvals
         raisedBy, raisedBySign, raisedByDate, raisedByComments, approvedByHoD, hodSign, approvedByHoDDate, approvedByHoDComments, approvedBySMO, smoSign, approvedBySMODate, approvedBySMOComments, receivedByHR, hrSign, receivedByHRDate, receivedByHRComments, hrReferenceNo, salaryRange, source, actionTaken, closedOn } = req.body;
         // Step 2: Create Requisition
-        const requisition = yield prisma.manpowerRequisition.create({
+        const requisition = yield prisma_1.prisma.manpowerRequisition.create({
             data: {
                 requestDate: new Date(),
                 designation,
@@ -100,7 +101,7 @@ const updateRequisitionStatus = (req, res) => __awaiter(void 0, void 0, void 0, 
                         status: "HOD_APPROVED",
                     };
                 break;
-            case "SMO":
+            case "COO":
                 updateData = reject
                     ? {
                         smoRejectedBy: approverName,
@@ -113,7 +114,7 @@ const updateRequisitionStatus = (req, res) => __awaiter(void 0, void 0, void 0, 
                         smoSign: signature,
                         approvedBySMODate: now,
                         approvedBySMOComments: comments,
-                        status: "SMO_APPROVED",
+                        status: "COO_APPROVED",
                     };
                 break;
             // case "HR":
@@ -155,7 +156,7 @@ const updateRequisitionStatus = (req, res) => __awaiter(void 0, void 0, void 0, 
                     };
                 }
                 else {
-                    const requisition = yield prisma.manpowerRequisition.findUnique({
+                    const requisition = yield prisma_1.prisma.manpowerRequisition.findUnique({
                         where: { id: Number(id) },
                     });
                     if (!requisition) {
@@ -176,7 +177,7 @@ const updateRequisitionStatus = (req, res) => __awaiter(void 0, void 0, void 0, 
                     }
                     // ✅ If no breakdown, still create one job (fallback to old logic)
                     if (!breakdown.length) {
-                        yield prisma.job.create({
+                        yield prisma_1.prisma.job.create({
                             data: {
                                 title: title || requisition.title || "Untitled",
                                 departmentId: (_a = requisition.departmentId) !== null && _a !== void 0 ? _a : 0,
@@ -189,7 +190,7 @@ const updateRequisitionStatus = (req, res) => __awaiter(void 0, void 0, void 0, 
                     else {
                         // ✅ Create multiple jobs from breakdown
                         for (const item of breakdown) {
-                            yield prisma.job.create({
+                            yield prisma_1.prisma.job.create({
                                 data: {
                                     title: item.designation || requisition.title || "Untitled",
                                     departmentId: (_b = requisition.departmentId) !== null && _b !== void 0 ? _b : 0,
@@ -223,7 +224,7 @@ const updateRequisitionStatus = (req, res) => __awaiter(void 0, void 0, void 0, 
             default:
                 return res.status(400).json({ message: "Invalid approval step" });
         }
-        const updated = yield prisma.manpowerRequisition.update({
+        const updated = yield prisma_1.prisma.manpowerRequisition.update({
             where: { id: Number(id) },
             data: updateData,
         });
@@ -237,7 +238,7 @@ const updateRequisitionStatus = (req, res) => __awaiter(void 0, void 0, void 0, 
 exports.updateRequisitionStatus = updateRequisitionStatus;
 const listRequisitions = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const requisitions = yield prisma.manpowerRequisition.findMany({
+        const requisitions = yield prisma_1.prisma.manpowerRequisition.findMany({
             include: { job: true },
             orderBy: { requestDate: 'desc' }
         });
@@ -247,7 +248,7 @@ const listRequisitions = (req, res) => __awaiter(void 0, void 0, void 0, functio
                 .filter((id) => id !== null) // type guard: only numbers
             )];
         // fetch departments
-        const departments = yield prisma.department.findMany({
+        const departments = yield prisma_1.prisma.department.findMany({
             where: { id: { in: deptIds } },
             select: { id: true, name: true },
         });

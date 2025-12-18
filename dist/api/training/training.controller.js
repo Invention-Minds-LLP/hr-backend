@@ -9,9 +9,10 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.updateTraining = exports.getTrainingFeedbackSummary = exports.submitTrainingFeedback = exports.markTrainingCompleted = exports.getTrainings = exports.assignTraining = exports.createTraining = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+exports.bulkMarkTrainingAttendance = exports.getTrainingAttendance = exports.markTrainingAttendance = exports.updateTraining = exports.getTrainingFeedbackSummary = exports.submitTrainingFeedback = exports.markTrainingCompleted = exports.getTrainings = exports.assignTraining = exports.createTraining = void 0;
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 const notifications_controller_1 = require("../notifications/notifications.controller");
 /* ======================================================
    TRAINING CRUD + ASSIGNMENT
@@ -26,7 +27,7 @@ const createTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
         const { title, description, objectives, mode, location, startDate, endDate, departmentId, testIds, trainers, // 👈 array of trainers (internal/external)
         trainingTests, // 👈 array of { testId, isMandatory, orderNo
          } = req.body;
-        const training = yield prisma.training.create({
+        const training = yield prisma_1.prisma.training.create({
             data: {
                 title,
                 description,
@@ -47,6 +48,8 @@ const createTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
                             testId: t.testId,
                             isMandatory: (_a = t.isMandatory) !== null && _a !== void 0 ? _a : true,
                             orderNo: (_b = t.orderNo) !== null && _b !== void 0 ? _b : index + 1,
+                            testDate: t.testDate ? new Date(t.testDate) : null,
+                            deadlineDate: t.deadlineDate ? new Date(t.deadlineDate) : null,
                         });
                     }),
                 },
@@ -69,7 +72,7 @@ exports.createTraining = createTraining;
 const assignTraining = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { trainingId, employeeIds, assignedBy } = req.body;
-        const training = yield prisma.training.findUnique({
+        const training = yield prisma_1.prisma.training.findUnique({
             where: { id: trainingId },
             include: { trainingTests: true },
         });
@@ -78,7 +81,7 @@ const assignTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
         const mandatoryTests = training.trainingTests.filter((t) => t.isMandatory);
         const assignments = [];
         for (const empId of employeeIds) {
-            const assignment = yield prisma.trainingAssignment.create({
+            const assignment = yield prisma_1.prisma.trainingAssignment.create({
                 data: {
                     trainingId,
                     employeeId: empId,
@@ -87,12 +90,15 @@ const assignTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 },
             });
             for (const test of mandatoryTests) {
-                yield prisma.assignedTest.create({
+                yield prisma_1.prisma.assignedTest.create({
                     data: {
                         testId: test.testId,
                         employeeId: empId,
                         assignedBy,
                         status: "NotStarted",
+                        trainingAssignmentId: assignment.id,
+                        testDate: test.testDate ? new Date(test.testDate) : null,
+                        deadlineDate: test.deadlineDate ? new Date(test.deadlineDate) : null,
                     },
                 });
             }
@@ -116,43 +122,36 @@ exports.assignTraining = assignTraining;
 const getTrainings = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { employeeId } = req.query;
-        let result;
+        const whereClause = {};
+        // If employeeId provided → show only trainings assigned to that employee
         if (employeeId) {
-            result = yield prisma.trainingAssignment.findMany({
-                where: { employeeId: Number(employeeId) },
-                include: {
-                    training: {
-                        include: {
-                            trainingTests: { include: { test: true } },
-                            feedbacks: true,
-                        },
-                    },
-                },
-            });
+            whereClause.assignedEmployees = {
+                some: { employeeId: Number(employeeId) },
+            };
         }
-        else {
-            result = yield prisma.training.findMany({
-                include: {
-                    trainingTests: { include: { test: true } },
-                    assignedEmployees: {
-                        include: {
-                            employee: {
-                                select: {
-                                    id: true,
-                                    firstName: true,
-                                    lastName: true,
-                                    Department: {
-                                        select: { name: true },
-                                    },
+        const trainings = yield prisma_1.prisma.training.findMany({
+            where: whereClause,
+            include: {
+                trainingTests: { include: { test: true } },
+                feedbacks: true,
+                assignedEmployees: {
+                    include: {
+                        employee: {
+                            select: {
+                                id: true,
+                                firstName: true,
+                                lastName: true,
+                                Department: {
+                                    select: { name: true },
                                 },
                             },
                         },
                     },
-                    feedbacks: true,
                 },
-            });
-        }
-        res.json(result);
+            },
+            orderBy: { createdAt: 'desc' },
+        });
+        res.json(trainings);
     }
     catch (error) {
         console.error("❌ Failed to fetch trainings:", error);
@@ -166,7 +165,7 @@ exports.getTrainings = getTrainings;
 const markTrainingCompleted = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { trainingId, employeeId } = req.body;
-        const assignment = yield prisma.trainingAssignment.update({
+        const assignment = yield prisma_1.prisma.trainingAssignment.update({
             where: {
                 trainingId_employeeId: {
                     trainingId,
@@ -197,7 +196,7 @@ exports.markTrainingCompleted = markTrainingCompleted;
 const submitTrainingFeedback = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { trainingId, employeeId, rating, feedback, trainerRating, contentQuality, relevance, suggestions, } = req.body;
-        const assignment = yield prisma.trainingAssignment.findUnique({
+        const assignment = yield prisma_1.prisma.trainingAssignment.findUnique({
             where: {
                 trainingId_employeeId: {
                     trainingId,
@@ -207,7 +206,7 @@ const submitTrainingFeedback = (req, res) => __awaiter(void 0, void 0, void 0, f
         });
         if (!assignment)
             return res.status(404).json({ error: "Training assignment not found" });
-        const existingFeedback = yield prisma.trainingFeedback.findUnique({
+        const existingFeedback = yield prisma_1.prisma.trainingFeedback.findUnique({
             where: {
                 trainingId_employeeId: {
                     trainingId,
@@ -219,7 +218,7 @@ const submitTrainingFeedback = (req, res) => __awaiter(void 0, void 0, void 0, f
             return res
                 .status(400)
                 .json({ error: "Feedback already submitted for this training" });
-        const feedbackRecord = yield prisma.trainingFeedback.create({
+        const feedbackRecord = yield prisma_1.prisma.trainingFeedback.create({
             data: {
                 trainingId,
                 employeeId,
@@ -246,7 +245,7 @@ exports.submitTrainingFeedback = submitTrainingFeedback;
 const getTrainingFeedbackSummary = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { trainingId } = req.params;
-        const feedbacks = yield prisma.trainingFeedback.findMany({
+        const feedbacks = yield prisma_1.prisma.trainingFeedback.findMany({
             where: { trainingId: Number(trainingId) },
             include: { employee: true },
         });
@@ -280,7 +279,7 @@ const updateTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
         const { id } = req.params;
         const { title, description, objectives, mode, location, startDate, endDate, departmentId, trainers, trainingTests, // array of { testId, isMandatory, orderNo }
          } = req.body;
-        const existing = yield prisma.training.findUnique({
+        const existing = yield prisma_1.prisma.training.findUnique({
             where: { id: Number(id) },
             include: { trainingTests: true },
         });
@@ -288,7 +287,7 @@ const updateTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
             return res.status(404).json({ error: "Training not found" });
         }
         // 🧩 Step 1: Update main training fields
-        const updatedTraining = yield prisma.training.update({
+        const updatedTraining = yield prisma_1.prisma.training.update({
             where: { id: Number(id) },
             data: {
                 title,
@@ -305,12 +304,12 @@ const updateTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
         });
         // 🧩 Step 2: Replace linked tests
         // First, delete old trainingTests
-        yield prisma.trainingTest.deleteMany({
+        yield prisma_1.prisma.trainingTest.deleteMany({
             where: { trainingId: Number(id) },
         });
         // Then recreate based on new list
         if (Array.isArray(trainingTests) && trainingTests.length > 0) {
-            yield prisma.trainingTest.createMany({
+            yield prisma_1.prisma.trainingTest.createMany({
                 data: trainingTests.map((t, index) => {
                     var _a, _b;
                     return ({
@@ -323,7 +322,7 @@ const updateTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
             });
         }
         // 🧩 Step 3: Return the updated training with its tests
-        const result = yield prisma.training.findUnique({
+        const result = yield prisma_1.prisma.training.findUnique({
             where: { id: Number(id) },
             include: { trainingTests: { include: { test: true } } },
         });
@@ -335,3 +334,109 @@ const updateTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
     }
 });
 exports.updateTraining = updateTraining;
+const markTrainingAttendance = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { trainingId } = req.params;
+        const { employeeId, status } = req.body;
+        const markedBy = req.user.userId;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        // 1️⃣ Check if an attendance already exists
+        const existing = yield prisma_1.prisma.trainingAttendance.findFirst({
+            where: {
+                trainingId: Number(trainingId),
+                employeeId: Number(employeeId),
+                date: today,
+            }
+        });
+        let record;
+        if (existing) {
+            // 2️⃣ Update it
+            record = yield prisma_1.prisma.trainingAttendance.update({
+                where: { id: existing.id },
+                data: {
+                    status,
+                    markedAt: new Date(),
+                    markedBy,
+                }
+            });
+        }
+        else {
+            // 3️⃣ Create new attendance
+            record = yield prisma_1.prisma.trainingAttendance.create({
+                data: {
+                    trainingId: Number(trainingId),
+                    employeeId: Number(employeeId),
+                    date: today,
+                    status,
+                    markedAt: new Date(),
+                    markedBy,
+                }
+            });
+        }
+        res.json({
+            message: "Attendance marked successfully",
+            data: record,
+        });
+    }
+    catch (err) {
+        console.error("Error marking attendance:", err);
+        res.status(500).json({ error: "Failed to mark attendance" });
+    }
+});
+exports.markTrainingAttendance = markTrainingAttendance;
+const getTrainingAttendance = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { trainingId } = req.params;
+        const attendance = yield prisma_1.prisma.trainingAttendance.findMany({
+            where: { trainingId: Number(trainingId) },
+            include: {
+                employee: true,
+            }
+        });
+        res.json(attendance);
+    }
+    catch (err) {
+        res.status(500).json({ error: "Failed to fetch attendance" });
+    }
+});
+exports.getTrainingAttendance = getTrainingAttendance;
+const bulkMarkTrainingAttendance = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { trainingId } = req.params;
+        const { attendanceList } = req.body; // [{employeeId, status}, ...]
+        const markedBy = req.user.userId;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        for (const entry of attendanceList) {
+            yield prisma_1.prisma.trainingAttendance.upsert({
+                where: {
+                    trainingId_employeeId_date: {
+                        trainingId: Number(trainingId),
+                        employeeId: entry.employeeId,
+                        date: today,
+                    }
+                },
+                update: {
+                    status: entry.status,
+                    markedAt: new Date(),
+                    markedBy,
+                },
+                create: {
+                    trainingId: Number(trainingId),
+                    employeeId: entry.employeeId,
+                    date: today,
+                    status: entry.status,
+                    markedAt: new Date(),
+                    markedBy,
+                }
+            });
+        }
+        res.json({ message: "Bulk attendance updated" });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to update bulk attendance" });
+    }
+});
+exports.bulkMarkTrainingAttendance = bulkMarkTrainingAttendance;

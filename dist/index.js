@@ -35,14 +35,57 @@ const posh_routes_1 = __importDefault(require("./api/posh/posh.routes"));
 const notifications_routes_1 = __importDefault(require("./api/notifications/notifications.routes"));
 const training_routes_1 = __importDefault(require("./api/training/training.routes"));
 const attendance_routes_1 = __importDefault(require("./api/attendance/attendance.routes"));
+const incident_routes_1 = __importDefault(require("./api/incident/incident.routes"));
+const helmet_1 = __importDefault(require("helmet"));
+const scheduler_1 = require("./schedulers/scheduler");
+const designation_routes_1 = __importDefault(require("./api/designation/designation.routes"));
 const port = 3002;
 dotenv_1.default.config();
 const app = (0, express_1.default)();
+app.use((0, helmet_1.default)());
+// app.use("/api/", rateLimit({
+//   windowMs: 10 * 60 * 1000, 
+//   max: 300
+// }));
+// app.use(cors({
+//   origin: ["http://localhost:4300",
+//     "https://demo.hrproindia.in",
+//     "http://192.168.3.25:4300",
+//     'http://localhost',
+//     'https://localhost',
+//     'capacitor://localhost'
+//   ],
+//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+//   allowedHeaders: [
+//     'Content-Type',
+//     'Authorization',
+//     'X-Requested-With'
+//   ],// Allow your Angular app
+//   credentials: true               // Optional: if you plan to send cookies
+// }));
+const allowedOrigins = [
+    'http://localhost:4300', // Angular web
+    'http://192.168.3.25:4300', // LAN testing
+    'https://demo.hrproindia.in',
+    'http://223.30.118.2:4300',
+    'http://localhost', // Capacitor Android
+    'capacitor://localhost' // Capacitor iOS
+];
 app.use((0, cors_1.default)({
-    origin: ["http://localhost:4200",
-        "https://demo.hrproindia.in"
-    ], // Allow your Angular app
-    credentials: true // Optional: if you plan to send cookies
+    origin: function (origin, callback) {
+        // Allow mobile apps, Postman, curl (no origin)
+        if (!origin)
+            return callback(null, true);
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        }
+        else {
+            callback(new Error(`CORS blocked origin: ${origin}`));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 app.use(express_1.default.json());
 // Routes
@@ -74,11 +117,14 @@ app.use('/api/grievances', grievance_routes_1.default);
 app.use('/api/posh', posh_routes_1.default);
 app.use('/api/notifications', notifications_routes_1.default);
 app.use('/api/trainings', training_routes_1.default);
-app.use('/api/attendance-calendar', attendance_routes_1.default);
+app.use('/api/attendance', attendance_routes_1.default);
+app.use('/api/incidents', incident_routes_1.default);
+app.use("/api/designation", designation_routes_1.default);
 // Default route
 app.get("/", (req, res) => {
     res.send("✅ HR Management API is running!");
 });
+(0, scheduler_1.startSchedulers)();
 // Error handler middleware (optional, but good practice)
 app.use((err, req, res, next) => {
     console.error(err.stack);

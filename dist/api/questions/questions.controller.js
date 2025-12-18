@@ -10,12 +10,13 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.updateQuestion = exports.deleteQuestion = exports.createQuestion = exports.getQuestionsByBank = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 const getQuestionsByBank = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const bankId = Number(req.params.bankId);
-        const questions = yield prisma.question.findMany({
+        const questions = yield prisma_1.prisma.question.findMany({
             where: { questionBankId: bankId },
             include: { options: true }
         });
@@ -29,7 +30,7 @@ exports.getQuestionsByBank = getQuestionsByBank;
 const createQuestion = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { questionBankId, text, type, weight, options } = req.body;
-        const question = yield prisma.question.create({
+        const question = yield prisma_1.prisma.question.create({
             data: {
                 questionBankId,
                 text,
@@ -51,8 +52,8 @@ exports.createQuestion = createQuestion;
 const deleteQuestion = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const id = Number(req.params.id);
-        yield prisma.questionOption.deleteMany({ where: { questionId: id } });
-        yield prisma.question.delete({ where: { id } });
+        yield prisma_1.prisma.questionOption.deleteMany({ where: { questionId: id } });
+        yield prisma_1.prisma.question.delete({ where: { id } });
         res.json({ message: 'Deleted' });
     }
     catch (error) {
@@ -65,7 +66,7 @@ const updateQuestion = (req, res) => __awaiter(void 0, void 0, void 0, function*
     try {
         const id = Number(req.params.id);
         const { text, type, weight, answerType, options } = req.body;
-        yield prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+        yield prisma_1.prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
             // Update question fields
             yield tx.question.update({
                 where: { id },
@@ -84,7 +85,7 @@ const updateQuestion = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 });
             }
         }));
-        const updated = yield prisma.question.findUnique({
+        const updated = yield prisma_1.prisma.question.findUnique({
             where: { id },
             include: { options: true }
         });

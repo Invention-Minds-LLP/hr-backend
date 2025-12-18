@@ -63,6 +63,7 @@ export const getEmployeeUsageSummary = async (req: Request, res: Response) => {
                 permissions: {
                     where: { status: PermissionStatus.APPROVED },
                 },
+                designation: true
             },
         });
 
@@ -101,7 +102,7 @@ export const getEmployeeUsageSummary = async (req: Request, res: Response) => {
                 }
             }, 0);
 
-
+            const designationName = emp.designation?.name ?? 'Default';
             return {
                 id: emp.id,
                 name: `${emp.firstName} ${emp.lastName}`,
@@ -109,7 +110,7 @@ export const getEmployeeUsageSummary = async (req: Request, res: Response) => {
                 phone: emp.phone,
                 employeeCode: emp.employeeCode,
                 department: emp.departmentId,
-                designation: emp.designation,
+                designation: designationName ,
                 employmentType: emp.employmentType,
                 shiftType: emp.shifts[0]?.shift.shiftType || 'N/A',
 

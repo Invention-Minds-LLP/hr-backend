@@ -8,4 +8,10 @@ router.post("/", authMiddleware_1.authenticateToken, grievance_controller_1.crea
 router.get("/", authMiddleware_1.authenticateToken, grievance_controller_1.listGrievances);
 router.post("/:id/comment", authMiddleware_1.authenticateToken, grievance_controller_1.addGrievanceComment);
 router.patch("/:id/status", authMiddleware_1.authenticateToken, grievance_controller_1.updateGrievanceStatus);
+router.post("/acknowledge", grievance_controller_1.createAcknowledgement);
+// Get all acknowledgements for an employee
+router.get("/acknowledge/:employeeId", grievance_controller_1.getAcknowledgementsByEmployee);
+// Check if already acknowledged
+router.get("/acknowledge", grievance_controller_1.checkAcknowledgement);
+router.get("/get-unacknowledged/:employeeId", grievance_controller_1.getUnacknowledgedComplaints);
 exports.default = router;

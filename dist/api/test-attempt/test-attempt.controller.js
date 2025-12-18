@@ -17,12 +17,13 @@ exports.getAssignedTest = getAssignedTest;
 exports.submitAttempt = submitAttempt;
 exports.getAssignedTestsForEmployee = getAssignedTestsForEmployee;
 exports.startAssignedTestAttempt = startAssignedTestAttempt;
-const client_1 = require("@prisma/client");
+// import { PrismaClient } from "@prisma/client";
 const formidable_1 = __importDefault(require("formidable"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const basic_ftp_1 = require("basic-ftp");
-const prisma = new client_1.PrismaClient();
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu", // Your FTP hostname
     user: "u948610439.hrproindia.in", // Your FTP username
@@ -36,21 +37,29 @@ if (!fs_1.default.existsSync(TEMP_FOLDER)) {
 function getAssignedTest(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
         const assignmentId = Number(req.params.id);
-        const assignment = yield prisma.assignedTest.findUnique({
+        const assignment = yield prisma_1.prisma.assignedTest.findUnique({
             where: { id: assignmentId },
             include: {
-                test: true
+                test: {
+                    include: { questions: false } // No need here, you load questionBank separately
+                }
             }
         });
         if (!assignment) {
             return res.status(404).json({ error: 'Assigned test not found' });
         }
         // ✅ Fetch questions using the test's questionBankId
-        const questions = yield prisma.question.findMany({
+        const questions = yield prisma_1.prisma.question.findMany({
             where: { questionBankId: assignment.test.questionBankId },
             include: { options: true }
         });
-        res.json(Object.assign(Object.assign({}, assignment), { test: Object.assign(Object.assign({}, assignment.test), { questions // attach questions dynamically
+        const totalAttempts = assignment.test.maxAttempts; // Allowed attempts from test
+        const attemptsTaken = assignment.attempts; // Attempts used
+        res.json(Object.assign(Object.assign({}, assignment), { attemptsInfo: {
+                totalAttempts,
+                attemptsTaken,
+                attemptsLeft: totalAttempts - attemptsTaken
+            }, test: Object.assign(Object.assign({}, assignment.test), { questions // attach questions dynamically
              }) }));
     });
 }
@@ -60,8 +69,8 @@ function submitAttempt(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
         const { attemptId, assignedTestId, responses, score } = req.body;
         try {
-            yield prisma.$transaction([
-                prisma.evaluationAttempt.update({
+            yield prisma_1.prisma.$transaction([
+                prisma_1.prisma.evaluationAttempt.update({
                     where: { id: Number(attemptId) },
                     data: {
                         score: Number(score) || 0,
@@ -69,7 +78,7 @@ function submitAttempt(req, res) {
                         response: JSON.stringify(responses !== null && responses !== void 0 ? responses : {}),
                     },
                 }),
-                prisma.assignedTest.update({
+                prisma_1.prisma.assignedTest.update({
                     where: { id: Number(assignedTestId) },
                     data: { status: 'Completed', completedAt: new Date() },
                 }),
@@ -151,8 +160,8 @@ const submitAttemptDescriptive = (req, res) => __awaiter(void 0, void 0, void 0,
                 // pure MCQ auto-score
                 score = yield calcMCQScore(responses, testId); // implement like your quick scoring
             }
-            yield prisma.$transaction([
-                prisma.evaluationAttempt.update({
+            yield prisma_1.prisma.$transaction([
+                prisma_1.prisma.evaluationAttempt.update({
                     where: { id: attemptId },
                     data: {
                         response: JSON.stringify(responses),
@@ -160,7 +169,7 @@ const submitAttemptDescriptive = (req, res) => __awaiter(void 0, void 0, void 0,
                         status,
                     },
                 }),
-                prisma.assignedTest.update({
+                prisma_1.prisma.assignedTest.update({
                     where: { id: assignedTestId },
                     data: { status, completedAt: new Date() },
                 }),
@@ -177,7 +186,7 @@ exports.submitAttemptDescriptive = submitAttemptDescriptive;
 function calcMCQScore(responses, testId) {
     return __awaiter(this, void 0, void 0, function* () {
         // fetch questions + correct answers from DB
-        const test = yield prisma.evaluationTest.findUnique({
+        const test = yield prisma_1.prisma.evaluationTest.findUnique({
             where: { id: testId },
             include: { questions: { include: { options: true } } },
         });
@@ -204,13 +213,13 @@ function calcMCQScore(responses, testId) {
 function getAssignedTestsForEmployee(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
         const employeeId = Number(req.params.employeeId);
-        const assignedTests = yield prisma.assignedTest.findMany({
+        const assignedTests = yield prisma_1.prisma.assignedTest.findMany({
             where: { employeeId },
             include: { test: true },
             orderBy: { assignedAt: 'desc' },
         });
         // count attempts by (employeeId,testId)
-        const counts = yield prisma.evaluationAttempt.groupBy({
+        const counts = yield prisma_1.prisma.evaluationAttempt.groupBy({
             by: ['testId'],
             where: { employeeId },
             _count: { _all: true },
@@ -228,7 +237,7 @@ function getAssignedTestsForEmployee(req, res) {
 // GET /api/evaluation-attempts
 const getAllAttempts = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const attempts = yield prisma.evaluationAttempt.findMany({
+        const attempts = yield prisma_1.prisma.evaluationAttempt.findMany({
             include: {
                 employee: true
             },
@@ -247,7 +256,7 @@ function startAssignedTestAttempt(req, res) {
         var _a;
         const assignedTestId = Number(req.params.id);
         try {
-            const assigned = yield prisma.assignedTest.findUnique({
+            const assigned = yield prisma_1.prisma.assignedTest.findUnique({
                 where: { id: assignedTestId },
                 include: { test: true },
             });
@@ -256,15 +265,15 @@ function startAssignedTestAttempt(req, res) {
             // If you use auth, derive employeeId from token; otherwise trust the row
             const employeeId = assigned.employeeId;
             // Count current attempts (by employee+test)
-            const attemptsMade = yield prisma.evaluationAttempt.count({
+            const attemptsMade = yield prisma_1.prisma.evaluationAttempt.count({
                 where: { employeeId, testId: assigned.testId },
             });
             if (attemptsMade >= ((_a = assigned.test.maxAttempts) !== null && _a !== void 0 ? _a : 1)) {
                 return res.status(409).json({ error: 'Max attempts reached' });
             }
             // Do both actions together
-            const [attempt] = yield prisma.$transaction([
-                prisma.evaluationAttempt.create({
+            const [attempt] = yield prisma_1.prisma.$transaction([
+                prisma_1.prisma.evaluationAttempt.create({
                     data: {
                         employeeId,
                         testId: assigned.testId,
@@ -273,7 +282,7 @@ function startAssignedTestAttempt(req, res) {
                         response: null, // fill on submit
                     },
                 }),
-                prisma.assignedTest.update({
+                prisma_1.prisma.assignedTest.update({
                     where: { id: assignedTestId },
                     data: {
                         attempts: { increment: 1 }, // keep counter in sync
@@ -296,7 +305,7 @@ const reviewAttempt = (req, res) => __awaiter(void 0, void 0, void 0, function* 
         const attemptId = Number(req.params.id);
         const { scores, finalScore } = req.body;
         // update scores in responses JSON
-        const attempt = yield prisma.evaluationAttempt.findUnique({
+        const attempt = yield prisma_1.prisma.evaluationAttempt.findUnique({
             where: { id: attemptId },
         });
         if (!attempt)
@@ -307,7 +316,7 @@ const reviewAttempt = (req, res) => __awaiter(void 0, void 0, void 0, function* 
             if (r)
                 r.hrScore = s.hrScore;
         }
-        const updated = yield prisma.evaluationAttempt.update({
+        const updated = yield prisma_1.prisma.evaluationAttempt.update({
             where: { id: attemptId },
             data: {
                 response: JSON.stringify(responses),
@@ -329,7 +338,7 @@ const evaluateAttempt = (req, res) => __awaiter(void 0, void 0, void 0, function
     var _a;
     try {
         const { attemptId, evaluations } = req.body;
-        const attempt = yield prisma.evaluationAttempt.findUnique({
+        const attempt = yield prisma_1.prisma.evaluationAttempt.findUnique({
             where: { id: attemptId }
         });
         if (!attempt)
@@ -344,7 +353,7 @@ const evaluateAttempt = (req, res) => __awaiter(void 0, void 0, void 0, function
                 r.remarks = ev.remarks;
             }
         }
-        const test = yield prisma.evaluationTest.findUnique({
+        const test = yield prisma_1.prisma.evaluationTest.findUnique({
             where: { id: attempt.testId },
             include: {
                 questions: { include: { options: true } }
@@ -354,7 +363,7 @@ const evaluateAttempt = (req, res) => __awaiter(void 0, void 0, void 0, function
             throw new Error("Test not found");
         let questions = test.questions;
         if (questions.length === 0) {
-            const bank = yield prisma.questionBank.findUnique({
+            const bank = yield prisma_1.prisma.questionBank.findUnique({
                 where: { id: test.questionBankId },
                 include: { questions: { include: { options: true } } }
             });
@@ -398,7 +407,7 @@ const evaluateAttempt = (req, res) => __awaiter(void 0, void 0, void 0, function
         const finalScore = totalMarks > 0
             ? Math.round((obtainedMarks / totalMarks) * 100)
             : 0;
-        yield prisma.evaluationAttempt.update({
+        yield prisma_1.prisma.evaluationAttempt.update({
             where: { id: attemptId },
             data: {
                 response: JSON.stringify(responses),

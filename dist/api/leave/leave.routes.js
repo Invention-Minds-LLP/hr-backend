@@ -8,7 +8,10 @@ router.post("/", authMiddleware_1.authenticateToken, leave_controller_1.createLe
 router.get("/", authMiddleware_1.authenticateToken, leave_controller_1.getLeaveRequests);
 router.post("/types", authMiddleware_1.authenticateToken, leave_controller_1.createLeaveType);
 router.get("/types", authMiddleware_1.authenticateToken, leave_controller_1.getLeaveTypes);
+router.put("/update-leave-type/:id", leave_controller_1.updateLeaveType);
 router.patch("/:id/status", authMiddleware_1.authenticateToken, leave_controller_1.updateLeaveStatus);
 router.get('/:id/dashboard', authMiddleware_1.authenticateToken, leave_controller_1.getLeaveDashboard);
 router.get('/leave-today', authMiddleware_1.authenticateToken, leave_controller_1.getWhoIsOnLeaveBuckets);
+router.get('/blocked/:employeeId', authMiddleware_1.authenticateToken, leave_controller_1.getBlockedDates);
+router.get('/balance/:employeeId', authMiddleware_1.authenticateToken, leave_controller_1.getLeaveBalance);
 exports.default = router;

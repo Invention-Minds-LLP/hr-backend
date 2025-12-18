@@ -3,6 +3,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { Client } from 'basic-ftp';
 import fs from 'fs';
 import multer from 'multer';
+import { createNotification } from '../notifications/notifications.controller';
 
 const prisma = new PrismaClient();
 
@@ -125,6 +126,20 @@ export async function createAnnouncement(req: Request, res: Response) {
         createdBy: (req as any).user?.userId ?? 0, // adjust to your auth
       },
     });
+    // ---- find target employees ----
+    const where = buildAudienceWhere(
+      audience ? JSON.stringify(audience) : null
+    );
+
+    const employees = await prisma.employee.findMany({
+      where,
+      select: { id: true }
+    });
+
+    // ---- notify all target employees ----
+    for (const emp of employees) {
+      await createNotification(emp.id, 'NEW_ANNOUNCEMENT');
+    }
 
     return res.status(201).json(created);
   } catch (e) {

@@ -10,6 +10,7 @@ import { $Enums } from '@prisma/client';
 import { createNotification } from "../notifications/notifications.controller";
 import { ShiftAssignMode } from "@prisma/client";
 import XLSX from "xlsx";
+import { connect } from "http2";
 
 
 const FTP_CONFIG = {
@@ -58,6 +59,7 @@ export const createEmployee = async (req: Request, res: Response) => {
       phone,
       email,
       designation,
+      designationId,
       departmentId,
       branchId,
       dateOfJoining,
@@ -101,7 +103,8 @@ export const createEmployee = async (req: Request, res: Response) => {
           photoUrl,
           phone,
           email,
-          designation,
+          // designation,
+          // designationId: designationId ?? null, // ✅ THIS IS THE FIX
           dateOfJoining: new Date(dateOfJoining),
           employmentType,
           probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
@@ -145,6 +148,7 @@ export const createEmployee = async (req: Request, res: Response) => {
           Department: { connect: { id: departmentId } },
           Branch: { connect: { id: branchId } },
           role: { connect: { id: roleId } },
+          designation: {connect: {id: designationId}},
           Address: {
             create: addresses?.map((a: any) => ({
               type: a.type,
@@ -181,6 +185,7 @@ export const createEmployee = async (req: Request, res: Response) => {
           Branch: true,
           role: true,
           Address: true,
+          designation: true,
         }
       });
     }
@@ -200,7 +205,8 @@ export const createEmployee = async (req: Request, res: Response) => {
             photoUrl,
             phone,
             email,
-            designation,
+            // designation,
+            designationId: designationId ?? null, // ✅ THIS IS THE FIX
             dateOfJoining: new Date(dateOfJoining),
             employmentType,
             probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
@@ -248,6 +254,7 @@ export const createEmployee = async (req: Request, res: Response) => {
             Branch: true,
             role: true,
             Address: true,
+            designation: true
           }
         });
       } else {
@@ -471,6 +478,7 @@ export const getEmployeeById = async (req: Request, res: Response) => {
         Address: true,
         EmployeeShiftSetting: true,
         Department: true,
+        designation:true,
         shifts: {
           orderBy: { date: 'desc' }, // Most recent first
           take: 1,                   // Only 1 record
@@ -510,6 +518,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
       emergencyContacts,
       qualifications,
       departmentId,
+      designationId,
       branchId,
       roleId,
       shiftMode,             // 'FIXED' | 'ROTATIONAL' | undefined
@@ -546,6 +555,8 @@ export const updateEmployee = async (req: Request, res: Response) => {
         allergies: data.allergies,
         chronicConditions: data.chronicConditions,
 
+        // designationId: designationId ?? null, // ✅ THIS IS THE FIX
+
         smoking: data.smoking,
         alcohol: data.alcohol,
 
@@ -568,6 +579,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
         Department: { connect: { id: departmentId } },
         Branch: { connect: { id: branchId } },
         role: { connect: { id: roleId } },
+        designation:{connect: {id: designationId}},
         Address: {
           deleteMany: {},
           create: addresses?.map((a: any) => ({
@@ -602,6 +614,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
         emergencyContacts: true,
         qualifications: true,
         EmployeeShiftSetting: true,
+        designation:true
       }
     });
     // 2) upsert EmployeeShiftSetting (simple & type-safe)
@@ -1345,143 +1358,272 @@ Please schedule your medical check-up at the earliest.
 };
 
 
+function startOfDayIST(d = new Date()) {
+  const x = new Date(d.toLocaleString('en-US', { timeZone: IST }));
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function endOfDayIST(d = new Date()) {
+  const x = new Date(d.toLocaleString('en-US', { timeZone: IST }));
+  x.setHours(23, 59, 59, 999);
+  return x;
+}
+
+const IST = 'Asia/Kolkata';
+
+// export const getUnreportedAbsentees = async (req: Request, res: Response) => {
+//   try {
+//     const { date } = req.query;
+
+//     if (!date) {
+//       return res.status(400).json({ message: "Date is required ?date=YYYY-MM-DD" });
+//     }
+
+//     const targetDate = new Date(date as string);
+//     const start = new Date(targetDate);
+//     start.setHours(0, 0, 0, 0);
+//     const end = new Date(targetDate);
+//     end.setHours(23, 59, 59, 999);
+
+//     // STEP 1: Get all active employees
+//     const allEmployees = await prisma.employee.findMany({
+//       where: { employmentStatus: "ACTIVE" },
+//       select: {
+//         id: true,
+//         employeeCode: true,
+//         firstName: true,
+//         lastName: true,
+//         designation: true,
+//         Department: { select: { name: true, id: true } },
+//       }
+//     });
+
+//     const employeeIds = allEmployees.map(e => e.id);
+
+//     // STEP 2: Get attendance, shift assignment, shift settings
+//     const [attendance, shiftAssignments, shiftSettings, leaves] = await Promise.all([
+//       prisma.attendance.findMany({
+//         where: { employeeId: { in: employeeIds }, date: { gte: start, lte: end } },
+//         select: { employeeId: true, checkIn: true }
+//       }),
+//       prisma.shiftAssignment.findMany({
+//         where: { employeeId: { in: employeeIds }, date: { gte: start, lte: end } },
+//         select: {
+//           employeeId: true,
+//           shift: { select: { id: true, startTime: true, endTime: true } }
+//         }
+//       }),
+//       prisma.employeeShiftSetting.findMany({
+//         where: { employeeId: { in: employeeIds } },
+//         select: {
+//           employeeId: true,
+//           mode: true,
+//           startDate: true,
+//           fixedShift: { select: { id: true, startTime: true, endTime: true } },
+//           rotationPattern: {
+//             select: {
+//               cycleDays: true,
+//               items: {
+//                 select: {
+//                   dayIndex: true,
+//                   shift: { select: { id: true, startTime: true, endTime: true } }
+//                 }
+//               }
+//             }
+//           }
+//         }
+//       }),
+//       prisma.leaveRequest.findMany({
+//         where: {
+//           status: { in: ["PENDING", "APPROVED"] },
+//           startDate: { lte: end },
+//           endDate: { gte: start }
+//         },
+//         select: { employeeId: true }
+//       })
+//     ]);
+
+//     // Extract present and leave IDs
+//     const checkedInIds = attendance.filter(a => a.checkIn).map(a => a.employeeId);
+//     const leaveIds = leaves.map(l => l.employeeId);
+
+//     // Helper: compute shift
+//     function computeShift(empId: number) {
+//       // 1. Direct shift assignment for the date
+//       const assigned = shiftAssignments.find(a => a.employeeId === empId);
+//       if (assigned?.shift) return assigned.shift;
+
+//       const setting = shiftSettings.find(s => s.employeeId === empId);
+//       if (!setting) return null;
+
+//       // 2. Fixed shift
+//       if (setting.mode === "FIXED" && setting.fixedShift)
+//         return setting.fixedShift;
+
+//       // 3. Rotation mode
+//       if (setting.mode === "ROTATIONAL" && setting.rotationPattern) {
+//         const cycleDays = setting.rotationPattern.cycleDays;
+//         const startDate = new Date(setting.startDate);
+//         const diff = Math.floor(
+//           (targetDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)
+//         );
+//         const cycleIndex = diff % cycleDays;
+
+//         const shiftItem = setting.rotationPattern.items.find(
+//           i => i.dayIndex === cycleIndex
+//         );
+
+//         if (shiftItem?.shift) return shiftItem.shift;
+//       }
+
+//       return null;
+//     }
+
+//     // Filter absentees without leave
+//     const absentees = allEmployees
+//       .filter(emp =>
+//         !checkedInIds.includes(emp.id) &&
+//         !leaveIds.includes(emp.id)
+//       )
+//       .map(emp => {
+//         const shift = computeShift(emp.id);
+
+//         return {
+//           ...emp,
+//           shiftStartTime: shift?.startTime ?? null,
+//           shiftEndTime: shift?.endTime ?? null
+//         };
+//       });
+
+//     return res.json(absentees);
+
+//   } catch (error) {
+//     console.error(error);
+//     return res.status(500).json({ message: "Internal error" });
+//   }
+// };
 
 
+
+// Convert Excel serial number → JS Date
 export const getUnreportedAbsentees = async (req: Request, res: Response) => {
   try {
     const { date } = req.query;
 
     if (!date) {
-      return res.status(400).json({ message: "Date is required ?date=YYYY-MM-DD" });
+      return res.status(400).json({
+        message: "Date is required ?date=YYYY-MM-DD",
+      });
     }
 
-    const targetDate = new Date(date as string);
-    const start = new Date(targetDate);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(targetDate);
-    end.setHours(23, 59, 59, 999);
+    // IST-safe day range
+    const target = new Date(date as string);
+    const start = startOfDayIST(target);
+    const end = endOfDayIST(target);
 
-    // STEP 1: Get all active employees
-    const allEmployees = await prisma.employee.findMany({
-      where: { employmentStatus: "ACTIVE" },
+    // 1️⃣ Shift assignments define expected employees
+    const assignments = await prisma.shiftAssignment.findMany({
+      where: { date: { gte: start, lte: end } },
       select: {
-        id: true,
-        employeeCode: true,
-        firstName: true,
-        lastName: true,
-        designation: true,
-        Department: { select: { name: true, id: true } },
-      }
+        employeeId: true,
+        shift: { select: { startTime: true, endTime: true, name: true } },
+        employee: {
+          select: {
+            employeeCode: true,
+            firstName: true,
+            lastName: true,
+            designation: true,
+            Department: true,
+          },
+        },
+      },
     });
 
-    const employeeIds = allEmployees.map(e => e.id);
-
-    // STEP 2: Get attendance, shift assignment, shift settings
-    const [attendance, shiftAssignments, shiftSettings, leaves] = await Promise.all([
-      prisma.attendance.findMany({
-        where: { employeeId: { in: employeeIds }, date: { gte: start, lte: end } },
-        select: { employeeId: true, checkIn: true }
-      }),
-      prisma.shiftAssignment.findMany({
-        where: { employeeId: { in: employeeIds }, date: { gte: start, lte: end } },
-        select: {
-          employeeId: true,
-          shift: { select: { id: true, startTime: true, endTime: true } }
-        }
-      }),
-      prisma.employeeShiftSetting.findMany({
-        where: { employeeId: { in: employeeIds } },
-        select: {
-          employeeId: true,
-          mode: true,
-          startDate: true,
-          fixedShift: { select: { id: true, startTime: true, endTime: true } },
-          rotationPattern: {
-            select: {
-              cycleDays: true,
-              items: {
-                select: {
-                  dayIndex: true,
-                  shift: { select: { id: true, startTime: true, endTime: true } }
-                }
-              }
-            }
-          }
-        }
-      }),
-      prisma.leaveRequest.findMany({
-        where: {
-          status: { in: ["PENDING", "APPROVED"] },
-          startDate: { lte: end },
-          endDate: { gte: start }
-        },
-        select: { employeeId: true }
-      })
-    ]);
-
-    // Extract present and leave IDs
-    const checkedInIds = attendance.filter(a => a.checkIn).map(a => a.employeeId);
-    const leaveIds = leaves.map(l => l.employeeId);
-
-    // Helper: compute shift
-    function computeShift(empId: number) {
-      // 1. Direct shift assignment for the date
-      const assigned = shiftAssignments.find(a => a.employeeId === empId);
-      if (assigned?.shift) return assigned.shift;
-
-      const setting = shiftSettings.find(s => s.employeeId === empId);
-      if (!setting) return null;
-
-      // 2. Fixed shift
-      if (setting.mode === "FIXED" && setting.fixedShift)
-        return setting.fixedShift;
-
-      // 3. Rotation mode
-      if (setting.mode === "ROTATIONAL" && setting.rotationPattern) {
-        const cycleDays = setting.rotationPattern.cycleDays;
-        const startDate = new Date(setting.startDate);
-        const diff = Math.floor(
-          (targetDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)
-        );
-        const cycleIndex = diff % cycleDays;
-
-        const shiftItem = setting.rotationPattern.items.find(
-          i => i.dayIndex === cycleIndex
-        );
-
-        if (shiftItem?.shift) return shiftItem.shift;
-      }
-
-      return null;
+    if (!assignments.length) {
+      return res.json([]); // nobody was scheduled
     }
 
-    // Filter absentees without leave
-    const absentees = allEmployees
-      .filter(emp =>
-        !checkedInIds.includes(emp.id) &&
-        !leaveIds.includes(emp.id)
-      )
-      .map(emp => {
-        const shift = computeShift(emp.id);
+    const employeeIds = assignments.map(a => a.employeeId);
 
-        return {
-          ...emp,
-          shiftStartTime: shift?.startTime ?? null,
-          shiftEndTime: shift?.endTime ?? null
-        };
-      });
+    // 2️⃣ Attendance for the day
+    const attendance = await prisma.attendance.findMany({
+      where: {
+        employeeId: { in: employeeIds },
+        date: { gte: start, lte: end },
+      },
+      select: { employeeId: true, checkIn: true },
+    });
+
+    // 3️⃣ Approved / pending leave, WFH, permission
+    const [leaves, wfh, perms] = await Promise.all([
+      prisma.leaveRequest.findMany({
+        where: {
+          employeeId: { in: employeeIds },
+          status: { in: ["PENDING", "APPROVED"] },
+          startDate: { lte: end },
+          endDate: { gte: start },
+        },
+        select: { employeeId: true },
+      }),
+      prisma.wFHRequest.findMany({
+        where: {
+          employeeId: { in: employeeIds },
+          status: { in: ["PENDING", "APPROVED"] },
+          startDate: { lte: end },
+          endDate: { gte: start },
+        },
+        select: { employeeId: true },
+      }),
+      prisma.permissionRequest.findMany({
+        where: {
+          employeeId: { in: employeeIds },
+          status: { in: ["PENDING", "APPROVED"] },
+          OR: [
+            { day: { gte: start, lte: end } },
+            { startTime: { lte: end }, endTime: { gte: start } },
+          ],
+        },
+        select: { employeeId: true },
+      }),
+    ]);
+
+    // 4️⃣ Fast lookup sets
+    const checkedInSet = new Set(
+      attendance.filter(a => a.checkIn).map(a => a.employeeId)
+    );
+
+    const excusedSet = new Set<number>([
+      ...leaves.map(x => x.employeeId),
+      ...wfh.map(x => x.employeeId),
+      ...perms.map(x => x.employeeId),
+    ]);
+
+    // 5️⃣ Final unreported absentees
+    const absentees = assignments
+      .filter(a =>
+        !checkedInSet.has(a.employeeId) &&
+        !excusedSet.has(a.employeeId)
+      )
+      .map(a => ({
+        employeeId: a.employeeId,
+        employeeCode: a.employee.employeeCode,
+        name: `${a.employee.firstName} ${a.employee.lastName}`,
+        department: a.employee.Department?.name ?? null,
+        departmentId:a.employee.Department?.id ?? null,
+        designation: a.employee.designation ?? null,
+        shiftName: a.shift?.name ?? null,
+        shiftStartTime: a.shift?.startTime ?? null,
+        shiftEndTime: a.shift?.endTime ?? null,
+      }));
 
     return res.json(absentees);
 
-  } catch (error) {
-    console.error(error);
+  } catch (err) {
+    console.error(err);
     return res.status(500).json({ message: "Internal error" });
   }
 };
 
-
-
-// Convert Excel serial number → JS Date
 function excelDateToJSDate(serial: number): Date {
   const excelEpoch = new Date(Date.UTC(1899, 11, 30));
   const days = Math.floor(serial);
@@ -1499,44 +1641,158 @@ function parseDate(value: any): Date | null {
   const d = new Date(value);
   return isNaN(d.getTime()) ? null : d;
 }
+const uploadProgress = new Map<string, any>();
+async function findOrCreateByName<T>(
+  model: any,
+  name: string,
+  extraData: Record<string, any> = {}
+): Promise<{ id: number }> {
+  const trimmed = name?.trim();
+  if (!trimmed) {
+    throw new Error("Name is required");
+  }
+
+  // Case-insensitive lookup
+  const existing = await model.findFirst({
+    where: {
+      name: {
+        equals: trimmed,
+        mode: "insensitive",
+      },
+    },
+  });
+
+  if (existing) return existing;
+
+  return model.create({
+    data: {
+      name: trimmed,
+      ...extraData,
+    },
+  });
+}
+
+
+// export async function mapExcelRowToEmployee(
+//   row: Record<string, any>
+// ): Promise<Prisma.EmployeeCreateInput> {
+//   // Required lookups
+//   const dept = await prisma.department.findUnique({
+//     where: { name: row.departmentName?.trim() },
+//   });
+
+//   const branch = await prisma.branch.findUnique({
+//     where: { name: row.branchName?.trim() },
+//   });
+
+//   const role = await prisma.role.findUnique({
+//     where: { name: row.roleName?.trim() },
+//   });
+
+//   const manager =
+//     row.reportingManagerCode
+//       ? await prisma.employee.findUnique({
+//         where: { employeeCode: row.reportingManagerCode },
+//       })
+//       : null;
+
+//   if (!dept) throw new Error(`Invalid Department: ${row.departmentName}`);
+//   if (!branch) throw new Error(`Invalid Branch: ${row.branchName}`);
+//   if (!role) throw new Error(`Invalid Role: ${row.roleName}`);
+
+//   const dob = parseDate(row.dob);
+//   if (!dob) throw new Error("Invalid DOB");
+
+//   const doj = parseDate(row.dateOfJoining);
+//   if (!doj) throw new Error("Invalid Date of Joining");
+
+//   const probationEnd = parseDate(row.probationEndDate);
+
+//   return {
+//     employeeCode: row.employeeCode,
+//     referenceCode: row.referenceCode || null,
+//     firstName: row.firstName,
+//     lastName: row.lastName,
+//     gender: row.gender,
+
+//     dob,
+//     dateOfJoining: doj,
+//     probationEndDate: probationEnd,
+
+//     phone: row.phone?.toString() || "",
+//     email: row.email?.toString() || "",
+//     designation: row.designation,
+
+//     employmentType: row.employmentType,
+//     employmentStatus: row.employmentStatus,
+//     employeeType: row.employeeType || "Full-Time",
+//     bloodGroup: row.bloodGroup || null,
+
+//     reportingManager: manager ? manager.id : null,
+
+//     // Required Relations
+//     Department: { connect: { id: dept.id } },
+//     Branch: { connect: { id: branch.id } },
+//     role: { connect: { id: role.id } },
+//   };
+// }
+
+
+function ensureDirExists(dirPath: string) {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+}
 
 export async function mapExcelRowToEmployee(
   row: Record<string, any>
 ): Promise<Prisma.EmployeeCreateInput> {
-  // Required lookups
-  const dept = await prisma.department.findUnique({
-    where: { name: row.departmentName?.trim() },
-  });
 
-  const branch = await prisma.branch.findUnique({
-    where: { name: row.branchName?.trim() },
-  });
+  const departmentName = row.departmentName?.trim();
+  const branchName = row.branchName?.trim();
+  const roleName = row.roleName?.trim();
+  const designationName = row.designationName?.trim();
 
-  const role = await prisma.role.findUnique({
-    where: { name: row.roleName?.trim() },
-  });
+  if (!departmentName || !branchName || !roleName || !designationName) {
+    throw new Error("Department, Branch, Role and Designation are required");
+  }
 
-  const manager =
-    row.reportingManagerCode
-      ? await prisma.employee.findUnique({
-        where: { employeeCode: row.reportingManagerCode },
+  const [dept, branch, role, designation] = await Promise.all([
+    prisma.department.upsert({
+      where: { name: departmentName },
+      update: {},
+      create: { name: departmentName },
+    }),
+    prisma.branch.upsert({
+      where: { name: branchName },
+      update: {},
+      create: { name: branchName },
+    }),
+    prisma.role.upsert({
+      where: { name: roleName },
+      update: {},
+      create: { name: roleName },
+    }),
+    prisma.designation.upsert({
+      where: { name: designationName },
+      update: {},
+      create: { name: designationName },
+    }),
+  ]);
+
+  const manager = row.reportingManagerCode
+    ? await prisma.employee.findUnique({
+        where: { employeeCode: normalizeCode(row.reportingManagerCode) },
       })
-      : null;
-
-  if (!dept) throw new Error(`Invalid Department: ${row.departmentName}`);
-  if (!branch) throw new Error(`Invalid Branch: ${row.branchName}`);
-  if (!role) throw new Error(`Invalid Role: ${row.roleName}`);
+    : null;
 
   const dob = parseDate(row.dob);
-  if (!dob) throw new Error("Invalid DOB");
-
   const doj = parseDate(row.dateOfJoining);
-  if (!doj) throw new Error("Invalid Date of Joining");
 
-  const probationEnd = parseDate(row.probationEndDate);
+  if (!dob || !doj) throw new Error("Invalid DOB or Date of Joining");
 
   return {
-    employeeCode: row.employeeCode,
+    employeeCode: normalizeCode(row.employeeCode),
     referenceCode: row.referenceCode || null,
     firstName: row.firstName,
     lastName: row.lastName,
@@ -1544,25 +1800,24 @@ export async function mapExcelRowToEmployee(
 
     dob,
     dateOfJoining: doj,
-    probationEndDate: probationEnd,
 
-    phone: row.phone?.toString() || "",
-    email: row.email?.toString() || "",
-    designation: row.designation,
+    phone: String(row.phone),
+    email: String(row.email),
 
     employmentType: row.employmentType,
     employmentStatus: row.employmentStatus,
-    employeeType: row.employeeType || "Full-Time",
-    bloodGroup: row.bloodGroup || null,
+    employeeType: row.employeeType || "CLINICAL",
 
     reportingManager: manager ? manager.id : null,
 
-    // Required Relations
     Department: { connect: { id: dept.id } },
     Branch: { connect: { id: branch.id } },
     role: { connect: { id: role.id } },
+    designation: { connect: { id: designation.id } },
   };
 }
+
+
 
 interface UploadLog {
   row: number;
@@ -1584,6 +1839,128 @@ function toDate(value: any): Date {
 
 
 
+// export const bulkUploadEmployees = async (req: Request, res: Response) => {
+//   try {
+//     const form = formidable({ multiples: false, keepExtensions: true });
+
+//     form.parse(req, async (err, fields, files) => {
+//       if (err) return res.status(500).json({ error: "File parsing error" });
+
+//       const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
+
+//       if (!fileObj) {
+//         return res.status(400).json({ error: "No file uploaded" });
+//       }
+
+//       // Read Excel file
+//       const workbook = XLSX.readFile(fileObj.filepath);
+//       const sheet = workbook.Sheets[workbook.SheetNames[0]];
+//       const rawRows = XLSX.utils.sheet_to_json(sheet);
+
+//       const errorRows: ErrorRow[] = [];
+//       const logs: string[] = [];
+
+//       const createOps: Prisma.PrismaPromise<any>[] = [];
+//       let successCount = 0;
+
+//       for (let i = 0; i < rawRows.length; i++) {
+//         const raw = rawRows[i] as Record<string, any>;
+
+//         try {
+//           const mapped = await mapExcelRowToEmployee(raw);
+
+//           // Push create operation (no long transaction)
+//           createOps.push(prisma.employee.create({ data: mapped }));
+//           successCount++;
+//           logs.push(`Row ${i + 1}: SUCCESS (${mapped.employeeCode})`);
+//         } catch (error: any) {
+//           const message = error?.message || "Unknown error";
+
+//           errorRows.push({
+//             rowNumber: i + 1,
+//             error: message,
+//             ...raw,
+//           });
+
+//           logs.push(`Row ${i + 1}: FAILED → ${message}`);
+//         }
+//       }
+
+//       // If more than 20% rows failed → rollback (don't insert anything)
+//       if (errorRows.length > rawRows.length * 0.2) {
+//         return res.status(400).json({
+//           successCount: 0,
+//           failedCount: rawRows.length,
+//           logs,
+//           error: `Rollback triggered: ${errorRows.length} of ${rawRows.length} rows failed`,
+//         });
+//       }
+
+//       // Execute all successful row inserts
+//       if (createOps.length > 0) {
+//         await prisma.$transaction(createOps);
+//       }
+
+//       // Generate error report Excel
+//       let errorReportUrl: string | null = null;
+
+//       if (errorRows.length > 0) {
+//         const errorSheet = XLSX.utils.json_to_sheet(errorRows);
+//         const errorWB = XLSX.utils.book_new();
+//         XLSX.utils.book_append_sheet(errorWB, errorSheet, "Errors");
+
+//         const fileName = `employee-error-report-${Date.now()}.xlsx`;
+//         const filePath = path.join(__dirname, "../../reports", fileName);
+
+//         XLSX.writeFile(errorWB, filePath);
+//         errorReportUrl = `/reports/${fileName}`;
+//       }
+
+//       return res.json({
+//         successCount,
+//         failedCount: errorRows.length,
+//         logs,
+//         errors: errorReportUrl,
+//       });
+//     });
+//   } catch (error: any) {
+//     return res.status(500).json({ error: error.message || "Server error" });
+//   }
+// };
+export const downloadEmployeeTemplate = (_req: Request, res: Response) => {
+  const headers = [{
+    employeeCode: "",
+    referenceCode: "",
+    firstName: "",
+    lastName: "",
+    gender: "MALE | FEMALE | OTHER",
+    dob: "YYYY-MM-DD",
+    dateOfJoining: "YYYY-MM-DD",
+    departmentName: "",
+    branchName: "",
+    roleName: "",
+    designationName: "",
+    reportingManagerCode: "",
+    employmentType: "PERMANENT | CONTRACT | PROBATION",
+    employmentStatus: "ACTIVE | TERMINATED | SUSPENDED",
+    phone: "",
+    email: "",
+  }];
+
+  const sheet = XLSX.utils.json_to_sheet(headers);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheet, "Employees");
+
+  res.setHeader(
+    "Content-Disposition",
+    "attachment; filename=employee-upload-template.xlsx"
+  );
+  res.end(XLSX.write(wb, { type: "buffer", bookType: "xlsx" }));
+};
+function normalizeCode(code: any): string {
+  return String(code || "").trim().toUpperCase();
+}
+
 export const bulkUploadEmployees = async (req: Request, res: Response) => {
   try {
     const form = formidable({ multiples: false, keepExtensions: true });
@@ -1592,83 +1969,130 @@ export const bulkUploadEmployees = async (req: Request, res: Response) => {
       if (err) return res.status(500).json({ error: "File parsing error" });
 
       const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
+      if (!fileObj) return res.status(400).json({ error: "No file uploaded" });
 
-      if (!fileObj) {
-        return res.status(400).json({ error: "No file uploaded" });
-      }
-
-      // Read Excel file
       const workbook = XLSX.readFile(fileObj.filepath);
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const rawRows = XLSX.utils.sheet_to_json(sheet);
 
-      const errorRows: ErrorRow[] = [];
-      const logs: string[] = [];
+      if (!rawRows.length) {
+        return res.status(400).json({ error: "Empty Excel file" });
+      }
 
+      const errorRows: any[] = [];
+      const logs: string[] = [];
       const createOps: Prisma.PrismaPromise<any>[] = [];
-      let successCount = 0;
+
+      /** ---------------------------
+       * 1️⃣ Collect employeeCodes
+       ----------------------------*/
+      const excelCodes = rawRows.map((r: any) =>
+        normalizeCode(r.employeeCode)
+      );
+
+      /** ---------------------------
+       * 2️⃣ Find existing codes in DB
+       ----------------------------*/
+      const existingEmployees = await prisma.employee.findMany({
+        where: { employeeCode: { in: excelCodes } },
+        select: { employeeCode: true },
+      });
+
+      const existingCodeSet = new Set(
+        existingEmployees.map(e => e.employeeCode.toUpperCase())
+      );
+
+      /** ---------------------------
+       * 3️⃣ Detect duplicates in Excel
+       ----------------------------*/
+      const seenExcelCodes = new Set<string>();
 
       for (let i = 0; i < rawRows.length; i++) {
-        const raw = rawRows[i] as Record<string, any>;
+        const row = rawRows[i] as any;
+        const employeeCode = normalizeCode(row.employeeCode);
 
         try {
-          const mapped = await mapExcelRowToEmployee(raw);
+          if (!employeeCode) {
+            throw new Error("EmployeeCode is required");
+          }
 
-          // Push create operation (no long transaction)
+          // Duplicate inside Excel
+          if (seenExcelCodes.has(employeeCode)) {
+            throw new Error(`Duplicate employeeCode in Excel: ${employeeCode}`);
+          }
+          seenExcelCodes.add(employeeCode);
+
+          // Duplicate in DB
+          if (existingCodeSet.has(employeeCode)) {
+            throw new Error(`EmployeeCode already exists: ${employeeCode}`);
+          }
+
+          // Map & create
+          const mapped = await mapExcelRowToEmployee(row);
+
           createOps.push(prisma.employee.create({ data: mapped }));
-          successCount++;
-          logs.push(`Row ${i + 1}: SUCCESS (${mapped.employeeCode})`);
+          logs.push(`Row ${i + 1}: SUCCESS (${employeeCode})`);
         } catch (error: any) {
-          const message = error?.message || "Unknown error";
-
           errorRows.push({
             rowNumber: i + 1,
-            error: message,
-            ...raw,
+            employeeCode,
+            error: error.message,
+            ...row,
           });
 
-          logs.push(`Row ${i + 1}: FAILED → ${message}`);
+          logs.push(`Row ${i + 1}: FAILED → ${error.message}`);
         }
       }
 
-      // If more than 20% rows failed → rollback (don't insert anything)
-      if (errorRows.length > rawRows.length * 0.2) {
-        return res.status(400).json({
-          successCount: 0,
-          failedCount: rawRows.length,
-          logs,
-          error: `Rollback triggered: ${errorRows.length} of ${rawRows.length} rows failed`,
-        });
-      }
-
-      // Execute all successful row inserts
+      /** ---------------------------
+       * 4️⃣ Execute inserts
+       ----------------------------*/
       if (createOps.length > 0) {
         await prisma.$transaction(createOps);
       }
 
-      // Generate error report Excel
+      /** ---------------------------
+       * 5️⃣ Error Excel
+       ----------------------------*/
       let errorReportUrl: string | null = null;
 
       if (errorRows.length > 0) {
         const errorSheet = XLSX.utils.json_to_sheet(errorRows);
         const errorWB = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(errorWB, errorSheet, "Errors");
-
-        const fileName = `employee-error-report-${Date.now()}.xlsx`;
-        const filePath = path.join(__dirname, "../../reports", fileName);
-
+      
+        const reportsDir = path.join(__dirname, "../../reports");
+        if (!fs.existsSync(reportsDir)) {
+          fs.mkdirSync(reportsDir, { recursive: true });
+        }
+      
+        const fileName = `employee-upload-errors-${Date.now()}.xlsx`;
+        const filePath = path.join(reportsDir, fileName);
+      
         XLSX.writeFile(errorWB, filePath);
         errorReportUrl = `/reports/${fileName}`;
       }
 
       return res.json({
-        successCount,
+        totalRows: rawRows.length,
+        successCount: createOps.length,
         failedCount: errorRows.length,
+        errorReport: errorReportUrl,
         logs,
-        errors: errorReportUrl,
       });
     });
-  } catch (error: any) {
-    return res.status(500).json({ error: error.message || "Server error" });
+  } catch (e: any) {
+    console.error(e);
+    return res.status(500).json({ error: "Bulk upload failed" });
   }
+};
+
+
+/* ============================================================
+   PROGRESS API
+============================================================ */
+export const getBulkUploadProgress = (req: Request, res: Response) => {
+  const progress = uploadProgress.get(req.params.uploadId);
+  if (!progress) return res.status(404).json({ error: "Invalid uploadId" });
+  res.json(progress);
 };

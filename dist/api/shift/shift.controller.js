@@ -8,9 +8,15 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.listShiftTemplates = exports.assignRotational = exports.addRotationItemsBulk = exports.addRotationItem = exports.createRotationPattern = exports.listRotationPatterns = exports.deleteShiftAssignment = exports.updateShiftAssignment = exports.getShiftAssignmentsByEmployee = exports.getShiftAssignments = exports.assignShift = exports.deleteShiftTemplate = exports.updateShiftTemplate = exports.getShiftTemplateById = exports.getShiftTemplates = exports.createShiftTemplate = void 0;
+exports.startShiftCron = startShiftCron;
+exports.getRotationalShiftId = getRotationalShiftId;
 const client_1 = require("@prisma/client");
+const node_cron_1 = __importDefault(require("node-cron"));
 const prisma = new client_1.PrismaClient();
 /* ==========================
    SHIFT TEMPLATE CONTROLLERS
@@ -118,14 +124,14 @@ const assignShift = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 shift: true
             }
         });
-        const employee = yield prisma.employee.update({
-            where: {
-                id: employeeId
-            },
-            data: {
-                shiftId: shiftId
-            }
-        });
+        // const employee = await  prisma.employee.update({
+        //     where:{
+        //         id: employeeId
+        //     },
+        //     data:{
+        //         shiftId: shiftId
+        //     }
+        // })
         res.status(201).json(assignment);
     }
     catch (error) {
@@ -395,3 +401,81 @@ const listShiftTemplates = (_req, res) => __awaiter(void 0, void 0, void 0, func
     }
 });
 exports.listShiftTemplates = listShiftTemplates;
+function startShiftCron() {
+    node_cron_1.default.schedule('5 0 * * *', () => __awaiter(this, void 0, void 0, function* () {
+        console.log('🕛 Running daily shift generation');
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const employees = yield prisma.employee.findMany({
+            where: {
+                employmentStatus: 'ACTIVE',
+                EmployeeShiftSetting: { isNot: null }
+            },
+            include: {
+                EmployeeShiftSetting: true
+            }
+        });
+        for (const emp of employees) {
+            const setting = emp.EmployeeShiftSetting;
+            let shiftId = null;
+            // FIXED
+            if (setting.mode === 'FIXED') {
+                shiftId = setting.fixedShiftId;
+            }
+            // ROTATIONAL
+            if (setting.mode === 'ROTATIONAL') {
+                shiftId = yield getRotationalShiftId(setting.rotationPatternId, setting.startDate, today);
+            }
+            if (!shiftId)
+                continue;
+            // 🔎 Check if assignment already exists
+            const existing = yield prisma.shiftAssignment.findFirst({
+                where: {
+                    employeeId: emp.id,
+                    date: today
+                }
+            });
+            // ✅ Do nothing if already exists (AUTO or MANUAL)
+            if (existing)
+                continue;
+            // ✅ Create only if missing
+            yield prisma.shiftAssignment.create({
+                data: {
+                    employeeId: emp.id,
+                    shiftId,
+                    date: today,
+                    // source: 'AUTO'
+                }
+            });
+        }
+    }));
+}
+// const DAY_MS = 24 * 60 * 60 * 1000;
+function getRotationalShiftId(patternId, startDate, targetDate) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        const pattern = yield prisma.shiftRotationPattern.findUnique({
+            where: { id: patternId },
+            include: {
+                items: {
+                    orderBy: { dayIndex: 'asc' }
+                }
+            }
+        });
+        if (!pattern || pattern.items.length === 0) {
+            return null;
+        }
+        const start = startOfDay(startDate);
+        const target = startOfDay(targetDate);
+        const diffDays = Math.floor((target.getTime() - start.getTime()) / DAY_MS);
+        const cycleDays = pattern.cycleDays > 0
+            ? pattern.cycleDays
+            : pattern.items.length;
+        const index = mod(diffDays, cycleDays);
+        // Prefer exact dayIndex match
+        const item = (_a = pattern.items.find(i => i.dayIndex === index)) !== null && _a !== void 0 ? _a : pattern.items[index % pattern.items.length];
+        if (!item)
+            return null;
+        return item.shiftId;
+    });
+}

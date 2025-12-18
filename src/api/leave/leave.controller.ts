@@ -120,7 +120,8 @@ export const getLeaveRequests = async (_req: Request, res: Response) => {
         employee: {
           include: {
             Department: true,    // Gives departmentId + department name
-            role: true           // Gives roleId + role name
+            role: true     ,
+            designation: true,      // Gives roleId + role name
           }
         }
       },
@@ -643,7 +644,7 @@ export async function getWhoIsOnLeaveBuckets(req: Request, res: Response) {
         startDate: true,
         endDate: true,
         employee: {
-          select: { id: true, firstName: true, lastName: true, designation: true, photoUrl: true }
+          select: { id: true, firstName: true, lastName: true, designation: true, photoUrl: true}
         }
       },
       orderBy: { startDate: 'asc' }
@@ -658,14 +659,15 @@ export async function getWhoIsOnLeaveBuckets(req: Request, res: Response) {
     const seenToday = new Set<number>();
     const seenWeek = new Set<number>();
     const seenNext = new Set<number>();
-
+  
     for (const r of rows) {
       const s = new Date(r.startDate);
       const e = new Date(r.endDate);
+      const designationName = r.employee.designation?.name ?? 'Default';
       const person: Person = {
         id: r.employee.id,
         name: `${r.employee.firstName} ${r.employee.lastName}`,
-        title: r.employee.designation,
+        title: designationName,
         photoUrl: r.employee.photoUrl || null,
         startDate: new Date(r.startDate).toISOString(),
         endDate: new Date(r.endDate).toISOString(),
@@ -824,3 +826,80 @@ function isSameDate(date1: Date, date2: Date): boolean {
     date1.getDate() === date2.getDate()
   );
 }
+
+export const updateLeaveType = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params; // leaveRequestId
+    const { newLeaveTypeId } = req.body;
+
+    if (!newLeaveTypeId) {
+      return res.status(400).json({ error: "New leave type is required" });
+    }
+
+    const leave = await prisma.leaveRequest.findUnique({
+      where: { id: Number(id) },
+      include: {
+        employee: true,
+        leaveType: true
+      }
+    });
+
+    if (!leave) {
+      return res.status(404).json({ error: "Leave request not found" });
+    }
+
+    // Optional safety: don't allow changing approved leave
+    if (leave.status === "APPROVED") {
+      return res.status(400).json({
+        error: "Cannot change leave type after approval"
+      });
+    }
+
+    if (leave.leaveTypeId === newLeaveTypeId) {
+      return res.status(400).json({
+        error: "New leave type is same as existing leave type"
+      });
+    }
+
+    const newLeaveType = await prisma.leaveType.findUnique({
+      where: { id: Number(newLeaveTypeId) }
+    });
+
+    if (!newLeaveType) {
+      return res.status(400).json({ error: "Invalid leave type" });
+    }
+
+    // Update leave type
+    const updatedLeave = await prisma.leaveRequest.update({
+      where: { id: Number(id) },
+      data: {
+        leaveTypeId: Number(newLeaveTypeId),
+        updatedAt: new Date()
+      },
+      include: {
+        employee: true,
+        leaveType: true
+      }
+    });
+
+    const employee = updatedLeave.employee;
+    const employeeName = `${employee.firstName} ${employee.lastName}`;
+    const start = fmtDate(updatedLeave.startDate);
+    const end = fmtDate(updatedLeave.endDate);
+
+    // In-app notification
+    const message = `Your leave type for the leave from ${start} to ${end} has been changed to "${newLeaveType.name}".`;
+
+    await createNotification(employee.id, message);
+
+
+    res.json({
+      message: "Leave type updated successfully",
+      leave: updatedLeave
+    });
+
+  } catch (error) {
+    console.error("Error updating leave type:", error);
+    res.status(500).json({ error: "Failed to update leave type" });
+  }
+};

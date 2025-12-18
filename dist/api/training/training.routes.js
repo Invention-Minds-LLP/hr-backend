@@ -17,4 +17,10 @@ router.post("/feedback", authMiddleware_1.authenticateToken, training_controller
 // View feedback summary (HR/Admin)
 router.get("/feedback/summary/:trainingId", authMiddleware_1.authenticateToken, training_controller_1.getTrainingFeedbackSummary);
 router.put("/:id", authMiddleware_1.authenticateToken, training_controller_1.updateTraining);
+// Mark single employee attendance
+router.post("/attendance/:trainingId", authMiddleware_1.authenticateToken, training_controller_1.markTrainingAttendance);
+// Get attendance list for a training
+router.get("/attendance/:trainingId", authMiddleware_1.authenticateToken, training_controller_1.getTrainingAttendance);
+// Bulk mark attendance
+router.post("/attendance/bulk/:trainingId", authMiddleware_1.authenticateToken, training_controller_1.bulkMarkTrainingAttendance);
 exports.default = router;

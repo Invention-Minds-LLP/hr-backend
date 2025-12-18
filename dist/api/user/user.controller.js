@@ -13,8 +13,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.loginCandidate = exports.setCandidatePassword = exports.listAllUsers = exports.adminResetPassword = exports.resetMyPassword = exports.loginUser = exports.createUser = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 // REGISTER / CREATE USER (linked to Employee)
@@ -22,7 +23,7 @@ const createUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
     try {
         const { employeeCode, password } = req.body;
         // 1) Check employee exists
-        const employee = yield prisma.employee.findUnique({
+        const employee = yield prisma_1.prisma.employee.findUnique({
             where: { employeeCode }
         });
         if (!employee) {
@@ -33,7 +34,7 @@ const createUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
             });
         }
         // 2) Check if a user already exists for that employeeCode
-        const existingByEmpCode = yield prisma.user.findUnique({ where: { employeeCode } });
+        const existingByEmpCode = yield prisma_1.prisma.user.findUnique({ where: { employeeCode } });
         if (existingByEmpCode) {
             return res.status(409).json({
                 error: "A user is already linked to this employeeCode",
@@ -44,11 +45,11 @@ const createUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
         let username = `${employee.firstName}.${employee.lastName}`.toLowerCase().replace(/\s+/g, "");
         // Optional: ensure unique username by appending a number if needed
         let suffix = 1;
-        while (yield prisma.user.findUnique({ where: { username } })) {
+        while (yield prisma_1.prisma.user.findUnique({ where: { username } })) {
             username = `${employee.firstName}.${employee.lastName}${suffix}`.toLowerCase().replace(/\s+/g, "");
             suffix++;
         }
-        const role = yield prisma.role.findUnique({
+        const role = yield prisma_1.prisma.role.findUnique({
             where: { id: Number(employee.roleId) },
             select: { name: true } // <-- change to { roleName: true } if that's your field
         });
@@ -58,7 +59,7 @@ const createUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
                 roleId: employee.roleId
             });
         }
-        const user = yield prisma.user.create({
+        const user = yield prisma_1.prisma.user.create({
             data: {
                 employeeCode,
                 username,
@@ -76,21 +77,23 @@ const createUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
 exports.createUser = createUser;
 // LOGIN USER
 const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     const ipAddress = getClientIp(req);
     const userAgent = req.headers["user-agent"] || undefined;
     try {
         const { employeeCode, password } = req.body;
-        const user = yield prisma.user.findUnique({
+        const user = yield prisma_1.prisma.user.findUnique({
             where: { employeeCode },
             include: { employee: true }
         });
-        const employee = yield prisma.employee.findUnique({
+        const employee = yield prisma_1.prisma.employee.findUnique({
             where: { employeeCode },
             select: {
                 id: true,
                 departmentId: true,
                 photoUrl: true,
                 designation: true,
+                roleId: true
             }
         });
         if (!employee)
@@ -98,7 +101,7 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
         if (!user)
             return res.status(404).json({ error: "User not found" });
         const validPassword = yield bcryptjs_1.default.compare(password, user.passwordHash);
-        yield prisma.loginHistory.create({
+        yield prisma_1.prisma.loginHistory.create({
             data: { userId: user.id, ipAddress, userAgent, success: !!validPassword }
         }).catch(() => { });
         if (!validPassword)
@@ -112,9 +115,9 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
             employeeCode: user.employeeCode,
             username: user.username,
         };
-        const token = jsonwebtoken_1.default.sign(payload, process.env.JWT_SECRET, { expiresIn: "1d" });
+        const token = jsonwebtoken_1.default.sign(payload, process.env.JWT_SECRET, { expiresIn: "12h" });
         // Update last login
-        yield prisma.user.update({
+        yield prisma_1.prisma.user.update({
             where: { id: user.id },
             data: { lastLogin: new Date() }
         });
@@ -127,11 +130,13 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
             role: user.role,
             empId: employee.id,
             deptId: employee.departmentId,
-            designation: employee.designation,
-            photoUrl: employee.photoUrl || null
+            designation: ((_a = employee === null || employee === void 0 ? void 0 : employee.designation) === null || _a === void 0 ? void 0 : _a.name) || '',
+            photoUrl: employee.photoUrl || null,
+            roleId: employee.roleId,
         });
     }
     catch (error) {
+        console.error(error);
         res.status(500).json({ error: "Login failed" });
     }
 });
@@ -150,13 +155,13 @@ const resetMyPassword = (req, res) => __awaiter(void 0, void 0, void 0, function
         if (!confirmPassword || !newPassword) {
             return res.status(400).json({ error: "currentPassword and newPassword are required" });
         }
-        const user = yield prisma.user.findUnique({ where: { id: userId } });
+        const user = yield prisma_1.prisma.user.findUnique({ where: { id: userId } });
         if (!user)
             return res.status(404).json({ error: "User not found" });
         // const ok = await bcrypt.compare( confirmPassword, user.passwordHash);
         // if (!ok) return res.status(401).json({ error: "Current password is incorrect" });
         const newHash = yield bcryptjs_1.default.hash(newPassword, 10);
-        yield prisma.user.update({
+        yield prisma_1.prisma.user.update({
             where: { id: userId },
             data: { passwordHash: newHash }
         });
@@ -179,11 +184,11 @@ const adminResetPassword = (req, res) => __awaiter(void 0, void 0, void 0, funct
         if (!userId || !newPassword) {
             return res.status(400).json({ error: "userId and newPassword are required" });
         }
-        const user = yield prisma.user.findUnique({ where: { id: Number(userId) } });
+        const user = yield prisma_1.prisma.user.findUnique({ where: { id: Number(userId) } });
         if (!user)
             return res.status(404).json({ error: "User not found" });
         const newHash = yield bcryptjs_1.default.hash(newPassword, 10);
-        yield prisma.user.update({
+        yield prisma_1.prisma.user.update({
             where: { id: user.id },
             data: { passwordHash: newHash }
         });
@@ -197,16 +202,9 @@ const adminResetPassword = (req, res) => __awaiter(void 0, void 0, void 0, funct
 exports.adminResetPassword = adminResetPassword;
 const listAllUsers = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const users = yield prisma.user.findMany({
+        const users = yield prisma_1.prisma.user.findMany({
             orderBy: { createdAt: "desc" },
-            select: {
-                id: true,
-                employeeCode: true,
-                username: true,
-                role: true,
-                lastLogin: true,
-                createdAt: true,
-                updatedAt: true,
+            include: {
                 employee: {
                     select: {
                         employeeCode: true,
@@ -231,11 +229,11 @@ const setCandidatePassword = (req, res) => __awaiter(void 0, void 0, void 0, fun
         const { email, password } = req.body;
         if (!email || !password)
             return res.status(400).json({ error: "email and password are required" });
-        const candidate = yield prisma.candidate.findUnique({ where: { email: email.toLowerCase() } });
+        const candidate = yield prisma_1.prisma.candidate.findUnique({ where: { email: email.toLowerCase() } });
         if (!candidate)
             return res.status(404).json({ error: "Candidate not found" });
         const passwordHash = yield bcryptjs_1.default.hash(password, 10);
-        yield prisma.candidate.update({
+        yield prisma_1.prisma.candidate.update({
             where: { id: candidate.id },
             data: { passwordHash }
         });
@@ -254,7 +252,7 @@ const loginCandidate = (req, res) => __awaiter(void 0, void 0, void 0, function*
         const { email, password } = req.body;
         if (!email || !password)
             return res.status(400).json({ error: "email and password are required" });
-        const candidate = yield prisma.candidate.findUnique({
+        const candidate = yield prisma_1.prisma.candidate.findUnique({
             where: { email: email.toLowerCase() }
         });
         if (!candidate) {
@@ -264,14 +262,14 @@ const loginCandidate = (req, res) => __awaiter(void 0, void 0, void 0, function*
             return res.status(400).json({ error: "Password not set. Use the set-password flow." });
         }
         const ok = yield bcryptjs_1.default.compare(password, candidate.passwordHash);
-        yield prisma.candidateLoginHistory.create({
+        yield prisma_1.prisma.candidateLoginHistory.create({
             data: { candidateId: candidate.id, ipAddress, userAgent, success: !!ok }
         }).catch(() => { });
         if (!ok)
             return res.status(401).json({ error: "Invalid credentials" });
         // JWT for candidates (role: 'candidate')
-        const token = jsonwebtoken_1.default.sign({ candidateId: candidate.id, role: "candidate" }, process.env.JWT_SECRET, { expiresIn: "1d" });
-        yield prisma.candidate.update({
+        const token = jsonwebtoken_1.default.sign({ candidateId: candidate.id, role: "candidate" }, process.env.JWT_SECRET, { expiresIn: "12h" });
+        yield prisma_1.prisma.candidate.update({
             where: { id: candidate.id },
             data: { lastLogin: new Date() }
         });

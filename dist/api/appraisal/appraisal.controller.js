@@ -12,10 +12,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendAppraisalCountReminders = exports.saveManagerReview = exports.getAllAppraisalsWithManagerReview = exports.createAppraisalsForEmployees = exports.bulkCreateAppraisals = void 0;
-const client_1 = require("@prisma/client");
+exports.sendAppraisalCountReminders = exports.saveManagerReview = exports.getAllAppraisalsWithManagerReview = exports.initQuarterlyAppraisalScheduler = exports.createAppraisalsForEmployees = exports.bulkCreateAppraisals = void 0;
+// import { PrismaClient } from "@prisma/client";
 const node_cron_1 = __importDefault(require("node-cron"));
-const prisma = new client_1.PrismaClient();
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 const leave_controller_1 = require("../leave/leave.controller");
 const notifications_controller_1 = require("../notifications/notifications.controller");
 const APPRAISAL_REMINDER_COUNT_TEMPLATE_ID = '';
@@ -54,7 +55,7 @@ const generateUniqueAppraisalId = (employeeId) => {
 };
 // Create appraisals for given employees
 const createAppraisalsForEmployees = (employeeIds_1, cycle_1, ...args_1) => __awaiter(void 0, [employeeIds_1, cycle_1, ...args_1], void 0, function* (employeeIds, cycle, status = 'Draft') {
-    const employees = yield prisma.employee.findMany({
+    const employees = yield prisma_1.prisma.employee.findMany({
         where: {
             id: { in: employeeIds },
             employmentStatus: 'ACTIVE'
@@ -69,9 +70,9 @@ const createAppraisalsForEmployees = (employeeIds_1, cycle_1, ...args_1) => __aw
         finalDecision: null,
         finalComments: null
     }));
-    const created = yield prisma.appraisalForm.createMany({ data });
+    const created = yield prisma_1.prisma.appraisalForm.createMany({ data });
     const managerIds = Array.from(new Set(employees.map(e => e.reportingManager).filter((id) => !!id)));
-    const managers = yield prisma.employee.findMany({
+    const managers = yield prisma_1.prisma.employee.findMany({
         where: { id: { in: managerIds } },
         select: { id: true, phone: true, firstName: true, lastName: true }
     });
@@ -106,22 +107,93 @@ const createAppraisalsForEmployees = (employeeIds_1, cycle_1, ...args_1) => __aw
     return created;
 });
 exports.createAppraisalsForEmployees = createAppraisalsForEmployees;
-node_cron_1.default.schedule('0 0 1 */3 *', () => __awaiter(void 0, void 0, void 0, function* () {
-    console.log('Running quarterly appraisal creation job...');
-    const activeEmployees = yield prisma.employee.findMany({
-        where: { employmentStatus: 'ACTIVE' },
-        select: { id: true }
-    });
-    if (!activeEmployees.length)
-        return;
-    const ids = activeEmployees.map(e => e.id);
-    const cycle = `Quarter ${Math.floor((new Date().getMonth() / 3) + 1)} ${new Date().getFullYear()}`;
-    yield (0, exports.createAppraisalsForEmployees)(ids, cycle, 'Draft');
-    console.log(`Appraisals created for ${ids.length} active employees`);
-}));
+function getEmployeeCycle(doj, now) {
+    const diffMonths = monthsDiff(doj, now);
+    if (diffMonths < 3)
+        return null; // not eligible yet
+    const cycleIndex = Math.floor(diffMonths / 3) + 1; // 1,2,3,4...
+    const year = now.getFullYear();
+    return {
+        cycleIndex,
+        cycleName: `Cycle ${cycleIndex} ${year}`
+    };
+}
+function monthsDiff(from, to) {
+    return (to.getFullYear() * 12 + to.getMonth()
+        - (from.getFullYear() * 12 + from.getMonth()));
+}
+// export const initQuarterlyAppraisalScheduler = () => {
+//   cron.schedule("* * * * *", async () => {
+//     console.log("📅 Running quarterly appraisal creation job...");
+//     try {
+//       const activeEmployees = await prisma.employee.findMany({
+//         where: { employmentStatus: "ACTIVE" },
+//         select: { id: true }
+//       });
+//       if (!activeEmployees.length) {
+//         console.log("⚠️ No active employees. Skipping appraisal creation.");
+//         return;
+//       }
+//       const ids = activeEmployees.map(e => e.id);
+//       // Determine quarter name
+//       const now = new Date();
+//       const quarter = Math.floor(now.getMonth() / 3) + 1;
+//       const cycle = `Quarter ${quarter} ${now.getFullYear()}`;
+//       await createAppraisalsForEmployees(ids, cycle, "Draft");
+//       console.log(`✅ Appraisals created for ${ids.length} employees`);
+//     } catch (error) {
+//       console.error("❌ Error during quarterly appraisal scheduler:", error);
+//     }
+//   });
+// };
+const initQuarterlyAppraisalScheduler = () => {
+    node_cron_1.default.schedule('0 2 * * *', () => __awaiter(void 0, void 0, void 0, function* () {
+        console.log('📅 [Cron] Running appraisal scheduler...');
+        const now = new Date();
+        try {
+            const employees = yield prisma_1.prisma.employee.findMany({
+                where: { employmentStatus: 'ACTIVE' },
+                select: {
+                    id: true,
+                    dateOfJoining: true,
+                    reportingManager: true,
+                    firstName: true,
+                    lastName: true
+                }
+            });
+            for (const emp of employees) {
+                if (!emp.dateOfJoining)
+                    continue;
+                const cycleInfo = getEmployeeCycle(emp.dateOfJoining, now);
+                if (!cycleInfo)
+                    continue;
+                const { cycleIndex, cycleName } = cycleInfo;
+                // ❌ Only 4 cycles per year
+                if (cycleIndex > 4)
+                    continue;
+                // ❌ Skip if already exists
+                const exists = yield prisma_1.prisma.appraisalForm.findFirst({
+                    where: {
+                        employeeId: emp.id,
+                        cycle: cycleName
+                    }
+                });
+                if (exists)
+                    continue;
+                // ✅ Create appraisal
+                yield (0, exports.createAppraisalsForEmployees)([emp.id], cycleName, 'Draft');
+                console.log(`✅ Created appraisal for ${emp.firstName} (${cycleName})`);
+            }
+        }
+        catch (error) {
+            console.error('❌ Appraisal scheduler failed:', error);
+        }
+    }));
+};
+exports.initQuarterlyAppraisalScheduler = initQuarterlyAppraisalScheduler;
 const getAllAppraisalsWithManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const appraisals = yield prisma.appraisalForm.findMany({
+        const appraisals = yield prisma_1.prisma.appraisalForm.findMany({
             include: {
                 employee: {
                     select: {
@@ -143,7 +215,7 @@ const getAllAppraisalsWithManagerReview = (req, res) => __awaiter(void 0, void 0
         const managerIds = appraisals
             .map((a) => a.managerId)
             .filter((id) => !!id);
-        const managers = yield prisma.employee.findMany({
+        const managers = yield prisma_1.prisma.employee.findMany({
             where: { id: { in: managerIds } },
             select: { id: true, firstName: true, lastName: true },
         });
@@ -162,7 +234,7 @@ exports.getAllAppraisalsWithManagerReview = getAllAppraisalsWithManagerReview;
 const saveManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { appraisalId, qualityOfWorkRating, qualityOfWorkComments, knowledgeOfJobRating, knowledgeOfJobComments, teamworkRating, teamworkComments, independenceRating, independenceComments, recordsRating, recordsComments, guestServiceRating, guestServiceComments, safetyRating, safetyComments, attendanceRating, attendanceComments, leadershipRating, leadershipComments, overallScore, comments, recommendations, finalDecision, finalComments } = req.body;
-        yield prisma.managerAppraisal.upsert({
+        yield prisma_1.prisma.managerAppraisal.upsert({
             where: { appraisalFormId: appraisalId },
             update: {
                 qualityOfWorkRating, qualityOfWorkComments,
@@ -191,7 +263,7 @@ const saveManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, functi
             }
         });
         // Update final decision in AppraisalForm
-        yield prisma.appraisalForm.update({
+        yield prisma_1.prisma.appraisalForm.update({
             where: { id: appraisalId },
             data: {
                 finalDecision,
@@ -210,7 +282,7 @@ const saveManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, functi
 exports.saveManagerReview = saveManagerReview;
 const sendAppraisalCountReminders = (cycles) => __awaiter(void 0, void 0, void 0, function* () {
     // 1) Get pending forms with managerId + cycle
-    const forms = yield prisma.appraisalForm.findMany({
+    const forms = yield prisma_1.prisma.appraisalForm.findMany({
         where: Object.assign(Object.assign({ managerId: { not: null } }, (cycles ? { cycle: { in: cycles } } : {})), { status: { in: ["Draft", "InReview", "PendingManager"] } // adjust to your statuses
          }),
         select: { managerId: true, cycle: true }
@@ -232,7 +304,7 @@ const sendAppraisalCountReminders = (cycles) => __awaiter(void 0, void 0, void 0
     if (managerIds.size === 0)
         return { messagesSent: 0, managerCyclesCovered: 0 };
     // 3) Fetch manager phones from Employee
-    const managers = yield prisma.employee.findMany({
+    const managers = yield prisma_1.prisma.employee.findMany({
         where: { id: { in: Array.from(managerIds) } },
         select: { id: true, phone: true }
     });

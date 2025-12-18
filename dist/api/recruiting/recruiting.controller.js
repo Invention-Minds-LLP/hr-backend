@@ -13,10 +13,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.listEmployeeInterviews = exports.listInterviews = exports.getSummary = exports.saveHrReview = exports.upsertFeedback = exports.RecruitingController = void 0;
+exports.sendInterviewMail = sendInterviewMail;
 const client_1 = require("@prisma/client");
 const formidable_1 = __importDefault(require("formidable"));
 const fs_1 = __importDefault(require("fs"));
 const basic_ftp_1 = require("basic-ftp");
+const bcryptjs_1 = __importDefault(require("bcryptjs"));
+const nodemailer_1 = __importDefault(require("nodemailer"));
 const prisma = new client_1.PrismaClient();
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu", // Your FTP hostname
@@ -24,6 +27,16 @@ const FTP_CONFIG = {
     password: "Bsrenuk@1993", // Your FTP password
     secure: false // Set to true if using FTPS
 };
+const transporter = nodemailer_1.default.createTransport({
+    service: 'gmail',
+    host: "smtp.gmail.com",
+    port: 587,
+    secure: false,
+    auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+    }
+});
 function uploadToFTP(localFilePath, remoteFileName) {
     return __awaiter(this, void 0, void 0, function* () {
         const client = new basic_ftp_1.Client();
@@ -229,7 +242,7 @@ class RecruitingController {
                                 where: { email: candidate.email },
                                 update: {
                                     name: candidate.name,
-                                    phone: candidate.phone,
+                                    phone: candidate.phone.toString(),
                                     source: candidate.source,
                                     resumeUrl: resumeUrl || candidate.resumeUrl,
                                     experience: (_a = candidate.experience) === null || _a === void 0 ? void 0 : _a.toString(),
@@ -239,7 +252,7 @@ class RecruitingController {
                                 create: {
                                     name: candidate.name,
                                     email: candidate.email,
-                                    phone: candidate.phone,
+                                    phone: candidate.phone.toString(),
                                     source: candidate.source,
                                     resumeUrl: resumeUrl || candidate.resumeUrl,
                                     experience: (_b = candidate.experience) === null || _b === void 0 ? void 0 : _b.toString(),
@@ -330,30 +343,155 @@ class RecruitingController {
         }));
         // ---------------- Interviews ----------------
         /** POST /applications/:id/interviews  { stage, startTime, endTime, panelUserIds?, feedbackDue? } */
+        // scheduleInterview = asyncHandler(async (req, res) => {
+        //   const applicationId = Number(req.params.id);
+        //   const { stage, startTime, endTime, panelUserIds, feedbackDue } = req.body || {};
+        //   if (!stage || !startTime || !endTime) return bad(res, 'stage, startTime, endTime are required');
+        //   const app = await prisma.application.findUnique({ where: { id: applicationId } });
+        //   if (!app) return bad(res, 'Application not found', 404);
+        //   const itv = await prisma.$transaction(async (tx) => {
+        //     // move status if needed
+        //     if (app.status === ApplicationStatus.SHORTLISTED || app.status === ApplicationStatus.SCREENING) {
+        //       await tx.application.update({ where: { id: applicationId }, data: { status: ApplicationStatus.INTERVIEW_SCHEDULED } });
+        //     }
+        //     return tx.interview.create({
+        //       data: {
+        //         applicationId,
+        //         stage,
+        //         startTime: new Date(startTime),
+        //         endTime: new Date(endTime),
+        //         panelUserIds,
+        //         feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
+        //       },
+        //     });
+        //   });
+        //   res.status(201).json(itv);
+        // });
+        /** POST /applications/:id/interviews
+       * body: { stage, startTime, endTime, panelUserIds: number[], feedbackDue? }
+       */
         this.scheduleInterview = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
             const applicationId = Number(req.params.id);
             const { stage, startTime, endTime, panelUserIds, feedbackDue } = req.body || {};
             if (!stage || !startTime || !endTime)
                 return bad(res, 'stage, startTime, endTime are required');
-            const app = yield prisma.application.findUnique({ where: { id: applicationId } });
+            const app = yield prisma.application.findUnique({
+                where: { id: applicationId },
+                include: {
+                    candidate: true,
+                    job: true,
+                }
+            });
             if (!app)
                 return bad(res, 'Application not found', 404);
+            // ✅ Step 1: Parse panelUserIds safely
+            const panels = Array.isArray(panelUserIds)
+                ? panelUserIds.map(Number)
+                : typeof panelUserIds === 'string'
+                    ? panelUserIds.split(',').map(s => Number(s.trim()))
+                    : [];
+            if (!panels.length)
+                return bad(res, 'At least one panel member is required');
+            const panelEmployees = yield prisma.employee.findMany({
+                where: { id: { in: panels } },
+                select: { firstName: true, lastName: true }
+            });
+            const panelNames = panelEmployees
+                .map(e => `${e.firstName} ${e.lastName}`)
+                .join(', ');
+            const start = new Date(startTime);
+            const end = new Date(endTime);
+            // ✅ Step 2: Check for overlapping interviews
+            const overlaps = yield prisma.interview.findMany({
+                where: {
+                    AND: [
+                        {
+                            OR: panels.map(pid => ({
+                                panelUserIds: { contains: pid.toString() },
+                            })),
+                        },
+                        {
+                            startTime: { lt: end },
+                            endTime: { gt: start },
+                        },
+                    ],
+                },
+                include: {
+                    application: {
+                        include: {
+                            candidate: { select: { name: true } },
+                            job: { select: { title: true } },
+                        },
+                    },
+                },
+            });
+            // ✅ Step 3: If overlaps found → find which employee(s)
+            if (overlaps.length > 0) {
+                const allPanelIdsInConflicts = new Set();
+                overlaps.forEach(o => {
+                    (o.panelUserIds || '')
+                        .split(',')
+                        .map(id => Number(id.trim()))
+                        .filter(id => panels.includes(id))
+                        .forEach(id => allPanelIdsInConflicts.add(id));
+                });
+                // Get employee names for the conflicting panel members
+                const conflictingEmployees = yield prisma.employee.findMany({
+                    where: { id: { in: Array.from(allPanelIdsInConflicts) } },
+                    select: { id: true, firstName: true, lastName: true, employeeCode: true },
+                });
+                // Build detailed message list
+                const conflicts = overlaps.map(o => {
+                    const overlappingPanelIds = (o.panelUserIds || '')
+                        .split(',')
+                        .map(id => Number(id.trim()))
+                        .filter(id => panels.includes(id));
+                    const names = conflictingEmployees
+                        .filter(e => overlappingPanelIds.includes(e.id))
+                        .map(e => `${e.firstName} ${e.lastName}${e.employeeCode ? ` (${e.employeeCode})` : ''}`)
+                        .join(', ');
+                    const startT = new Date(o.startTime).toLocaleString();
+                    const endT = new Date(o.endTime).toLocaleString();
+                    return `🕒 ${names} already scheduled for "${o.application.job.title}" with candidate "${o.application.candidate.name}" from ${startT} to ${endT}`;
+                });
+                return res.status(409).json({
+                    warning: true,
+                    message: 'Some panel members already have interviews scheduled during this time.',
+                    conflicts,
+                });
+            }
+            // ✅ Step 4: No conflicts → create the interview
             const itv = yield prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
-                // move status if needed
-                if (app.status === client_1.ApplicationStatus.SHORTLISTED || app.status === client_1.ApplicationStatus.SCREENING) {
-                    yield tx.application.update({ where: { id: applicationId }, data: { status: client_1.ApplicationStatus.INTERVIEW_SCHEDULED } });
+                if (app.status === client_1.ApplicationStatus.SHORTLISTED ||
+                    app.status === client_1.ApplicationStatus.SCREENING) {
+                    yield tx.application.update({
+                        where: { id: applicationId },
+                        data: { status: client_1.ApplicationStatus.INTERVIEW_SCHEDULED },
+                    });
                 }
                 return tx.interview.create({
                     data: {
                         applicationId,
                         stage,
-                        startTime: new Date(startTime),
-                        endTime: new Date(endTime),
-                        panelUserIds,
+                        startTime: start,
+                        endTime: end,
+                        panelUserIds: panels.join(','), // store CSV
                         feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
                     },
                 });
             }));
+            yield sendInterviewMail({
+                to: app.candidate.email,
+                candidateName: app.candidate.name,
+                jobTitle: app.job.title,
+                stage,
+                startTime: start.toLocaleString(),
+                endTime: end.toLocaleString(),
+                panelNames,
+                hospitalName: process.env.HOSPITAL_NAME,
+                hospitalAddress: process.env.HOSPITAL_ADDRESS,
+                googleLocationUrl: process.env.HOSPITAL_GOOGLE_MAP,
+            });
             res.status(201).json(itv);
         }));
         /** PATCH /interviews/:id/feedback  { result, feedbackUrl?, feedbackAt? } */
@@ -506,6 +644,7 @@ class RecruitingController {
             if (!offer)
                 return bad(res, 'Offer not found', 404);
             const updated = yield prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
+                var _a;
                 // 1. Update offer + application
                 const of = yield tx.offer.update({
                     where: { id },
@@ -521,6 +660,19 @@ class RecruitingController {
                 // const count = await tx.employee.count();
                 // const employeeCode = `EMP${String(count + 1).padStart(3, "0")}`;
                 const employeeCode = yield generateEmployeeCode();
+                // 🔹 STEP 1: resolve designation
+                const designationName = ((_a = job.title) === null || _a === void 0 ? void 0 : _a.trim()) || 'Employee';
+                let designation = yield tx.designation.findFirst({
+                    where: { name: designationName }
+                });
+                if (!designation) {
+                    designation = yield tx.designation.create({
+                        data: {
+                            name: designationName,
+                            isActive: true
+                        }
+                    });
+                }
                 const employee = yield tx.employee.create({
                     data: {
                         employeeCode,
@@ -532,8 +684,8 @@ class RecruitingController {
                         photoUrl: null,
                         phone: candidate.phone || "",
                         email: candidate.email,
-                        designation: job.title,
                         departmentId: job.departmentId,
+                        designationId: designation.id,
                         branchId: 1, // 🔹 set default or map from job
                         dateOfJoining: offer.proposedJoinAt || new Date(),
                         employmentType: client_1.EmploymentType.PERMANENT,
@@ -543,7 +695,7 @@ class RecruitingController {
                         reportingManager: null,
                         age: null,
                         bloodGroup: null,
-                    }
+                    },
                 });
                 return Object.assign(Object.assign({}, of), { employee });
             }));
@@ -634,6 +786,14 @@ class RecruitingController {
             });
             if (!app)
                 return res.status(404).json({ error: 'Application not found' });
+            if (!app.candidate.passwordHash) {
+                const plainPassword = app.candidate.email.toLowerCase(); // email as password
+                const hash = yield bcryptjs_1.default.hash(plainPassword, 10);
+                yield prisma.candidate.update({
+                    where: { id: app.candidateId },
+                    data: { passwordHash: hash }
+                });
+            }
             const assigned = yield prisma.candidateAssignedTest.create({
                 data: {
                     applicationId,
@@ -984,14 +1144,16 @@ exports.upsertFeedback = asyncHandler((req, res) => __awaiter(void 0, void 0, vo
 }));
 function generateEmployeeCode() {
     return __awaiter(this, void 0, void 0, function* () {
+        const prefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+        const startNumber = process.env.EMPLOYEE_CODE_START || '001';
         const lastEmployee = yield prisma.employee.findFirst({
             orderBy: { employeeCode: 'desc' },
             select: { employeeCode: true }
         });
-        let newCode = 'EMP001';
+        let newCode = `${prefix}${startNumber}`;
         if (lastEmployee === null || lastEmployee === void 0 ? void 0 : lastEmployee.employeeCode) {
             const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
-            newCode = `EMP${String(lastNumber + 1).padStart(3, '0')}`;
+            newCode = `${prefix}${String(lastNumber + 1).padStart(3, '0')}`;
         }
         return newCode;
     });
@@ -1056,63 +1218,135 @@ exports.getSummary = asyncHandler((req, res) => __awaiter(void 0, void 0, void 0
 }));
 // recruitingRouter.get('/interview', listInterviews);
 // GET /recruiting/interview
+// export const listInterviews = asyncHandler(async (req, res) => {
+//   const items = await prisma.interview.findMany({
+//     orderBy: [{ startTime: 'desc' }, { id: 'desc' }],
+//     include: {
+//       application: {
+//         select: {
+//           id: true,
+//           candidate: { select: { id: true, name: true, email: true, phone: true, experience: true, qualification: true } },
+//           job: { select: { id: true, title: true, department: { select: { id: true, name: true } } } }
+//         }
+//       },
+//       candidateAssignedTest: {   // ✅ add this
+//         select: {
+//           id: true,
+//           status: true,
+//           score: true,
+//           reviewedAt: true,
+//           reviewDecision: true,
+//           completedAt: true,
+//           test: { select: { id: true, name: true } }
+//         }
+//       },
+//       // ⬇️ bring HR review (one record max)
+//       InterviewHRReview: {
+//         select: {
+//           presentSalary: true,
+//           payslip: true,
+//           expectedSalary: true,
+//           grossOffer: true,
+//           conclusion: true,
+//           remarks: true,
+//           reviewerUserId: true,
+//           reviewedAt: true,
+//         }
+//       },
+//       // ⬇️ bring all panel feedback rows (you can filter to SUBMITTED if you like)
+//       InterviewFeedback: {
+//         where: { status: 'SUBMITTED' },           // drop this line if you want drafts too
+//         orderBy: { submittedAt: 'desc' },
+//         select: {
+//           id: true,
+//           panelUserId: true,
+//           name: true,
+//           designation: true,
+//           jobSkills: true,
+//           jobKnowledge: true,
+//           attitude: true,
+//           communication: true,
+//           average: true,
+//           notes: true,
+//           status: true,
+//           submittedAt: true,
+//         }
+//       },
+//     },
+//   });
+//   res.json(items);
+// });
 exports.listInterviews = asyncHandler((req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const items = yield prisma.interview.findMany({
-        orderBy: [{ startTime: 'desc' }, { id: 'desc' }],
-        include: {
-            application: {
-                select: {
-                    id: true,
-                    candidate: { select: { id: true, name: true, email: true, phone: true, experience: true, qualification: true } },
-                    job: { select: { id: true, title: true, department: { select: { id: true, name: true } } } }
+    var _a, _b;
+    const page = Number((_a = req.query.page) !== null && _a !== void 0 ? _a : 1);
+    const pageSize = Math.min(50, Number((_b = req.query.pageSize) !== null && _b !== void 0 ? _b : 10));
+    const skip = (page - 1) * pageSize;
+    const where = {}; // empty: no filters
+    const [items, total] = yield Promise.all([
+        prisma.interview.findMany({
+            skip,
+            take: pageSize,
+            orderBy: [{ startTime: "desc" }, { id: "desc" }],
+            include: {
+                application: {
+                    select: {
+                        id: true,
+                        candidate: { select: { id: true, name: true, email: true, phone: true, experience: true, qualification: true } },
+                        job: { select: { id: true, title: true, department: { select: { id: true, name: true } } } }
+                    }
+                },
+                candidateAssignedTest: {
+                    select: {
+                        id: true,
+                        status: true,
+                        score: true,
+                        reviewedAt: true,
+                        reviewDecision: true,
+                        completedAt: true,
+                        test: { select: { id: true, name: true } }
+                    }
+                },
+                InterviewHRReview: {
+                    select: {
+                        presentSalary: true,
+                        payslip: true,
+                        expectedSalary: true,
+                        grossOffer: true,
+                        conclusion: true,
+                        remarks: true,
+                        reviewerUserId: true,
+                        reviewedAt: true,
+                    }
+                },
+                InterviewFeedback: {
+                    where: { status: "SUBMITTED" },
+                    orderBy: { submittedAt: "desc" },
+                    select: {
+                        id: true,
+                        panelUserId: true,
+                        name: true,
+                        designation: true,
+                        jobSkills: true,
+                        jobKnowledge: true,
+                        attitude: true,
+                        communication: true,
+                        average: true,
+                        notes: true,
+                        status: true,
+                        submittedAt: true,
+                    }
                 }
-            },
-            candidateAssignedTest: {
-                select: {
-                    id: true,
-                    status: true,
-                    score: true,
-                    reviewedAt: true,
-                    reviewDecision: true,
-                    completedAt: true,
-                    test: { select: { id: true, name: true } }
-                }
-            },
-            // ⬇️ bring HR review (one record max)
-            InterviewHRReview: {
-                select: {
-                    presentSalary: true,
-                    payslip: true,
-                    expectedSalary: true,
-                    grossOffer: true,
-                    conclusion: true,
-                    remarks: true,
-                    reviewerUserId: true,
-                    reviewedAt: true,
-                }
-            },
-            // ⬇️ bring all panel feedback rows (you can filter to SUBMITTED if you like)
-            InterviewFeedback: {
-                where: { status: 'SUBMITTED' }, // drop this line if you want drafts too
-                orderBy: { submittedAt: 'desc' },
-                select: {
-                    id: true,
-                    panelUserId: true,
-                    name: true,
-                    designation: true,
-                    jobSkills: true,
-                    jobKnowledge: true,
-                    attitude: true,
-                    communication: true,
-                    average: true,
-                    notes: true,
-                    status: true,
-                    submittedAt: true,
-                }
-            },
-        },
+            }
+        }),
+        prisma.interview.count({ where })
+    ]);
+    res.json({
+        data: items,
+        total,
+        page,
+        pageSize,
+        totalPages: Math.ceil(total / pageSize),
     });
-    res.json(items);
 }));
 exports.listEmployeeInterviews = asyncHandler((req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const { employeeId } = req.params;
@@ -1198,3 +1432,65 @@ exports.listEmployeeInterviews = asyncHandler((req, res) => __awaiter(void 0, vo
     const items = all.filter(i => { var _a; return (_a = i.panelUserIds) === null || _a === void 0 ? void 0 : _a.split(',').map(id => id.trim()).includes(employeeId.toString()); });
     res.json(items);
 }));
+function sendInterviewMail(props) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const { to, candidateName, jobTitle, stage, startTime, endTime, hospitalName, hospitalAddress, googleLocationUrl, panelNames, } = props;
+        // Convert to CSV if array
+        const recipients = Array.isArray(to) ? to.join(", ") : to;
+        const text = `
+Interview Scheduled
+
+Candidate Name: ${candidateName}
+Job Title: ${jobTitle}
+Stage: ${stage}
+
+Start Time: ${startTime}
+End Time: ${endTime}
+
+Panel Members: ${panelNames}
+
+Venue:
+${hospitalName}
+${hospitalAddress}
+
+Google Maps:
+${googleLocationUrl}
+
+Best Regards,
+HR Team
+`;
+        const html = `
+  <h2>Interview Scheduled</h2>
+  <p>Dear <b>${candidateName}</b>,</p>
+
+  <p>Your interview has been scheduled for the position of <b>${jobTitle}</b>.</p>
+
+  <h3>📅 Interview Details</h3>
+  <ul>
+    <li><b>Stage:</b> ${stage}</li>
+    <li><b>Start Time:</b> ${startTime}</li>
+    <li><b>End Time:</b> ${endTime}</li>
+    <li><b>Panel:</b> ${panelNames}</li>
+  </ul>
+
+  <h3>📍 Venue</h3>
+  <p><b>${hospitalName}</b><br>${hospitalAddress}</p>
+
+  <p>
+    <a href="${googleLocationUrl}" target="_blank">
+      📌 View Location on Google Maps
+    </a>
+  </p>
+
+  <br>
+  <p>Best Regards,<br>HR Team</p>
+  `;
+        yield transporter.sendMail({
+            from: process.env.SMTP_USER,
+            to: recipients,
+            subject: `Interview Scheduled – ${jobTitle}`,
+            text,
+            html,
+        });
+    });
+}

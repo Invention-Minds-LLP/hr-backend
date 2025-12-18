@@ -10,13 +10,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.deleteRole = exports.updateRole = exports.getRoleById = exports.getRoles = exports.createRole = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 // CREATE Role
 const createRole = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { name, description } = req.body;
-        const role = yield prisma.role.create({
+        const role = yield prisma_1.prisma.role.create({
             data: { name, description }
         });
         res.status(201).json(role);
@@ -29,7 +30,7 @@ exports.createRole = createRole;
 // GET all Roles
 const getRoles = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const roles = yield prisma.role.findMany();
+        const roles = yield prisma_1.prisma.role.findMany();
         res.json(roles);
     }
     catch (error) {
@@ -41,7 +42,7 @@ exports.getRoles = getRoles;
 const getRoleById = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { id } = req.params;
-        const role = yield prisma.role.findUnique({
+        const role = yield prisma_1.prisma.role.findUnique({
             where: { id: Number(id) }
         });
         if (!role)
@@ -58,7 +59,7 @@ const updateRole = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
     try {
         const { id } = req.params;
         const { name, description } = req.body;
-        const updatedRole = yield prisma.role.update({
+        const updatedRole = yield prisma_1.prisma.role.update({
             where: { id: Number(id) },
             data: { name, description }
         });
@@ -73,7 +74,7 @@ exports.updateRole = updateRole;
 const deleteRole = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { id } = req.params;
-        yield prisma.role.delete({
+        yield prisma_1.prisma.role.delete({
             where: { id: Number(id) }
         });
         res.json({ message: "Role deleted successfully" });

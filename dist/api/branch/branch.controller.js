@@ -10,13 +10,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.deleteBranch = exports.updateBranch = exports.getBranchById = exports.getBranches = exports.createBranch = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+// import { PrismaClient } from "@prisma/client";
+// const prisma = new PrismaClient();
+const prisma_1 = require("../../lib/prisma");
 // CREATE Branch
 const createBranch = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { name, location } = req.body;
-        const branch = yield prisma.branch.create({
+        const branch = yield prisma_1.prisma.branch.create({
             data: { name, location }
         });
         res.status(201).json(branch);
@@ -29,7 +30,7 @@ exports.createBranch = createBranch;
 // GET all Branches
 const getBranches = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const branches = yield prisma.branch.findMany();
+        const branches = yield prisma_1.prisma.branch.findMany();
         res.json(branches);
     }
     catch (error) {
@@ -41,7 +42,7 @@ exports.getBranches = getBranches;
 const getBranchById = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { id } = req.params;
-        const branch = yield prisma.branch.findUnique({
+        const branch = yield prisma_1.prisma.branch.findUnique({
             where: { id: Number(id) }
         });
         if (!branch)
@@ -58,7 +59,7 @@ const updateBranch = (req, res) => __awaiter(void 0, void 0, void 0, function* (
     try {
         const { id } = req.params;
         const { name, location } = req.body;
-        const updatedBranch = yield prisma.branch.update({
+        const updatedBranch = yield prisma_1.prisma.branch.update({
             where: { id: Number(id) },
             data: { name, location }
         });
@@ -73,7 +74,7 @@ exports.updateBranch = updateBranch;
 const deleteBranch = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { id } = req.params;
-        yield prisma.branch.delete({
+        yield prisma_1.prisma.branch.delete({
             where: { id: Number(id) }
         });
         res.json({ message: "Branch deleted successfully" });

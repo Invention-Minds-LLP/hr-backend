@@ -36,7 +36,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 var _a, _b, _c, _d, _e, _f;
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.generateClearanceCertificate = void 0;
+exports.initNoticePeriodSchedular = exports.generateClearanceCertificate = void 0;
 exports.createResignation = createResignation;
 exports.listResignations = listResignations;
 exports.getResignationById = getResignationById;
@@ -71,6 +71,8 @@ const path = __importStar(require("path"));
 const axios_1 = __importDefault(require("axios"));
 const basic_ftp_1 = require("basic-ftp");
 const prisma = new client_1.PrismaClient();
+const node_cron_1 = __importDefault(require("node-cron"));
+const employee_controller_1 = require("../employee/employee.controller");
 /** Utils */
 const addDays = (d, days) => new Date(d.getTime() + days * 86400000);
 /** Create resignation (Employee) */
@@ -150,13 +152,59 @@ function getResignationById(req, res) {
             const id = Number(req.params.id);
             const row = yield prisma.resignationRequest.findUnique({
                 where: { id },
-                include: {
-                    employee: true,
-                    handoverTasks: true,
-                    clearances: true,
-                    exitInterview: true,
-                    finalSettlement: true,
-                    documents: true
+                select: {
+                    id: true,
+                    // Only the minimal employee info you use
+                    employee: {
+                        select: {
+                            id: true,
+                            firstName: true,
+                            lastName: true
+                        }
+                    },
+                    // Tasks
+                    handoverTasks: {
+                        select: {
+                            id: true,
+                            title: true,
+                            description: true,
+                            assigneeId: true,
+                            dueDate: true,
+                            status: true,
+                            completedAt: true
+                        }
+                    },
+                    // Clearances
+                    clearances: {
+                        select: {
+                            id: true,
+                            type: true,
+                            decision: true,
+                            note: true,
+                            verifierId: true,
+                            verifier: {
+                                select: {
+                                    firstName: true,
+                                    lastName: true
+                                }
+                            }
+                        }
+                    },
+                    // Exit Interview
+                    exitInterview: {
+                        select: {
+                            scheduledAt: true,
+                            interviewerId: true,
+                            notes: true
+                        }
+                    },
+                    // Final Settlement
+                    finalSettlement: {
+                        select: {
+                            status: true,
+                            note: true
+                        }
+                    }
                 }
             });
             if (!row)
@@ -202,7 +250,7 @@ function managerApprove(req, res) {
                 managerDecision: 'APPROVED',
                 managerDecidedAt: new Date(),
                 managerNote: note,
-                status: 'APPROVED'
+                status: 'UNDER_REVIEW'
             };
             if (overrideLastWorkingDay)
                 data.proposedLastWorkingDay = new Date(overrideLastWorkingDay);
@@ -243,9 +291,11 @@ function managerReject(req, res) {
 /** HR approve/reject */
 function hrApprove(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c;
         try {
             const id = Number(req.params.id);
             const { note, actualLastWorkingDay } = req.body;
+            // Step 1: Approve the resignation and include employee info
             const upd = yield prisma.resignationRequest.update({
                 where: { id },
                 data: {
@@ -253,9 +303,45 @@ function hrApprove(req, res) {
                     hrDecidedAt: new Date(),
                     hrNote: note,
                     actualLastWorkingDay: actualLastWorkingDay ? new Date(actualLastWorkingDay) : undefined,
-                    status: 'UNDER_REVIEW'
-                }
+                    status: 'APPROVED',
+                },
+                include: {
+                    employee: {
+                        include: {
+                            Department: true,
+                            Branch: true,
+                            designation: true
+                        },
+                    },
+                },
             });
+            // Step 2: Update employee status → NOTICE_PERIOD
+            yield prisma.employee.update({
+                where: { id: upd.employeeId },
+                data: { employmentStatus: 'NOTICE_PERIOD' }
+            });
+            // Step 3: Auto-create backfill job (if none exists)
+            const existingJob = yield prisma.job.findFirst({
+                where: {
+                    backfillForEmployeeId: upd.employeeId,
+                    status: { in: ['OPEN', 'ON_HOLD'] },
+                },
+            });
+            if (!existingJob && upd.employee) {
+                const designationName = (_b = (_a = upd.employee.designation) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : 'Default';
+                const newJob = yield prisma.job.create({
+                    data: {
+                        title: `${designationName} - Replacement`,
+                        departmentId: upd.employee.departmentId,
+                        location: ((_c = upd.employee.Branch) === null || _c === void 0 ? void 0 : _c.location) || 'Unknown',
+                        headcount: 1,
+                        status: 'OPEN',
+                        createdBy: 0, // Fallback HR/system user ID
+                        backfillForEmployeeId: upd.employeeId,
+                    },
+                });
+                console.log(`✅ Created new job for replacement: Job ID ${newJob.id}`);
+            }
             res.json(upd);
         }
         catch (e) {
@@ -1014,3 +1100,47 @@ function listResignationsWithClearances(req, res) {
         }
     });
 }
+const initNoticePeriodSchedular = () => {
+    node_cron_1.default.schedule('0 2 * * *', () => __awaiter(void 0, void 0, void 0, function* () {
+        console.log('⏰ [Cron] Checking employees whose notice period has ended...');
+        try {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            // 1️⃣ Find all resignation requests that are approved and whose actual LWD < today
+            const dueResignations = yield prisma.resignationRequest.findMany({
+                where: {
+                    status: 'APPROVED',
+                    actualLastWorkingDay: { lt: today },
+                    employee: {
+                        employmentStatus: 'NOTICE_PERIOD',
+                    },
+                },
+                include: {
+                    employee: true,
+                },
+            });
+            console.log(`📋 Found ${dueResignations.length} employees with ended notice period.`);
+            // 2️⃣ Update each employee to 'RESIGNED'
+            for (const resignation of dueResignations) {
+                yield prisma.employee.update({
+                    where: { id: resignation.employeeId },
+                    data: { employmentStatus: 'RESIGNED' },
+                });
+                console.log(`✅ Employee ID ${resignation.employeeId} marked as RESIGNED.`);
+                // // Optional: also update the resignation request status → COMPLETED
+                // await prisma.resignationRequest.update({
+                //   where: { id: resignation.id },
+                //   data: { status: 'COMPLETED' },
+                // });
+            }
+            console.log('🎉 [Cron] Notice period check completed.');
+            console.log("⏰ Running Health Check Reminder...");
+            yield (0, employee_controller_1.sendHealthCheckReminders)();
+            console.log("🎉 Health Check Reminder Completed.");
+        }
+        catch (error) {
+            console.error('❌ [Cron] Error in notice period check:', error);
+        }
+    }));
+};
+exports.initNoticePeriodSchedular = initNoticePeriodSchedular;
