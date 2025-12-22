@@ -89,8 +89,6 @@ app.use(cors({
     // Allow mobile apps, Postman, curl (no origin)
     if (!origin) return callback(null, true);
 
-    console.log('CORS origin:', origin);
-
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {

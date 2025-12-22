@@ -357,8 +357,17 @@ model Attendance {
   updatedAt DateTime @default(now()) @updatedAt
   employee  Employee @relation(fields: [employeeId], references: [id])
 
+  @@unique([employeeId, date])
   @@index([employeeId, date])
   @@index([status])
+}
+
+model AttendanceSyncLog {
+  id      Int      @id @default(autoincrement())
+  runAt   DateTime @default(now())
+  window  String
+  success Boolean
+  message String?
 }
 
 model LeaveType {

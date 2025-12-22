@@ -491,6 +491,67 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
 };
 
 
+export const createLeaveBalances = async (req: Request, res: Response) => {
+  try {
+    const { employeeId, year, leaves = [], permissions = [] } = req.body;
+
+    if (!employeeId || !year) {
+      return res.status(400).json({ error: "employeeId and year are required" });
+    }
+
+    const rows: any[] = [];
+
+    // LEAVES
+    for (const l of leaves) {
+      rows.push({
+        employeeId,
+        leaveTypeId: l.leaveTypeId,
+        permissionType: null,
+        category: "LEAVE",
+        year,
+        totalAllowed: l.totalAllowed,
+        used: 0
+      });
+    }
+
+    // PERMISSIONS
+    for (const p of permissions) {
+      rows.push({
+        employeeId,
+        leaveTypeId: null,
+        permissionType: p.permissionType,
+        category: "PERMISSION",
+        year,
+        totalAllowed: p.totalAllowed,
+        used: 0
+      });
+    }
+
+    // Upsert to avoid duplicates
+    for (const row of rows) {
+      await prisma.employeeLeaveBalance.upsert({
+        where: {
+          employeeId_leaveTypeId_permissionType_year: {
+            employeeId: row.employeeId,
+            leaveTypeId: row.leaveTypeId,
+            permissionType: row.permissionType,
+            year: row.year
+          }
+        },
+        update: {
+          totalAllowed: row.totalAllowed
+        },
+        create: row
+      });
+    }
+
+    res.json({ message: "Leave balances saved successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to create leave balances" });
+  }
+};
+
 
 const MS_PER_DAY = 86400000;
 

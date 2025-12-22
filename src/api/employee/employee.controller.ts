@@ -11,6 +11,8 @@ import { createNotification } from "../notifications/notifications.controller";
 import { ShiftAssignMode } from "@prisma/client";
 import XLSX from "xlsx";
 import { connect } from "http2";
+import { Employee } from "@prisma/client";
+import bcrypt from "bcryptjs";
 
 
 const FTP_CONFIG = {
@@ -148,7 +150,7 @@ export const createEmployee = async (req: Request, res: Response) => {
           Department: { connect: { id: departmentId } },
           Branch: { connect: { id: branchId } },
           role: { connect: { id: roleId } },
-          designation: {connect: {id: designationId}},
+          designation: { connect: { id: designationId } },
           Address: {
             create: addresses?.map((a: any) => ({
               type: a.type,
@@ -334,58 +336,58 @@ export const getEmployees = async (req: Request, res: Response) => {
       switch (filter) {
         case "name":
           where.OR = [
-            { firstName: { contains: search} },
-            { lastName: { contains: search} }
+            { firstName: { contains: search } },
+            { lastName: { contains: search } }
           ];
           break;
-    
-          case "employeeCode":
-            where.employeeCode = { contains: search};
-            break;
-    
+
+        case "employeeCode":
+          where.employeeCode = { contains: search };
+          break;
+
         case "branch":
           where.Branch = {
-            name: { contains: search}
+            name: { contains: search }
           };
           break;
-    
+
         case "department":
           where.Department = {
-            name: { contains: search}
+            name: { contains: search }
           };
           break;
-          case "employmentStatus": {
-            const statuses = [
-              "ACTIVE",
-              "TERMINATED",
-              "SUSPENDED",
-              "NOTICE_PERIOD",
-              "RESIGNED"
-            ];
-          
-            const match = statuses.filter(s =>
-              s.toLowerCase().includes(search.toLowerCase())
-            );
-          
-            if (match.length > 0) {
-              where.employmentStatus = { in: match };
-            } else {
-              where.employmentStatus = { in: [] }; // return empty
-            }
-          
-            break;
+        case "employmentStatus": {
+          const statuses = [
+            "ACTIVE",
+            "TERMINATED",
+            "SUSPENDED",
+            "NOTICE_PERIOD",
+            "RESIGNED"
+          ];
+
+          const match = statuses.filter(s =>
+            s.toLowerCase().includes(search.toLowerCase())
+          );
+
+          if (match.length > 0) {
+            where.employmentStatus = { in: match };
+          } else {
+            where.employmentStatus = { in: [] }; // return empty
           }
-          
-    
-        case "employmentType":
-          where.employmentType = { contains: search};
+
           break;
-    
+        }
+
+
+        case "employmentType":
+          where.employmentType = { contains: search };
+          break;
+
         case "shift":
           where.shifts = {
             some: {
               shift: {
-                name: { contains: search}
+                name: { contains: search }
               }
             }
           };
@@ -396,7 +398,7 @@ export const getEmployees = async (req: Request, res: Response) => {
           break;
       }
     }
-    
+
 
 
     // // optional filters
@@ -478,7 +480,7 @@ export const getEmployeeById = async (req: Request, res: Response) => {
         Address: true,
         EmployeeShiftSetting: true,
         Department: true,
-        designation:true,
+        designation: true,
         shifts: {
           orderBy: { date: 'desc' }, // Most recent first
           take: 1,                   // Only 1 record
@@ -579,7 +581,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
         Department: { connect: { id: departmentId } },
         Branch: { connect: { id: branchId } },
         role: { connect: { id: roleId } },
-        designation:{connect: {id: designationId}},
+        designation: { connect: { id: designationId } },
         Address: {
           deleteMany: {},
           create: addresses?.map((a: any) => ({
@@ -614,7 +616,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
         emergencyContacts: true,
         qualifications: true,
         EmployeeShiftSetting: true,
-        designation:true
+        designation: true
       }
     });
     // 2) upsert EmployeeShiftSetting (simple & type-safe)
@@ -1609,7 +1611,7 @@ export const getUnreportedAbsentees = async (req: Request, res: Response) => {
         employeeCode: a.employee.employeeCode,
         name: `${a.employee.firstName} ${a.employee.lastName}`,
         department: a.employee.Department?.name ?? null,
-        departmentId:a.employee.Department?.id ?? null,
+        departmentId: a.employee.Department?.id ?? null,
         designation: a.employee.designation ?? null,
         shiftName: a.shift?.name ?? null,
         shiftStartTime: a.shift?.startTime ?? null,
@@ -1780,11 +1782,19 @@ export async function mapExcelRowToEmployee(
     }),
   ]);
 
-  const manager = row.reportingManagerCode
+  // const manager = row.reportingManagerCode
+  //   ? await prisma.employee.findUnique({
+  //       where: { employeeCode: normalizeCode(row.reportingManagerCode) },
+  //     })
+  //   : null;
+  const managerCode = normalizeManagerCode(row.reportingManagerCode);
+
+  const manager = managerCode
     ? await prisma.employee.findUnique({
-        where: { employeeCode: normalizeCode(row.reportingManagerCode) },
-      })
+      where: { employeeCode: managerCode },
+    })
     : null;
+
 
   const dob = parseDate(row.dob);
   const doj = parseDate(row.dateOfJoining);
@@ -1793,27 +1803,27 @@ export async function mapExcelRowToEmployee(
 
   return {
     employeeCode: normalizeCode(row.employeeCode),
-    referenceCode: row.referenceCode || null,
-    firstName: row.firstName,
-    lastName: row.lastName,
-    gender: row.gender,
+        referenceCode: row.referenceCode || null,
+        firstName: row.firstName,
+        lastName: row.lastName,
+        gender: row.gender,
 
-    dob,
-    dateOfJoining: doj,
+        dob,
+        dateOfJoining: doj,
 
-    phone: String(row.phone),
-    email: String(row.email),
+        phone: String(row.phone),
+        email: String(row.email),
 
-    employmentType: row.employmentType,
-    employmentStatus: row.employmentStatus,
-    employeeType: row.employeeType || "CLINICAL",
+        employmentType: row.employmentType,
+        employmentStatus: row.employmentStatus,
+        employeeType: row.employeeType || "CLINICAL",
 
-    reportingManager: manager ? manager.id : null,
+        reportingManager: manager ? manager.id : null,
 
-    Department: { connect: { id: dept.id } },
-    Branch: { connect: { id: branch.id } },
-    role: { connect: { id: role.id } },
-    designation: { connect: { id: designation.id } },
+        Department: { connect: { id: dept.id } },
+        Branch: { connect: { id: branch.id } },
+        role: { connect: { id: role.id } },
+        designation: { connect: { id: designation.id } },
   };
 }
 
@@ -1966,10 +1976,14 @@ export const bulkUploadEmployees = async (req: Request, res: Response) => {
     const form = formidable({ multiples: false, keepExtensions: true });
 
     form.parse(req, async (err, fields, files) => {
-      if (err) return res.status(500).json({ error: "File parsing error" });
+      if (err) {
+        return res.status(500).json({ error: "File parsing error" });
+      }
 
       const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
-      if (!fileObj) return res.status(400).json({ error: "No file uploaded" });
+      if (!fileObj) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
 
       const workbook = XLSX.readFile(fileObj.filepath);
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -2030,7 +2044,22 @@ export const bulkUploadEmployees = async (req: Request, res: Response) => {
           // Map & create
           const mapped = await mapExcelRowToEmployee(row);
 
-          createOps.push(prisma.employee.create({ data: mapped }));
+          // createOps.push(prisma.employee.create({ data: mapped }));
+          createOps.push(
+            prisma.employee.create({
+              data: {
+                ...mapped,
+                EmployeeShiftSetting: {
+                  create: {
+                    mode: "FIXED",
+                    fixedShiftId: 6,
+                    startDate: new Date()
+                  }
+                }
+              }
+            })
+          );
+          
           logs.push(`Row ${i + 1}: SUCCESS (${employeeCode})`);
         } catch (error: any) {
           errorRows.push({
@@ -2060,15 +2089,15 @@ export const bulkUploadEmployees = async (req: Request, res: Response) => {
         const errorSheet = XLSX.utils.json_to_sheet(errorRows);
         const errorWB = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(errorWB, errorSheet, "Errors");
-      
+
         const reportsDir = path.join(__dirname, "../../reports");
         if (!fs.existsSync(reportsDir)) {
           fs.mkdirSync(reportsDir, { recursive: true });
         }
-      
+
         const fileName = `employee-upload-errors-${Date.now()}.xlsx`;
         const filePath = path.join(reportsDir, fileName);
-      
+
         XLSX.writeFile(errorWB, filePath);
         errorReportUrl = `/reports/${fileName}`;
       }
@@ -2087,6 +2116,12 @@ export const bulkUploadEmployees = async (req: Request, res: Response) => {
   }
 };
 
+function normalizeManagerCode(code: any): string | null {
+  if (!code) return null;
+  const c = String(code).trim().toUpperCase();
+  if (c === "0") return null;
+  return c;
+}
 
 /* ============================================================
    PROGRESS API
