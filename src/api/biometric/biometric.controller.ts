@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { PrismaClient } from '@prisma/client';
+import { createNotification } from '../notifications/notifications.controller';
 
 const prisma = new PrismaClient();
 
@@ -170,10 +171,22 @@ export async function runBiometricSync(isFinalRun: boolean) {
   const yesterday = startOfDay(new Date(Date.now() - 86400000));
   // console.log(`🔄 Yesterday date: ${yesterday.toDateString()}`);
 
+  // const employees = await prisma.employee.findMany({
+  //   where: { employmentStatus: 'ACTIVE' },
+  //   select: { id: true, employeeCode: true },
+  // });
   const employees = await prisma.employee.findMany({
-    where: { employmentStatus: 'ACTIVE' },
-    select: { id: true, employeeCode: true },
-  });
+  where: {
+    employmentStatus: {
+      in: ['ACTIVE', 'NOTICE_PERIOD'],
+    },
+  },
+  select: {
+    id: true,
+    employeeCode: true,
+  },
+});
+
 
   const empMap = new Map(employees.map(e => [e.employeeCode!, e.id]));
 
@@ -454,11 +467,19 @@ async function notifyHR(pending: any[]) {
           `• ${p.name} (Shift start: ${p.shiftStart.toLocaleTimeString()})`
       )
       .join('\n');
+      const hrEmployees = await prisma.employee.findMany({
+        where: {
+          departmentId: 1   // ✅ HR department
+        },
+        select: { id: true }
+      });
+      
+    
+      for (const hr of hrEmployees) {
+        await createNotification(
+          hr.id,
+          message
+        );
+      }
 
-  await prisma.notification.create({
-    data: {
-      message,
-      channel: 'EMAIL',
-    },
-  });
 }

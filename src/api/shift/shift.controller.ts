@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { PrismaClient,ShiftAssignMode  } from "@prisma/client";
+import { PrismaClient, ShiftAssignMode } from "@prisma/client";
 import cron from 'node-cron';
 
 const prisma = new PrismaClient();
@@ -161,7 +161,7 @@ export const getShiftAssignmentsByEmployee = async (req: Request, res: Response)
         shift: true
       }
     });
-
+    console.log('Assignments for employee', employeeId, assignments);
     res.json(assignments);
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch shift assignments" });
@@ -423,16 +423,20 @@ export function startShiftCron() {
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-
     const employees = await prisma.employee.findMany({
       where: {
-        employmentStatus: 'ACTIVE',
-        EmployeeShiftSetting: { isNot: null }
+        employmentStatus: {
+          in: ['ACTIVE', 'NOTICE_PERIOD'],
+        },
+        EmployeeShiftSetting: {
+          isNot: null,
+        },
       },
       include: {
-        EmployeeShiftSetting: true
-      }
+        EmployeeShiftSetting: true,
+      },
     });
+
 
     for (const emp of employees) {
       const setting = emp.EmployeeShiftSetting!;

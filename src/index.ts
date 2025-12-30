@@ -40,6 +40,8 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { startSchedulers } from "./schedulers/scheduler";
 import designationRoutes from "./api/designation/designation.routes";
+import smsRoutes from "./api/sms/sms.routes";
+import mobileAuthRoutes from "./api/mobile-auth/mobile-auth.routes";
 
 
 
@@ -98,7 +100,7 @@ app.use(cors({
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
@@ -136,6 +138,8 @@ app.use('/api/trainings', trainingRouter);
 app.use('/api/attendance', attendanceCalendarRoutes);
 app.use('/api/incidents', incidentRouter);
 app.use("/api/designation", designationRoutes);
+app.use("/api/sms", smsRoutes);
+app.use("/api/auth", mobileAuthRoutes);
 
 
 // Default route

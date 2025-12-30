@@ -2,10 +2,14 @@ import { Request, Response } from "express";
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
+import { UserAuthService } from "../../services/employee.service";
+const userAuthService = new UserAuthService();
+import { otpService } from "../../services/otp.service";
 
 
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { sendOtpSms } from "../sms/sms.controller";
 
 // REGISTER / CREATE USER (linked to Employee)
 export const createUser = async (req: Request, res: Response) => {
@@ -297,5 +301,89 @@ export const loginCandidate = async (req: Request, res: Response) => {
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "Login failed" });
+  }
+};
+
+
+export const loginInit = async (req: Request, res: Response) => {
+  try {
+    const { empId, password } = req.body;
+
+    const user = await userAuthService.validateCredentials(empId, password);
+    if (!user) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const phone = user.employee?.phone;
+    if (!phone) {
+      return res.status(400).json({ message: 'Phone number not found' });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log(`Generated OTP for empId ${empId}: ${otp}`);
+
+    await otpService.generate(empId, otp);
+
+    await sendOtpSms({
+      patientName: user.employee?.firstName || 'Employee',
+      otp,
+      service: 'Employee Login',
+      phoneNumber: phone
+    });
+
+    res.json({
+      success: true,
+      empId
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'OTP sending failed' });
+  }
+};
+
+export const verifyOtp = async (req: Request, res: Response) => {
+    const ipAddress = getClientIp(req);
+  const userAgent = req.headers["user-agent"] || undefined;
+  try {
+    const { empId, otp } = req.body;
+
+    const isValid = await otpService.verify(empId, otp);
+    if (!isValid) {
+      return res.status(401).json({ message: 'Invalid or expired OTP' });
+    }
+    const user = await prisma.user.findUnique({
+      where: { employeeCode: empId }
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+
+    // OTP success → finalize login
+    const response = await userAuthService.finalizeLogin(user.id, ipAddress, userAgent);
+    res.json({ ...response });
+  } catch (err) {
+    res.status(500).json({ message: 'OTP verification failed' });
+  }
+};
+
+export const logout = async (req: Request, res: Response) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(400).json({ message: 'Refresh token required' });
+    }
+
+    // delete refresh token from DB
+    await prisma.refreshToken.deleteMany({
+      where: { token: refreshToken }
+    });
+
+    return res.json({ message: 'Logged out successfully' });
+
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ message: 'Logout failed' });
   }
 };
