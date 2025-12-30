@@ -136,7 +136,7 @@ export class DashboardController {
                 probationEndDate: true,
                 reportingManager: true,
                 roleId: true,
-                employeeType:true,
+                employeeType: true,
                 Department: { select: { name: true } },
             },
         });
@@ -274,7 +274,7 @@ export class DashboardController {
 
 
         // OT yesterday — compare checkout against the best-matching scheduled end
-        
+
         // const [yAttend, ySettings] = await Promise.all([
         //     prisma.attendance.findMany({
         //         where: { employeeId: { in: employeeIds }, date: { gte: yesterdayStart, lte: yesterdayEnd } },
@@ -380,165 +380,195 @@ export class DashboardController {
             baseDate: Date,
             startTpl: Date,
             endTpl: Date
-          ): { start: Date; end: Date } {
+        ): { start: Date; end: Date } {
             const start = combineDateAndTime(baseDate, startTpl)!;
             let end = combineDateAndTime(baseDate, endTpl)!;
-          
+
             if (end <= start) {
-              end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
+                end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
             }
             return { start, end };
-          }
-          
+        }
+
         // -----------------------------
         // TODAY ATTENDANCE + SHIFTS
         // -----------------------------
-        const [todayAttendance, todayAssignments] = await Promise.all([
-          prisma.attendance.findMany({
-            where: {
-              employeeId: { in: employeeIds },
-              date: { gte: todayStart, lte: todayEnd },
-            },
-            select: { employeeId: true, checkIn: true },
-          }),
-      
-          prisma.shiftAssignment.findMany({
-            where: {
-              employeeId: { in: employeeIds },
-              date: { gte: todayStart, lte: todayEnd },
-            },
-            select: {
-              employeeId: true,
-              shift: { select: { startTime: true, endTime: true } },
-            },
-          }),
-        ]);
-      
-        // employeeId → shift start
-        const shiftStartMap = new Map<number, Date>();
-        for (const a of todayAssignments) {
-          if (!a.shift?.startTime) continue;
-          const start = combineDateAndTime(todayStart, a.shift.startTime);
-          if (start) shiftStartMap.set(a.employeeId, start);
-        }
-      
+        // const [todayAttendance, todayAssignments] = await Promise.all([
+        //     prisma.attendance.findMany({
+        //         where: {
+        //             employeeId: { in: employeeIds },
+        //             date: { gte: todayStart, lte: todayEnd },
+        //         },
+        //         select: { employeeId: true, checkIn: true },
+        //     }),
+
+        //     prisma.shiftAssignment.findMany({
+        //         where: {
+        //             employeeId: { in: employeeIds },
+        //             date: { gte: todayStart, lte: todayEnd },
+        //         },
+        //         select: {
+        //             employeeId: true,
+        //             shift: { select: { startTime: true, endTime: true } },
+        //         },
+        //     }),
+        // ]);
+
+        // // employeeId → shift start
+        // const shiftStartMap = new Map<number, Date>();
+        // for (const a of todayAssignments) {
+        //     if (!a.shift?.startTime) continue;
+        //     const start = combineDateAndTime(todayStart, a.shift.startTime);
+        //     if (start) shiftStartMap.set(a.employeeId, start);
+        // }
+
         // -----------------------------
         // LATE CALCULATION (CORRECT)
         // -----------------------------
-        const lateDiffs: number[] = [];
-        const lateRows: Array<[string, string, string, string, string]> = [];
-      
-        for (const rec of todayAttendance) {
-          if (!rec.checkIn) continue;
-      
-          const shiftStart = shiftStartMap.get(rec.employeeId);
-          if (!shiftStart) continue;
-      
-          const diffMin = Math.round(
-            (rec.checkIn.getTime() - shiftStart.getTime()) / 60000
-          );
-      
-          if (diffMin > 15) {
-            lateDiffs.push(diffMin);
-            const e = empById.get(rec.employeeId);
-      
-            lateRows.push([
-              e ? `${e.firstName} ${e.lastName}` : `Emp #${rec.employeeId}`,
-              e?.employeeCode || '—',
-              e?.Department?.name || '—',
-              e?.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
-              `${diffMin} min`,
-            ]);
-          }
-        }
-      
+        // const lateDiffs: number[] = [];
+        // const lateRows: Array<[string, string, string, string, string]> = [];
+
+        // for (const rec of todayAttendance) {
+        //     if (!rec.checkIn) continue;
+
+        //     const shiftStart = shiftStartMap.get(rec.employeeId);
+        //     if (!shiftStart) continue;
+
+        //     const diffMin = Math.round(
+        //         (rec.checkIn.getTime() - shiftStart.getTime()) / 60000
+        //     );
+
+        //     if (diffMin > 15) {
+        //         lateDiffs.push(diffMin);
+        //         const e = empById.get(rec.employeeId);
+
+        //         lateRows.push([
+        //             e ? `${e.firstName} ${e.lastName}` : `Emp #${rec.employeeId}`,
+        //             e?.employeeCode || '—',
+        //             e?.Department?.name || '—',
+        //             e?.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
+        //             `${diffMin} min`,
+        //         ]);
+        //     }
+        // }
+
+        // const late = {
+        //   count: lateDiffs.length,
+        //   medianMins: lateDiffs.length ? Math.round(median(lateDiffs)) : 0,
+        // };
+        const lateLogsToday = await prisma.lateLoginLog.findMany({
+            where: {
+                date: { gte: todayStart, lte: todayEnd },
+                lateMinutes: { gt: 15 },
+            },
+            include: {
+                employee: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true,
+                        employeeCode: true,
+                        employeeType: true,
+                        Department: { select: { name: true } },
+                    },
+                },
+            },
+        });
+
+        const lateDiffs = lateLogsToday.map((l: any) => l.lateMinutes);
+
         const late = {
-          count: lateDiffs.length,
-          medianMins: lateDiffs.length ? Math.round(median(lateDiffs)) : 0,
+            count: lateDiffs.length,
+            medianMins: lateDiffs.length ? Math.round(median(lateDiffs)) : 0,
         };
-      
+
+
         // -----------------------------
         // YESTERDAY OT (CORRECT)
         // -----------------------------
         const [yAttend, yAssignments] = await Promise.all([
-          prisma.attendance.findMany({
-            where: {
-              employeeId: { in: employeeIds },
-              date: { gte: yesterdayStart, lte: yesterdayEnd },
-            },
-            select: { employeeId: true, checkOut: true },
-          }),
-      
-          prisma.shiftAssignment.findMany({
-            where: {
-              employeeId: { in: employeeIds },
-              date: { gte: yesterdayStart, lte: yesterdayEnd },
-            },
-            select: {
-              employeeId: true,
-              shift: { select: { startTime: true, endTime: true } },
-            },
-          }),
+            prisma.attendance.findMany({
+                where: {
+                    employeeId: { in: employeeIds },
+                    date: { gte: yesterdayStart, lte: yesterdayEnd },
+                },
+                select: { employeeId: true, checkOut: true },
+            }),
+
+            prisma.shiftAssignment.findMany({
+                where: {
+                    employeeId: { in: employeeIds },
+                    date: { gte: yesterdayStart, lte: yesterdayEnd },
+                },
+                select: {
+                    employeeId: true,
+                    shift: { select: { startTime: true, endTime: true } },
+                },
+            }),
         ]);
 
         console.log(yAssignments, 'shift assignments')
-      
-        const yShiftEndMap = new Map<number, Date>();
-        for (const a of yAssignments) {
-          if (!a.shift?.startTime || !a.shift?.endTime) continue;
-          const { end } = combineEndWithOvernight(
-            yesterdayStart,
-            a.shift.startTime,
-            a.shift.endTime
-          );
-          console.log(end, 'end')
-          yShiftEndMap.set(a.employeeId, end);
-        }
-      
-        for (const rec of yAttend) {
-          if (!rec.checkOut) continue;
-          const schedEnd = yShiftEndMap.get(rec.employeeId);
-          console.log(schedEnd, 'schedEnd')
-          if (!schedEnd) continue;
-      
-          const diff = Math.round(
-            (rec.checkOut.getTime() - schedEnd.getTime()) / 60000
-          );
-      
-          if (diff > 0) {
-            await prisma.overtimeApproval.upsert({
-              where: {
-                employeeId_date: {
-                  employeeId: rec.employeeId,
-                  date: yesterdayStart,
-                },
-              },
-              create: {
-                employeeId: rec.employeeId,
-                date: yesterdayStart,
-                minutes: diff,
-                scheduledEnd: schedEnd,
-                checkOut: rec.checkOut,
-                status: 'PENDING',
-              },
-              update: {
-                minutes: diff,
-                scheduledEnd: schedEnd,
-                checkOut: rec.checkOut,
-              },
-            });
-          }
-        }
-      
+
+        // const yShiftEndMap = new Map<number, Date>();
+        // for (const a of yAssignments) {
+        //     if (!a.shift?.startTime || !a.shift?.endTime) continue;
+        //     const { end } = combineEndWithOvernight(
+        //         yesterdayStart,
+        //         a.shift.startTime,
+        //         a.shift.endTime
+        //     );
+        //     console.log(end, 'end')
+        //     yShiftEndMap.set(a.employeeId, end);
+        // }
+
+        // for (const rec of yAttend) {
+        //     if (!rec.checkOut) continue;
+        //     const schedEnd = yShiftEndMap.get(rec.employeeId);
+        //     console.log(schedEnd, 'schedEnd')
+        //     if (!schedEnd) continue;
+
+        //     const diff = Math.round(
+        //         (rec.checkOut.getTime() - schedEnd.getTime()) / 60000
+        //     );
+
+        //     if (diff > 0) {
+        //         await prisma.overtimeApproval.upsert({
+        //             where: {
+        //                 employeeId_date: {
+        //                     employeeId: rec.employeeId,
+        //                     date: yesterdayStart,
+        //                 },
+        //             },
+        //             create: {
+        //                 employeeId: rec.employeeId,
+        //                 date: yesterdayStart,
+        //                 minutes: diff,
+        //                 scheduledEnd: schedEnd,
+        //                 checkOut: rec.checkOut,
+        //                 status: 'PENDING',
+        //             },
+        //             update: {
+        //                 minutes: diff,
+        //                 scheduledEnd: schedEnd,
+        //                 checkOut: rec.checkOut,
+        //             },
+        //         });
+        //     }
+        // }
+
         const approvedOTs = await prisma.overtimeApproval.findMany({
-          where: { status: 'APPROVED', date: yesterdayStart },
+            where: {
+                date: yesterdayStart,
+                status: 'APPROVED',
+            },
         });
-      
+
         const totalOtMins = approvedOTs.reduce((s, o) => s + o.minutes, 0);
+
         const otYesterday = {
-          hours: Math.round((totalOtMins / 60) * 10) / 10,
-          count: approvedOTs.length,
-          cost: undefined,
+            hours: Math.round((totalOtMins / 60) * 10) / 10,
+            count: approvedOTs.length,
+            cost: undefined,
         };
         const newJoiners = employees.filter((e) => sameYMD(e.dateOfJoining, todayStart)).length;
         const birthdays = employees.filter((e) => sameMonthDay(e.dob, todayStart)).length;
@@ -1225,73 +1255,110 @@ export class DashboardController {
         //     rows.sort((a, b) => Number(b[3]) - Number(a[3]));
         //     return res.json({ title: 'Late Arrivals', cols: ['Employee', 'EMP ID', 'Dept', 'Shift Type', 'Scheduled', 'Check-in', 'Late (mins)'], rows, actions: ['Notify all'] });
         // }
+        // if (key === 'late') {
+        //     const [att, assignments] = await Promise.all([
+        //         prisma.attendance.findMany({
+        //             where: { date: { gte: start, lte: end }, checkIn: { not: null } },
+        //             select: {
+        //                 employeeId: true,
+        //                 checkIn: true,
+        //                 employee: {
+        //                     select: {
+        //                         firstName: true,
+        //                         lastName: true,
+        //                         employeeCode: true,
+        //                         employeeType: true,
+        //                         Department: { select: { name: true } },
+        //                     },
+        //                 },
+        //             },
+        //         }),
+
+        //         prisma.shiftAssignment.findMany({
+        //             where: { date: { gte: start, lte: end } },
+        //             select: {
+        //                 employeeId: true,
+        //                 shift: { select: { startTime: true, name: true } },
+        //             },
+        //         }),
+        //     ]);
+
+        //     const shiftStartMap = new Map<number, Date>();
+        //     for (const a of assignments) {
+        //         const st = combineDateAndTime(start, a.shift.startTime);
+        //         if (st) shiftStartMap.set(a.employeeId, st);
+        //     }
+
+        //     const rows: string[][] = [];
+
+        //     for (const r of att) {
+        //         const shiftStart = shiftStartMap.get(r.employeeId);
+        //         if (!shiftStart) continue;
+
+        //         const diff = Math.round(
+        //             (r.checkIn!.getTime() - shiftStart.getTime()) / 60000
+        //         );
+
+        //         if (diff > 15) {
+        //             rows.push([
+        //                 `${r.employee.firstName} ${r.employee.lastName}`,
+        //                 r.employee.employeeCode || '—',
+        //                 r.employee.Department?.name || '—',
+        //                 r.employee.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
+        //                 fmtTime(shiftStart),
+        //                 fmtTime(r.checkIn!),
+        //                 String(diff),
+        //             ]);
+        //         }
+        //     }
+
+        //     rows.sort((a, b) => Number(b[6]) - Number(a[6]));
+
+        //     return res.json({
+        //         title: 'Late Arrivals',
+        //         cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Scheduled', 'Check-in', 'Late (mins)'],
+        //         rows,
+        //         actions: ['Notify all'],
+        //     });
+        // }
+
         if (key === 'late') {
-            const [att, assignments] = await Promise.all([
-              prisma.attendance.findMany({
-                where: { date: { gte: start, lte: end }, checkIn: { not: null } },
-                select: {
-                  employeeId: true,
-                  checkIn: true,
-                  employee: {
-                    select: {
-                      firstName: true,
-                      lastName: true,
-                      employeeCode: true,
-                      employeeType: true,
-                      Department: { select: { name: true } },
+            const items = await prisma.lateLoginLog.findMany({
+                where: {
+                    date: { gte: start, lte: end },
+                    lateMinutes: { gt: 15 },
+                },
+                include: {
+                    employee: {
+                        select: {
+                            firstName: true,
+                            lastName: true,
+                            employeeCode: true,
+                            employeeType: true,
+                            Department: { select: { name: true } },
+                        },
                     },
-                  },
                 },
-              }),
-          
-              prisma.shiftAssignment.findMany({
-                where: { date: { gte: start, lte: end } },
-                select: {
-                  employeeId: true,
-                  shift: { select: { startTime: true, name: true } },
-                },
-              }),
-            ]);
-          
-            const shiftStartMap = new Map<number, Date>();
-            for (const a of assignments) {
-              const st = combineDateAndTime(start, a.shift.startTime);
-              if (st) shiftStartMap.set(a.employeeId, st);
-            }
-          
-            const rows: string[][] = [];
-          
-            for (const r of att) {
-              const shiftStart = shiftStartMap.get(r.employeeId);
-              if (!shiftStart) continue;
-          
-              const diff = Math.round(
-                (r.checkIn!.getTime() - shiftStart.getTime()) / 60000
-              );
-          
-              if (diff > 15) {
-                rows.push([
-                  `${r.employee.firstName} ${r.employee.lastName}`,
-                  r.employee.employeeCode || '—',
-                  r.employee.Department?.name || '—',
-                  r.employee.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
-                  fmtTime(shiftStart),
-                  fmtTime(r.checkIn!),
-                  String(diff),
-                ]);
-              }
-            }
-          
-            rows.sort((a, b) => Number(b[6]) - Number(a[6]));
-          
-            return res.json({
-              title: 'Late Arrivals',
-              cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Scheduled', 'Check-in', 'Late (mins)'],
-              rows,
-              actions: ['Notify all'],
+                orderBy: { lateMinutes: 'desc' },
             });
-          }
-          
+
+            const rows = items.map((l: any) => [
+                `${l.employee.firstName} ${l.employee.lastName}`,
+                l.employee.employeeCode || '—',
+                l.employee.Department?.name || '—',
+                l.employee.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
+                fmtTime(l.scheduledIn),
+                fmtTime(l.actualIn),
+                `${l.lateMinutes}`,
+            ]);
+
+            return res.json({
+                title: 'Late Arrivals',
+                cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Scheduled In', 'Actual In', 'Late (mins)'],
+                rows,
+                actions: ['Notify all'],
+            });
+        }
 
         // OT Yesterday (best match end; handles overnight)
         // if (key === 'ot') {
@@ -1423,40 +1490,40 @@ export class DashboardController {
 
         if (key === 'ot') {
             const items = await prisma.overtimeApproval.findMany({
-              where: { status: 'APPROVED', date: yesterdayStart },
-              include: {
-                employee: {
-                  select: {
-                    firstName: true,
-                    lastName: true,
-                    employeeCode: true,
-                    employeeType: true,
-                    Department: { select: { name: true } },
-                  },
+                where: { status: 'APPROVED', date: yesterdayStart },
+                include: {
+                    employee: {
+                        select: {
+                            firstName: true,
+                            lastName: true,
+                            employeeCode: true,
+                            employeeType: true,
+                            Department: { select: { name: true } },
+                        },
+                    },
                 },
-              },
-              orderBy: { minutes: 'desc' },
+                orderBy: { minutes: 'desc' },
             });
-          
+
             const rows = items.map(o => [
-              `${o.employee.firstName} ${o.employee.lastName}`,
-              o.employee.employeeCode || '—',
-              o.employee.Department?.name || '—',
-              o.employee.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
-              fmtTime(o.scheduledEnd),
-              fmtTime(o.checkOut),
-              `${Math.floor(o.minutes / 60)}h ${o.minutes % 60}m`,
+                `${o.employee.firstName} ${o.employee.lastName}`,
+                o.employee.employeeCode || '—',
+                o.employee.Department?.name || '—',
+                o.employee.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
+                fmtTime(o.scheduledEnd),
+                fmtTime(o.checkOut),
+                `${Math.floor(o.minutes / 60)}h ${o.minutes % 60}m`,
             ]);
-          
+
             return res.json({
-              title: 'OT Yesterday',
-              cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Sched End', 'Check-out', 'OT Duration'],
-              rows,
-              actions: ['Export'],
-              selectable: true,
+                title: 'OT Yesterday',
+                cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Sched End', 'Check-out', 'OT Duration'],
+                rows,
+                actions: ['Export'],
+                selectable: true,
             });
-          }
-          
+        }
+
         // New Joiners / Birthdays / Anniversaries (sameMonthDay as in your summary)
         if (key === 'joiners' || key === 'birthdays' || key === 'anniversaries') {
             const people = await prisma.employee.findMany({
@@ -1960,7 +2027,7 @@ export class DashboardController {
         });
         const todayStart = startOfDayIST(new Date());
         const todayEnd = endOfDayIST(new Date());
-        
+
 
         const assignments = await prisma.shiftAssignment.findMany({
             where: {
@@ -2081,9 +2148,9 @@ export class DashboardController {
         const shiftMap = new Map<number, typeof assignments[0]>();
 
         for (const a of assignments) {
-          shiftMap.set(a.employeeId, a);
+            shiftMap.set(a.employeeId, a);
         }
-        
+
         // for (const e of employees) {
         //     if (excused.has(e.id)) continue;
         //     const checkIn = presentMap.get(e.id);
@@ -2163,58 +2230,58 @@ export class DashboardController {
         // }
         for (const e of employees) {
             if (excused.has(e.id)) continue;
-          
+
             const assignment = shiftMap.get(e.id);
             if (!assignment) continue; // no shift today
-          
+
             const shiftStart = combineDateAndTime(
-              start,
-              assignment.shift.startTime
+                start,
+                assignment.shift.startTime
             );
-          
+
             if (!shiftStart) continue;
-          
+
             const checkIn = presentMap.get(e.id);
-          
+
             let lateBy: number | null = null;
             let notCheckedIn = false;
-          
+
             if (checkIn) {
-              const diffMins = Math.round(
-                (new Date(checkIn).getTime() - shiftStart.getTime()) / 60000
-              );
-              if (diffMins > 15) lateBy = diffMins;
+                const diffMins = Math.round(
+                    (new Date(checkIn).getTime() - shiftStart.getTime()) / 60000
+                );
+                if (diffMins > 15) lateBy = diffMins;
             } else {
-              const diffMins = Math.round(
-                (Date.now() - shiftStart.getTime()) / 60000
-              );
-              if (diffMins > 15) {
-                lateBy = diffMins;
-                notCheckedIn = true;
-              }
+                const diffMins = Math.round(
+                    (Date.now() - shiftStart.getTime()) / 60000
+                );
+                if (diffMins > 15) {
+                    lateBy = diffMins;
+                    notCheckedIn = true;
+                }
             }
-          
+
             const baseRow = {
-              name: `${assignment.employee.firstName} ${assignment.employee.lastName}`,
-              code: assignment.employee.employeeCode,
-              dept: assignment.employee.Department?.name || '-',
-              shift: assignment.shift.name,
-              shiftTime: fmtTime(assignment.shift.startTime),
+                name: `${assignment.employee.firstName} ${assignment.employee.lastName}`,
+                code: assignment.employee.employeeCode,
+                dept: assignment.employee.Department?.name || '-',
+                shift: assignment.shift.name,
+                shiftTime: fmtTime(assignment.shift.startTime),
             };
-          
+
             if (lateBy !== null && !notCheckedIn) {
-              (assignment.employee.employeeType === 'CLINICAL'
-                ? clinicalList
-                : nonClinicalList
-              ).push({ ...baseRow, delayMins: lateBy });
+                (assignment.employee.employeeType === 'CLINICAL'
+                    ? clinicalList
+                    : nonClinicalList
+                ).push({ ...baseRow, delayMins: lateBy });
             } else if (notCheckedIn) {
-              (assignment.employee.employeeType === 'CLINICAL'
-                ? clinicalNotCheckedIn
-                : nonClinicalNotCheckedIn
-              ).push({ ...baseRow, delayMins: lateBy });
+                (assignment.employee.employeeType === 'CLINICAL'
+                    ? clinicalNotCheckedIn
+                    : nonClinicalNotCheckedIn
+                ).push({ ...baseRow, delayMins: lateBy });
             }
-          }
-          
+        }
+
         return {
             clinicalLate: clinicalList.length,
             nonClinicalLate: nonClinicalList.length,

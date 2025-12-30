@@ -5,6 +5,7 @@ import {
   markAsRead,
   deleteNotification,
   registerForNotifications,
+  saveDeviceToken,
 } from "./notifications.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -14,6 +15,8 @@ const router = Router();
 router.get("/stream", registerForNotifications);
 
 router.get("/", authenticateToken, getNotifications);
+router.post('/device-token', saveDeviceToken);
+
 router.put("/:id/read", authenticateToken, markAsRead);
 router.delete("/:id", authenticateToken, deleteNotification);
 

@@ -4,7 +4,7 @@ import { initLeaveEndSchedular } from "../api/leave/leave.controller";
 import { initQuarterlyAppraisalScheduler } from "../api/appraisal/appraisal.controller";
 import { startShiftCron } from "../api/shift/shift.controller";
 import cron from 'node-cron';
-import { runAttendanceSync } from "../api/biometric/biometric.controller";
+import { runBiometricSync } from "../api/biometric/biometric.controller";
 
 export function startSchedulers() {
   initSurveyScheduler();
@@ -12,9 +12,11 @@ export function startSchedulers() {
   initLeaveEndSchedular();
   initQuarterlyAppraisalScheduler();
   startShiftCron();
-  // startAttendanceScheduler();
+  startAttendanceScheduler();
 }
 const schedules = [
+  // 00
+  '* * * * *',
   // 06
   '02 6 * * *',
   '20 6 * * *',
@@ -61,21 +63,25 @@ const schedules = [
 
   // 20 (FINAL RUNS)
   '02 20 * * *',
-  '20 20 * * *'
+  '20 20 * * *',
+
+  //21
+  '* 21 * * *',
+
 ];
 
 
 export function startAttendanceScheduler() {
   for (const schedule of schedules) {
     cron.schedule(schedule, async () => {
-      const isFinalRun = schedule === '02 20 * * *';
+      const isFinalRun = schedule === '* 21 * * *';
 
       console.log(
         `[CRON] Attendance sync triggered | ${schedule} | Final: ${isFinalRun}`
       );
 
       try {
-        await runAttendanceSync(isFinalRun);
+        await runBiometricSync(isFinalRun);
       } catch (err) {
         console.error('[CRON] Attendance sync failed', err);
       }

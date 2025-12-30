@@ -81,7 +81,9 @@ const allowedOrigins = [
   'http://192.168.3.25:4300',  // LAN testing
   'https://demo.hrproindia.in',
   'http://localhost',          // Capacitor Android
-  'capacitor://localhost'      // Capacitor iOS
+  'https://localhost',
+  'capacitor://localhost',     // Capacitor iOS
+  'http://localhost:8100',
 ];
 
 app.use(cors({

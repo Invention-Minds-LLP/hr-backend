@@ -3,206 +3,462 @@ import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
+/* ---------------------------------
+   COSEC CONFIG
+---------------------------------- */
+
 const COSEC_BASE_URL = 'http://14.194.12.229:83/COSEC/api.svc/v2';
 const COSEC_USERNAME = 'api';
 const COSEC_PASSWORD = 'Api@123';
 
-type CosecEvent = {
-  userid: string;
-  edate: string;
-  etime: string;
-  entryexittype: 'IN' | 'OUT';
-};
+/* ---------------------------------
+   DATE HELPERS
+---------------------------------- */
 
-type DailyAttendance = {
-  userid: string;
-  processdate: string;
-  punch1?: string;
-  outpunch?: string;
-};
+function startOfDay(d: Date) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
 
-/* ---------------- UTILITIES ---------------- */
+function parseDate(date: string) {
+  const [dd, mm, yyyy] = date.split('/');
+  return new Date(`${yyyy}-${mm}-${dd}T00:00:00`);
+}
 
-function getCosecDateRange(date = new Date()) {
-  const dd = String(date.getDate()).padStart(2, '0');
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const yyyy = date.getFullYear();
+function getCosecRange(d: Date) {
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
   return `${dd}${mm}${yyyy}-${dd}${mm}${yyyy}`;
 }
 
-function parseDate(date: string, time = '00:00:00') {
-  const [d, m, y] = date.split('/');
-  return new Date(`${y}-${m}-${d}T${time}`);
-}
-function parseCosecDateTime(
-    dateStr?: string,
-    timeStr?: string
-  ): Date | null {
-    if (!dateStr) return null;
-  
-    // CASE 1: attendance-daily → "22/12/2025 08:45:01"
-    if (timeStr && timeStr.includes('/')) {
-      const [datePart, timePart] = timeStr.split(' ');
-      return parseCosecDateTime(datePart, timePart);
-    }
-  
-    // CASE 2: empty checkout → return NULL
-    if (!timeStr || timeStr.trim() === '') {
-      return null;
-    }
-  
-    // CASE 3: normal edate + etime
-    const [d, m, y] = dateStr.split('/').map(Number);
-    const [hh, mm, ss] = timeStr.split(':').map(Number);
-  
+/* ---------------------------------
+   COSEC UTILS
+---------------------------------- */
+
+function parsePunch(dateStr: string, punchStr?: string): Date | null {
+  if (!punchStr) return null;
+
+  // Case 1: "29/12/2025 10:20:17"
+  if (punchStr.includes(' ')) {
+    const [datePart, timePart] = punchStr.split(' ');
+    const [d, m, y] = datePart.split('/').map(Number);
+    const [hh, mm, ss] = timePart.split(':').map(Number);
     const dt = new Date(y, m - 1, d, hh, mm, ss);
-  
     return isNaN(dt.getTime()) ? null : dt;
   }
-  
 
-  
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+  // Case 2: legacy format
+  const [d, m, y] = dateStr.split('/').map(Number);
+  const [hh, mm, ss] = punchStr.split(':').map(Number);
+  const dt = new Date(y, m - 1, d, hh, mm, ss);
+  return isNaN(dt.getTime()) ? null : dt;
+}
 
-/* ---------------- COSEC CALLS ---------------- */
 
-async function fetchAttendanceDaily(dateRange: string): Promise<DailyAttendance[]> {
+function extractPunches(rec: any): Date[] {
+  // console.log(`  Extracting punches for record on date: ${rec.processdate}`, rec);
+  const punches: Date[] = [];
+  for (let i = 1; i <= 10; i++) {
+    const p = rec[`punch${i}`];
+    // console.log(`    Punch ${i}:`, p);
+    if (!p) continue;
+    const dt = parsePunch(rec.processdate, p);
+    if (dt) punches.push(dt);
+  }
+  return punches.sort((a, b) => a.getTime() - b.getTime());
+}
+
+/* ---------------------------------
+   SHIFT HELPERS
+---------------------------------- */
+
+async function isNightShift(employeeId: number, date: Date): Promise<boolean> {
+  const assignment = await prisma.shiftAssignment.findFirst({
+    where: { employeeId, date },
+    include: { shift: true },
+  });
+
+  if (!assignment?.shift) return false;
+
+  const start = new Date(assignment.shift.startTime);
+  const end = new Date(assignment.shift.endTime);
+
+  let hrs = (end.getTime() - start.getTime()) / 36e5;
+  if (hrs < 0) hrs += 24;
+
+  return hrs >= 12;
+}
+
+function combineShiftStart(day: Date, shiftStart: Date) {
+  const d = new Date(day);
+  d.setHours(
+    shiftStart.getHours(),
+    shiftStart.getMinutes(),
+    shiftStart.getSeconds(),
+    0
+  );
+  return d;
+}
+
+function combineShiftEnd(day: Date, start: Date, end: Date) {
+  const d = new Date(day);
+  d.setHours(end.getHours(), end.getMinutes(), end.getSeconds(), 0);
+  if (end < start) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+function diffMinutes(a: Date, b: Date) {
+  return Math.round((b.getTime() - a.getTime()) / 60000);
+}
+async function hasLeaveOrPermission(
+  employeeId: number,
+  date: Date
+): Promise<boolean> {
+
+  const leave = await prisma.leaveRequest.findFirst({
+    where: {
+      employeeId,
+      status: { in: ['APPROVED', 'PENDING'] },
+      startDate: { lte: date },
+      endDate: { gte: date },
+    },
+  });
+
+  if (leave) return true;
+
+  const permission = await prisma.permissionRequest.findFirst({
+    where: {
+      employeeId,
+      status: { in: ['APPROVED', 'PENDING'] },
+      day: date,
+    },
+  });
+
+  return !!permission;
+}
+
+
+/* ---------------------------------
+   COSEC FETCH
+---------------------------------- */
+
+async function fetchAttendanceDaily(date: Date) {
+  const range = getCosecRange(date);
+
   const url =
     `${COSEC_BASE_URL}/attendance-daily` +
-    `?action=get;` +
-    `field-name=userid,processdate,punch1,outpunch;` +
-    `date-range=${dateRange};format=json`;
+    `?action=get;field-name=userid,processdate,punch1,punch2,punch3,punch4,punch5,punch6,punch7,punch8,punch9,punch10;` +
+    `date-range=${range};range=organization;id=2;active=1;format=json`;
 
   const res = await axios.get(url, {
     auth: { username: COSEC_USERNAME, password: COSEC_PASSWORD },
-    timeout: 60000
+    timeout: 120000,
   });
 
   return res.data['attendance-daily'] || [];
 }
 
-async function fetchRawEvents(dateRange: string): Promise<CosecEvent[]> {
-  const url =
-    `${COSEC_BASE_URL}/event-ta` +
-    `?action=get;field-name=userid,edate,etime,entryexittype;` +
-    `date-range=${dateRange};format=json`;
+/* ---------------------------------
+   MAIN BIOMETRIC SYNC
+---------------------------------- */
 
-  for (let i = 1; i <= 3; i++) {
-    try {
-      const res = await axios.get(url, {
-        auth: { username: COSEC_USERNAME, password: COSEC_PASSWORD },
-        timeout: 120000
-      });
-      return res.data['event-ta'] || [];
-    } catch {
-      console.warn(`[COSEC] event-ta failed attempt ${i}`);
-      await sleep(10000);
-    }
-  }
-
-  throw new Error('event-ta failed after retries');
-}
-
-/* ---------------- MAIN SYNC ---------------- */
-
-export async function runAttendanceSync(isFinalRun: boolean) {
-  const dateRange = getCosecDateRange();
-
-  console.log(`[ATTENDANCE] Sync started | Final: ${isFinalRun}`);
+export async function runBiometricSync(isFinalRun: boolean) {
+  const today = startOfDay(new Date());
+  // console.log(`🔄 Starting biometric sync | Date: ${today.toDateString()} | Final: ${isFinalRun}`);
+  const yesterday = startOfDay(new Date(Date.now() - 86400000));
+  // console.log(`🔄 Yesterday date: ${yesterday.toDateString()}`);
 
   const employees = await prisma.employee.findMany({
-    select: { id: true, employeeCode: true }
+    where: { employmentStatus: 'ACTIVE' },
+    select: { id: true, employeeCode: true },
   });
 
   const empMap = new Map(employees.map(e => [e.employeeCode!, e.id]));
 
-  let records: any[] = [];
+  /* ======================================================
+     PART 1: PROCESS TODAY'S BIOMETRIC (CHECK-IN)
+  ====================================================== */
 
-  if (isFinalRun) {
-    try {
-      records = await fetchRawEvents(dateRange);
-    } catch {
-      console.warn('[ATTENDANCE] Falling back to attendance-daily');
-      records = await fetchAttendanceDaily(dateRange);
-    }
-  } else {
-    records = await fetchAttendanceDaily(dateRange);
-    console.log('[ATTENDANCE] Fetched records from attendance-daily');
-  }
+  const todayRecords = await fetchAttendanceDaily(today);
+  // console.log(`  Fetched ${todayRecords.length} biometric records for today`);
 
-  console.log(`[ATTENDANCE] Fetched ${records.length} records from COSEC`);
-  for (const r of records) {
+  for (const r of todayRecords) {
     const employeeId = empMap.get(r.userid);
     if (!employeeId) continue;
-    console.log(`[ATTENDANCE] Processing record for employee ID ${employeeId}`);
-    const date = parseDate(r.processdate || r.edate);
-    const checkIn = parseCosecDateTime(
-        r.processdate || r.edate,
-        r.punch1
-      );
-      
-      const checkOut = parseCosecDateTime(
-        r.processdate || r.edate,
-        r.outpunch
-      );
-      if (checkIn && isNaN(checkIn.getTime())) {
-        console.warn('[ATTENDANCE] Invalid check-in skipped', r);
+
+    const date = parseDate(r.processdate);
+    // console.log(`Processing attendance for Employee ID: ${employeeId} | Date: ${date.toDateString()}`);
+    const punches = extractPunches(r);
+    // console.log(`  Extracted punches: ${punches.length}`);
+    // console.log(`  Punch times: ${punches.map(p => p.toISOString()).join(', ')}`);
+    if (!punches.length) continue;
+
+    const night = await isNightShift(employeeId, date);
+    const wasNightYesterday = await isNightShift(employeeId, yesterday);
+
+    let checkIn: Date | null = null;
+
+    if (wasNightYesterday) {
+      checkIn = punches.length > 1 ? punches[1] : null;
+    } else {
+      checkIn = punches[0];
+    }
+
+    const checkOut =
+      night || punches.length === 1
+        ? null
+        : punches[punches.length - 1];
+
+    // -------- STATUS DECISION (FIXED) --------
+
+    let finalStatus: string;
+
+    if (!checkIn) {
+      finalStatus = isFinalRun ? 'Absent' : 'IN_PROGRESS';
+    } else {
+      finalStatus = 'Present';
+    }
+
+    if (checkIn && checkOut && !night && !wasNightYesterday) {
+      const workedMin = diffMinutes(checkIn, checkOut);
+
+      if (workedMin < 240) {
+        const allowed = await hasLeaveOrPermission(employeeId, date);
+        finalStatus = allowed ? 'Present' : 'ON_HOLD';
       }
-      
-      if (checkOut && isNaN(checkOut.getTime())) {
-        console.warn('[ATTENDANCE] Invalid check-out skipped', r);
-      }
-      
-      console.log(`[ATTENDANCE] Employee ID ${employeeId} | Date: ${date} | Check-In: ${checkIn} | Check-Out: ${checkOut}`);
-      const status = checkIn
-      ? 'Present'
-      : isFinalRun
-        ? 'Absent'
-        : 'IN_PROGRESS';
-      await prisma.attendance.upsert({
-        where: {
-          employeeId_date: {
-            employeeId,
-            date
-          }
+    }
+
+    await prisma.attendance.upsert({
+      where: { employeeId_date: { employeeId, date } },
+      create: {
+        employeeId,
+        date,
+        checkIn,
+        checkOut,
+        status: finalStatus,
+      },
+      update: {
+        checkIn,
+        checkOut,
+        status: finalStatus,
+      },
+    });
+
+
+  }
+
+  /* ======================================================
+     PART 2: CLOSE NIGHT SHIFT (YESTERDAY) USING TODAY PUNCH
+  ====================================================== */
+
+  for (const r of todayRecords) {
+    const employeeId = empMap.get(r.userid);
+    if (!employeeId) continue;
+
+    const punches = extractPunches(r);
+    if (!punches.length) continue;
+
+    const yAttendance = await prisma.attendance.findUnique({
+      where: {
+        employeeId_date: {
+          employeeId,
+          date: yesterday,
         },
-        update: {
-          checkIn: checkIn ?? undefined,
-          checkOut: checkOut ?? undefined,
-          status
+      },
+    });
+
+    if (!yAttendance || yAttendance.checkOut) continue;
+
+    const wasNight = await isNightShift(employeeId, yesterday);
+    if (!wasNight) continue;
+
+    await prisma.attendance.update({
+      where: {
+        employeeId_date: {
+          employeeId,
+          date: yesterday,
+        },
+      },
+      data: {
+        checkOut: punches[0],
+        status: 'Present',
+      },
+    });
+  }
+
+  /* ======================================================
+     PART 3: LATE LOGIN (TODAY)
+  ====================================================== */
+
+  const todayAttendance = await prisma.attendance.findMany({
+    where: { date: today },
+    select: { employeeId: true, checkIn: true },
+  });
+
+  const todayShifts = await prisma.shiftAssignment.findMany({
+    where: { date: today },
+    include: { shift: true },
+  });
+
+  const shiftStartMap = new Map<number, Date>();
+  for (const s of todayShifts) {
+    if (!s.shift) continue;
+    shiftStartMap.set(
+      s.employeeId,
+      combineShiftStart(today, s.shift.startTime)
+    );
+  }
+
+  for (const rec of todayAttendance) {
+    if (!rec.checkIn) continue;
+
+    const shiftStart = shiftStartMap.get(rec.employeeId);
+    console.log(`Employee ID: ${rec.employeeId} | Shift Start: ${shiftStart} | Check-In: ${rec.checkIn}`);
+    if (!shiftStart) continue;
+
+    const lateMin = Math.round(
+      (rec.checkIn.getTime() - shiftStart.getTime()) / 60000
+    );
+
+    if (lateMin > 15) {
+      await prisma.lateLoginLog.upsert({
+        where: {
+          employeeId_date: { employeeId: rec.employeeId, date: today },
         },
         create: {
-          employeeId,
-          date,
-          checkIn,
-          checkOut,
-          status
-        }
-      });
-      
-  }
-
-  /* ---- FINAL ABSENT MARKING ---- */
-  if (isFinalRun) {
-    const today = parseDate(new Date().toLocaleDateString('en-GB'));
-    const existing = await prisma.attendance.findMany({
-      where: { date: today },
-      select: { employeeId: true }
-    });
-
-    const present = new Set(existing.map(e => e.employeeId));
-
-    await prisma.attendance.createMany({
-      data: employees
-        .filter(e => !present.has(e.id))
-        .map(e => ({
-          employeeId: e.id,
+          employeeId: rec.employeeId,
           date: today,
-          status: 'Absent'
-        })),
-      skipDuplicates: true
-    });
+          shiftStart,
+          checkIn: rec.checkIn,
+          lateMinutes: lateMin,
+          source: 'BIOMETRIC',
+        },
+        update: {
+          shiftStart,
+          checkIn: rec.checkIn,
+          lateMinutes: lateMin,
+        },
+      });
+    }
   }
 
-  console.log('[ATTENDANCE] Sync completed');
+  /* ======================================================
+     PART 4: OVERTIME (YESTERDAY)
+  ====================================================== */
+
+  const yAttendance = await prisma.attendance.findMany({
+    where: { date: yesterday },
+    select: { employeeId: true, checkOut: true },
+  });
+
+  const yShifts = await prisma.shiftAssignment.findMany({
+    where: { date: yesterday },
+    include: { shift: true },
+  });
+
+  const shiftEndMap = new Map<number, Date>();
+  for (const s of yShifts) {
+    if (!s.shift) continue;
+    shiftEndMap.set(
+      s.employeeId,
+      combineShiftEnd(yesterday, s.shift.startTime, s.shift.endTime)
+    );
+  }
+
+  for (const rec of yAttendance) {
+    if (!rec.checkOut) continue;
+    const schedEnd = shiftEndMap.get(rec.employeeId);
+    if (!schedEnd) continue;
+
+    const otMin = Math.round(
+      (rec.checkOut.getTime() - schedEnd.getTime()) / 60000
+    );
+
+    if (otMin > 0 && otMin <= 720) {
+      await prisma.overtimeApproval.upsert({
+        where: {
+          employeeId_date: { employeeId: rec.employeeId, date: yesterday },
+        },
+        create: {
+          employeeId: rec.employeeId,
+          date: yesterday,
+          minutes: otMin,
+          scheduledEnd: schedEnd,
+          checkOut: rec.checkOut,
+          status: 'PENDING',
+        },
+        update: {
+          minutes: otMin,
+          scheduledEnd: schedEnd,
+          checkOut: rec.checkOut,
+        },
+      });
+    }
+  }
+
+  console.log('✅ Biometric sync completed');
+}
+async function notifyMissingCheckins() {
+  const now = new Date();
+  const today = startOfDay(now);
+
+  const shifts = await prisma.shiftAssignment.findMany({
+    where: { date: today },
+    include: { shift: true, employee: true },
+  });
+
+  const pending: {
+    employeeId: number;
+    name: string;
+    shiftStart: Date;
+  }[] = [];
+
+  for (const s of shifts) {
+    if (!s.shift) continue;
+
+    const shiftStart = combineShiftStart(today, s.shift.startTime);
+
+    // Only after shift start + grace (say 15 min)
+    if (now.getTime() < shiftStart.getTime() + 15 * 60000) continue;
+
+    const att = await prisma.attendance.findUnique({
+      where: {
+        employeeId_date: {
+          employeeId: s.employeeId,
+          date: today,
+        },
+      },
+    });
+
+    if (!att?.checkIn) {
+      pending.push({
+        employeeId: s.employeeId,
+        name: `${s.employee.firstName} ${s.employee.lastName}`,
+        shiftStart,
+      });
+    }
+  }
+
+  if (!pending.length) return;
+
+  await notifyHR(pending);
+}
+async function notifyHR(pending: any[]) {
+  const message =
+    `Employees not checked-in yet:\n\n` +
+    pending
+      .map(
+        p =>
+          `• ${p.name} (Shift start: ${p.shiftStart.toLocaleTimeString()})`
+      )
+      .join('\n');
+
+  await prisma.notification.create({
+    data: {
+      message,
+      channel: 'EMAIL',
+    },
+  });
 }

@@ -747,18 +747,43 @@ export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
         console.log(fileUrl);
         fs.unlinkSync(tempFilePath); // cleanup temp file
 
-        // Save in DB
-        const savedDoc = await prisma.document.create({
-          data: {
+        // // Save in DB
+        // const savedDoc = await prisma.document.create({
+        //   data: {
+        //     employeeId: Number(employeeId),
+        //     title: metadata[i].title || metadata[i].type,
+        //     type: metadata[i].type,
+        //     category: metadata[i].category,
+        //     issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+        //     expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+        //     fileUrl: fileUrl
+        //   }
+        // });
+        const savedDoc = await prisma.document.upsert({
+          where: {
+            employeeId_type: {
+              employeeId: Number(employeeId),
+              type: metadata[i].type,
+            },
+          },
+          create: {
             employeeId: Number(employeeId),
             title: metadata[i].title || metadata[i].type,
             type: metadata[i].type,
             category: metadata[i].category,
             issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
             expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
-            fileUrl: fileUrl
-          }
+            fileUrl,
+          },
+          update: {
+            title: metadata[i].title || metadata[i].type,
+            category: metadata[i].category,
+            issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+            expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+            fileUrl,
+          },
         });
+        
 
         uploadedDocs.push(savedDoc);
       }

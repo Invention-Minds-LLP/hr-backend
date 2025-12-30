@@ -71,6 +71,7 @@ export const createUser = async (req: Request, res: Response) => {
 
 // LOGIN USER
 export const loginUser = async (req: Request, res: Response) => {
+  console.log("Login attempt:", req.body);
   const ipAddress = getClientIp(req);
   const userAgent = req.headers["user-agent"] || undefined;
   try {
