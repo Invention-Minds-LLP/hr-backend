@@ -155,7 +155,7 @@ async function fetchAttendanceDaily(date: Date) {
 
   const res = await axios.get(url, {
     auth: { username: COSEC_USERNAME, password: COSEC_PASSWORD },
-    timeout: 120000,
+    timeout: 300000,
   });
 
   return res.data['attendance-daily'] || [];
