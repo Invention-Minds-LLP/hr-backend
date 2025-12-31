@@ -413,73 +413,88 @@ export async function runBiometricSync(isFinalRun: boolean) {
 
   console.log('✅ Biometric sync completed');
 }
-async function notifyMissingCheckins() {
-  const now = new Date();
-  const today = startOfDay(now);
 
+async function notifyHRShiftSummary() {
+  const today = startOfDay(new Date());
+  const graceMinutes = 15;
+
+  // Find shifts that STARTED before this run
   const shifts = await prisma.shiftAssignment.findMany({
-    where: { date: today },
-    include: { shift: true, employee: true },
+    where: {
+      date: today,
+    },
+    include: {
+      shift: true,
+    },
   });
-
-  const pending: {
-    employeeId: number;
-    name: string;
-    shiftStart: Date;
-  }[] = [];
 
   for (const s of shifts) {
     if (!s.shift) continue;
 
     const shiftStart = combineShiftStart(today, s.shift.startTime);
+    const lateAfter = new Date(
+      shiftStart.getTime() + graceMinutes * 60000
+    );
 
-    // Only after shift start + grace (say 15 min)
-    if (now.getTime() < shiftStart.getTime() + 15 * 60000) continue;
+    // 🔑 Only evaluate shifts relevant to THIS RUN
+    if (new Date < lateAfter) continue;
 
-    const att = await prisma.attendance.findUnique({
+    const totalEmployees = await prisma.shiftAssignment.count({
       where: {
-        employeeId_date: {
-          employeeId: s.employeeId,
-          date: today,
-        },
+        date: today,
+        shiftId: s.shiftId,
       },
     });
 
-    if (!att?.checkIn) {
-      pending.push({
-        employeeId: s.employeeId,
-        name: `${s.employee.firstName} ${s.employee.lastName}`,
-        shiftStart,
-      });
-    }
-  }
-
-  if (!pending.length) return;
-
-  await notifyHR(pending);
-}
-async function notifyHR(pending: any[]) {
-  const message =
-    `Employees not checked-in yet:\n\n` +
-    pending
-      .map(
-        p =>
-          `• ${p.name} (Shift start: ${p.shiftStart.toLocaleTimeString()})`
-      )
-      .join('\n');
-      const hrEmployees = await prisma.employee.findMany({
-        where: {
-          departmentId: 1   // ✅ HR department
+    const lateCount = await prisma.attendance.count({
+      where: {
+        date: today,
+        employeeId: {
+          in: (
+            await prisma.shiftAssignment.findMany({
+              where: { date: today, shiftId: s.shiftId },
+              select: { employeeId: true },
+            })
+          ).map(e => e.employeeId),
         },
-        select: { id: true }
-      });
-      
-    
-      for (const hr of hrEmployees) {
-        await createNotification(
-          hr.id,
-          message
-        );
-      }
+        OR: [
+          { checkIn: null },
+          { checkIn: { gt: lateAfter } },
+        ],
+      },
+    });
 
+    if (lateCount === 0) continue;
+
+    // 🔒 Prevent duplicate notification for same run + shift
+    const key = `${today.toISOString()}-${new Date().getHours()}-${s.shiftId}`;
+
+    const exists = await prisma.attendanceNotificationLog.findUnique({
+      where: { uniqueKey: key },
+    });
+    if (exists) continue;
+
+    const message =
+      `Attendance Update (${shiftStart.toLocaleTimeString()} shift):\n` +
+      `${lateCount} of ${totalEmployees} employee(s) late or missing check-in.`;
+
+    const hrEmployees = await prisma.employee.findMany({
+      where: { departmentId: 1 },
+      select: { id: true },
+    });
+
+    for (const hr of hrEmployees) {
+      await createNotification(hr.id, message);
+    }
+
+    await prisma.attendanceNotificationLog.create({
+      data: {
+        uniqueKey: key,
+        date: today,
+        shiftId: s.shiftId,
+        runAt: new Date(),
+        lateCount,
+      },
+    });
+  }
 }

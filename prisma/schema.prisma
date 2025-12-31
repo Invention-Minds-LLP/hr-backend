@@ -1533,6 +1533,15 @@ model RefreshToken {
 
   @@index([userId])
 }
+model AttendanceNotificationLog {
+  id        Int      @id @default(autoincrement())
+  uniqueKey String   @unique
+  date      DateTime
+  shiftId   Int
+  runAt     DateTime
+  lateCount Int
+  createdAt DateTime @default(now())
+}
 
 enum Gender {
   MALE
