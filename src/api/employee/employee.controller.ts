@@ -1831,7 +1831,7 @@ export async function mapExcelRowToEmployee(
         referenceCode: row.referenceCode || null,
         firstName: row.firstName,
         lastName: row.lastName,
-        gender: row.gender,
+        gender: normalizeGender(row.gender),
 
         dob,
         dateOfJoining: doj,
@@ -1839,8 +1839,8 @@ export async function mapExcelRowToEmployee(
         phone: String(row.phone),
         email: String(row.email),
 
-        employmentType: row.employmentType,
-        employmentStatus: row.employmentStatus,
+        employmentType: normalizeEmploymentType(row.employmentType),
+        employmentStatus: normalizeEmploymentStatus(row.employmentStatus),
         employeeType: row.employeeType || "CLINICAL",
 
         reportingManager: manager ? manager.id : null,
@@ -2150,3 +2150,40 @@ export const getBulkUploadProgress = (req: Request, res: Response) => {
   if (!progress) return res.status(404).json({ error: "Invalid uploadId" });
   res.json(progress);
 };
+function normalizeGender(value: any): "MALE" | "FEMALE" | "OTHER" {
+  if (!value) throw new Error("Gender is required");
+
+  const v = String(value)
+    .replace(/\u00A0/g, " ")   // remove non-breaking spaces
+    .trim()
+    .toUpperCase();
+
+  switch (v) {
+    case "MALE":
+    case "M":
+      return "MALE";
+    case "FEMALE":
+    case "F":
+      return "FEMALE";
+    case "OTHER":
+    case "O":
+      return "OTHER";
+    default:
+      throw new Error(`Invalid gender value: "${value}"`);
+  }
+}
+function normalizeEmploymentType(value: any) {
+  const v = String(value).trim().toUpperCase();
+  if (!["PERMANENT", "CONTRACT", "PROBATION"].includes(v)) {
+    throw new Error(`Invalid employmentType: "${value}"`);
+  }
+  return v as any;
+}
+
+function normalizeEmploymentStatus(value: any) {
+  const v = String(value).trim().toUpperCase();
+  if (!["ACTIVE", "TERMINATED", "SUSPENDED", "NOTICE_PERIOD", "RESIGNED"].includes(v)) {
+    throw new Error(`Invalid employmentStatus: "${value}"`);
+  }
+  return v as any;
+}
