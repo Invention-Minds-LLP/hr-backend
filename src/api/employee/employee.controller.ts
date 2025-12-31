@@ -1849,6 +1849,7 @@ export async function mapExcelRowToEmployee(
         Branch: { connect: { id: branch.id } },
         role: { connect: { id: role.id } },
         designation: { connect: { id: designation.id } },
+        bloodGroup: 'O+',
   };
 }
 
