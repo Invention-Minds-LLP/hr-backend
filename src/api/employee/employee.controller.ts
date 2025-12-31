@@ -2073,14 +2073,7 @@ export const bulkUploadEmployees = async (req: Request, res: Response) => {
           createOps.push(
             prisma.employee.create({
               data: {
-                ...mapped,
-                EmployeeShiftSetting: {
-                  create: {
-                    mode: "FIXED",
-                    fixedShiftId: 6,
-                    startDate: new Date()
-                  }
-                }
+                ...mapped
               }
             })
           );
