@@ -1826,6 +1826,12 @@ export async function mapExcelRowToEmployee(
 
   if (!dob || !doj) throw new Error("Invalid DOB or Date of Joining");
 
+  console.log("Mapped Employee:", {
+  gender: normalizeGender(row.gender),
+  employmentType: normalizeEmploymentType(row.employmentType),
+  employmentStatus: normalizeEmploymentStatus(row.employmentStatus),
+  });
+
   return {
     employeeCode: normalizeCode(row.employeeCode),
         referenceCode: row.referenceCode || null,
