@@ -1347,8 +1347,8 @@ export class DashboardController {
                 l.employee.employeeCode || '—',
                 l.employee.Department?.name || '—',
                 l.employee.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
-                fmtTime(l.scheduledIn),
-                fmtTime(l.actualIn),
+                fmtTime(l.shiftStart),
+                fmtTime(l.checkIn),
                 `${l.lateMinutes}`,
             ]);
 
