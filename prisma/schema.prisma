@@ -1588,6 +1588,11 @@ enum ShiftType {
   EVENING
   NIGHT
   FLEXIBLE
+
+  NURSING
+  EXECUTIVE
+  REPORTING_MANAGER
+  MOD
 }
 
 enum BagCheckResult {

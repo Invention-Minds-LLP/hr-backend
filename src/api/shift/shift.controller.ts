@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { PrismaClient, ShiftAssignMode } from "@prisma/client";
 import cron from 'node-cron';
+import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 
 const prisma = new PrismaClient();
 
@@ -366,17 +367,54 @@ export const addRotationItemsBulk = async (req: Request, res: Response) => {
 
 // -------- Assign rotational to employee
 
+// export const assignRotational = async (req: Request, res: Response) => {
+//   try {
+//     const { employeeId, patternId, startDate } = req.body as {
+//       employeeId: number;
+//       patternId: number;
+//       startDate?: string;
+//     };
+
+//     const start = startDate ? new Date(startDate) : new Date();
+
+//     // Upsert EmployeeShiftSetting (employeeId is unique)
+//     await prisma.employeeShiftSetting.upsert({
+//       where: { employeeId },
+//       update: {
+//         mode: 'ROTATIONAL',
+//         rotationPatternId: patternId,
+//         fixedShiftId: null,
+//         startDate: start
+//       },
+//       create: {
+//         employeeId,
+//         mode: 'ROTATIONAL',
+//         rotationPatternId: patternId,
+//         startDate: start
+//       }
+//     });
+
+//     // Generate next 30 days of assignments
+//     // await generateAssignmentsForWindow(employeeId, start, 30);
+
+//     res.json({ ok: true });
+//   } catch (e: any) {
+//     console.error(e);
+//     res.status(500).json({ error: e?.message || 'Failed to assign rotational' });
+//   }
+// };
+
 export const assignRotational = async (req: Request, res: Response) => {
   try {
-    const { employeeId, patternId, startDate } = req.body as {
-      employeeId: number;
-      patternId: number;
-      startDate?: string;
-    };
-
+    const { employeeId, patternId, startDate } = req.body;
     const start = startDate ? new Date(startDate) : new Date();
 
-    // Upsert EmployeeShiftSetting (employeeId is unique)
+    // Get previous setting
+    const previous = await prisma.employeeShiftSetting.findUnique({
+      where: { employeeId }
+    });
+
+    // Update setting
     await prisma.employeeShiftSetting.upsert({
       where: { employeeId },
       update: {
@@ -393,15 +431,24 @@ export const assignRotational = async (req: Request, res: Response) => {
       }
     });
 
-    // Generate next 30 days of assignments
-    await generateAssignmentsForWindow(employeeId, start, 30);
+    // 🔥 IMPORTANT PART
+    // If switching from FIXED → ROTATIONAL
+    if (previous?.mode === 'FIXED') {
+      await prisma.shiftAssignment.deleteMany({
+        where: {
+          employeeId,
+          date: { gte: startOfDay(start) }
+        }
+      });
+    }
 
     res.json({ ok: true });
   } catch (e: any) {
     console.error(e);
-    res.status(500).json({ error: e?.message || 'Failed to assign rotational' });
+    res.status(500).json({ error: e.message });
   }
 };
+
 
 // -------- (Optional) templates
 
@@ -528,3 +575,209 @@ export async function getRotationalShiftId(
 
   return item.shiftId;
 }
+export const listEmployeeShifts = async (req: Request, res: Response) => {
+  const { employeeId, from, to } = req.query;
+
+  const where: any = {};
+
+  if (employeeId) where.employeeId = Number(employeeId);
+  if (from && to) {
+    where.date = {
+      gte: new Date(from as string),
+      lte: new Date(to as string),
+    };
+  }
+
+  const shifts = await prisma.shiftAssignment.findMany({
+    where,
+    orderBy: { date: 'desc' },
+    select: {
+      id: true,
+      date: true,
+
+      shift: {
+        select: {
+          id: true,
+          name: true,
+          startTime: true,
+          endTime: true,
+        },
+      },
+
+      employee: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          employeeCode: true,
+          phone: true,
+          employmentType: true,
+
+          Department: {
+            select: {
+              name: true,
+            },
+          },
+
+          designation: {
+            select: {
+              name: true,
+            },
+          },
+
+          EmployeeShiftSetting: {
+            select: {
+              mode: true,
+              fixedShiftId: true,
+              rotationPatternId: true,
+              startDate: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  res.json(shifts);
+};
+
+export const updateEmployeeShift = async (req: Request, res: Response) => {
+  const { assignmentId } = req.params;
+  const { shiftId } = req.body;
+
+  const updated = await prisma.shiftAssignment.update({
+    where: { id: Number(assignmentId) },
+    data: {
+      shiftId,
+    }
+  });
+
+  res.json(updated);
+};
+export const assignFixed = async (req: Request, res: Response) => {
+  try {
+    const { employeeId, shiftId, startDate } = req.body;
+    const start = startDate ? new Date(startDate) : new Date();
+
+    const previous = await prisma.employeeShiftSetting.findUnique({
+      where: { employeeId }
+    });
+
+    await prisma.employeeShiftSetting.upsert({
+      where: { employeeId },
+      update: {
+        mode: 'FIXED',
+        fixedShiftId: shiftId,
+        rotationPatternId: null,
+        startDate: start
+      },
+      create: {
+        employeeId,
+        mode: 'FIXED',
+        fixedShiftId: shiftId,
+        startDate: start
+      }
+    });
+
+    // 🔥 If switching from ROTATIONAL → FIXED
+    if (previous?.mode === 'ROTATIONAL') {
+      await prisma.shiftAssignment.deleteMany({
+        where: {
+          employeeId,
+          date: { gte: startOfDay(start) }
+        }
+      });
+    }
+
+    res.json({ ok: true });
+  } catch (e: any) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+};
+
+
+export const getManagerEmployees = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const managerId = req.user.empId;
+    console.log(req.user)
+    console.log('getManagerEmployees for managerId:', managerId);
+
+    const employees = await prisma.employee.findMany({
+      where: {
+        reportingManager: managerId,
+        employmentStatus: 'ACTIVE'
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        employeeCode: true,
+        phone: true,
+        employmentType: true,
+
+        Department: {
+          select: {
+            name: true
+          }
+        },
+
+        designation: {
+          select: {
+            name: true
+          }
+        },
+
+        EmployeeShiftSetting: {
+          select: {
+            mode: true,
+            fixedShiftId: true,
+            rotationPatternId: true,
+            startDate: true
+          }
+        }
+      }
+    });
+
+    res.json(employees);
+  } catch (error) {
+    console.error('getManagerEmployees error:', error);
+    res.status(500).json({ error: 'Failed to fetch manager employees' });
+  }
+};
+
+export const getManagerShiftTemplates = async (req: Request, res: Response) => {
+  const shifts = await prisma.shiftTemplate.findMany({
+    where: {
+      shiftType: 'EXECUTIVE'
+    },
+    orderBy: { name: 'asc' }
+  });
+
+  res.json(shifts);
+};
+export const listManagerPatterns = async (req: Request, res: Response) => {
+  const patterns = await prisma.shiftRotationPattern.findMany({
+    where: {
+      isActive: true,
+      items: {
+        every: {
+          shift: {
+            shiftType: 'EXECUTIVE'
+          }
+        }
+      }
+    },
+    include: {
+      items: {
+        orderBy: { dayIndex: 'asc' },
+        include: { shift: true }
+      }
+    }
+  });
+
+  res.json(patterns);
+};
