@@ -2193,3 +2193,130 @@ function normalizeEmploymentStatus(value: any) {
   }
   return v as any;
 }
+// export const bulkUpdateReportingManager = async (req: Request, res: Response) => {
+//   const form = formidable({ multiples: false });
+
+//   form.parse(req, async (err, fields, files) => {
+//     if (err) return res.status(500).json({ error: "File parse error" });
+
+//     const file = Array.isArray(files.file) ? files.file[0] : files.file;
+//     if (!file) return res.status(400).json({ error: "No file uploaded" });
+
+//     const workbook = XLSX.readFile(file.filepath);
+//     const sheet = workbook.Sheets[workbook.SheetNames[0]];
+//     const rows = XLSX.utils.sheet_to_json(sheet) as any[];
+
+//     const errors: any[] = [];
+//     let updated = 0;
+
+//     for (let i = 0; i < rows.length; i++) {
+//       const empCode = normalizeCode(rows[i].employeeCode);
+//       const mgrCode = normalizeCode(rows[i].reportingManagerCode);
+
+//       try {
+//         if (!empCode || !mgrCode) {
+//           throw new Error("employeeCode and reportingManagerCode required");
+//         }
+
+//         const manager = await prisma.employee.findUnique({
+//           where: { employeeCode: mgrCode },
+//         });
+
+//         if (!manager) {
+//           throw new Error(`Manager not found: ${mgrCode}`);
+//         }
+
+//         await prisma.employee.update({
+//           where: { employeeCode: empCode },
+//           data: { reportingManager: manager.id },
+//         });
+
+//         updated++;
+//       } catch (e: any) {
+//         errors.push({
+//           row: i + 1,
+//           employeeCode: empCode,
+//           reportingManagerCode: mgrCode,
+//           error: e.message,
+//         });
+//       }
+//     }
+
+//     res.json({
+//       total: rows.length,
+//       updated,
+//       failed: errors.length,
+//       errors,
+//     });
+//   });
+// };
+export const bulkUpdateReportingManager = async (req: Request, res: Response) => {
+  const form = formidable({ multiples: false });
+
+  form.parse(req, async (err, fields, files) => {
+    if (err) return res.status(500).json({ error: "File parse error" });
+
+    const file = Array.isArray(files.file) ? files.file[0] : files.file;
+    if (!file) return res.status(400).json({ error: "No file uploaded" });
+
+    const workbook = XLSX.readFile(file.filepath);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet) as any[];
+
+    const errors: any[] = [];
+    let updated = 0;
+    let skipped = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const empCode = normalizeCode(rows[i].employeeCode);
+      const mgrCodeRaw = rows[i].reportingManagerCode;
+      const mgrCode = normalizeCode(mgrCodeRaw);
+
+      try {
+        if (!empCode) {
+          throw new Error("employeeCode is required");
+        }
+
+        // ✅ Skip if manager code is empty
+        if (!mgrCodeRaw || !mgrCode) {
+          skipped++;
+          continue;
+        }
+
+        if (empCode === mgrCode) {
+          throw new Error("Employee cannot be own manager");
+        }
+
+        const manager = await prisma.employee.findUnique({
+          where: { employeeCode: mgrCode },
+        });
+
+        if (!manager) {
+          throw new Error(`Manager not found: ${mgrCode}`);
+        }
+
+        await prisma.employee.update({
+          where: { employeeCode: empCode },
+          data: { reportingManager: manager.id },
+        });
+
+        updated++;
+      } catch (e: any) {
+        errors.push({
+          row: i + 1,
+          employeeCode: empCode,
+          reportingManagerCode: mgrCodeRaw,
+          error: e.message,
+        });
+      }
+    }
+
+    res.json({
+      totalRows: rows.length,
+      updated,
+      skipped, // 👈 important
+      failed: errors.length,
+      errors,
+    });
+  });
+};
