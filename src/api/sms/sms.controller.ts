@@ -8,25 +8,61 @@ interface SendOtpSmsParams {
   phoneNumber: string;
 }
 
+// export const sendOtpSms = async ({
+//   patientName,
+//   otp,
+//   service,
+//   phoneNumber,
+// }: SendOtpSmsParams) => {
+//   const apiKey = process.env.SMS_API_KEY;
+//   const apiUrl = process.env.SMS_API_URL;
+//   const sender = process.env.SMS_SENDER;
+//   const dltTemplateId = process.env.SMS_DLT_TE_ID_FOR_OTP;
+//   const dltEntityId = process.env.DLT_ENTITY_ID;
+
+//   const message = `Dear ${patientName}, ${otp} is your One Time Password from Rashtrotthana Hospital for ${service} service. Expires in 2 mins. Please do not share this OTP with anyone.`;
+
+//   const url = `${apiUrl}/${sender}/${phoneNumber}/${encodeURIComponent(
+//     message
+//   )}/TXT?apikey=${apiKey}&dltentityid=${dltEntityId}&dlttempid=${dltTemplateId}`;
+
+//   return axios.get(url);
+// };
+
+
 export const sendOtpSms = async ({
   patientName,
   otp,
   service,
   phoneNumber,
 }: SendOtpSmsParams) => {
-  const apiKey = process.env.SMS_API_KEY;
-  const apiUrl = process.env.SMS_API_URL;
-  const sender = process.env.SMS_SENDER;
-  const dltTemplateId = process.env.SMS_DLT_TE_ID_FOR_OTP;
-  const dltEntityId = process.env.DLT_ENTITY_ID;
+  try {
+    const apiKey = process.env.SMS_API_KEY;
+    const apiUrl = process.env.SMS_API_URL;
+    const sender = process.env.SMS_SENDER;
+    const dltTemplateId = process.env.SMS_DLT_TE_ID_FOR_OTP;
+    const dltEntityId = process.env.DLT_ENTITY_ID;
 
-  const message = `Dear ${patientName}, ${otp} is your One Time Password from Rashtrotthana Hospital for ${service} service. Expires in 2 mins. Please do not share this OTP with anyone.`;
+    const message = `Dear ${patientName}, ${otp} is your One Time Password from Rashtrotthana Hospital for ${service} service. Expires in 2 mins. Please do not share this OTP with anyone.`;
 
-  const url = `${apiUrl}/${sender}/${phoneNumber}/${encodeURIComponent(
-    message
-  )}/TXT?apikey=${apiKey}&dltentityid=${dltEntityId}&dlttempid=${dltTemplateId}`;
+    const url = `${apiUrl}/${sender}/${phoneNumber}/${encodeURIComponent(
+      message
+    )}/TXT?apikey=${apiKey}&dltentityid=${dltEntityId}&dlttempid=${dltTemplateId}`;
 
-  return axios.get(url);
+    const response = await axios.get(url);
+
+    return response;
+  } catch (error: any) {
+    console.error("❌ OTP SMS sending failed", {
+      phoneNumber,
+      service,
+      message: error?.message,
+      status: error?.response?.status,
+      data: error?.response?.data,
+    });
+
+    throw error; // rethrow so caller can handle it
+  }
 };
 
 

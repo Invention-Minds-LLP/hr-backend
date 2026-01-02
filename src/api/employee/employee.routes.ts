@@ -28,7 +28,7 @@ router.post("/", authenticateToken,createEmployee);
 router.get("/", authenticateToken,getEmployees);
 router.get("/by-departments", authenticateToken, getEmployeesByDepartments);
 router.get("/absent-without-leave", getUnreportedAbsentees);
-router.post('/bulk-upload',authenticateToken, bulkUpdateReportingManager);
+router.post('/bulk-upload',authenticateToken, bulkUploadEmployees);
 router.post('/:employeeId/documents/upload',authenticateToken, uploadEmployeeDocuments);
 router.post('/:employeeId/photo',authenticateToken, uploadEmployeePhoto)
 router.get("/specific-roles",authenticateToken, getSpecificRoles);
