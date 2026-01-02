@@ -50,6 +50,11 @@ export const sendOtpSms = async ({
     )}/TXT?apikey=${apiKey}&dltentityid=${dltEntityId}&dlttempid=${dltTemplateId}`;
 
     const response = await axios.get(url);
+    console.log("✅ OTP SMS sent successfully", {
+      phoneNumber,
+      service,
+      responseData: response.data,
+    });
 
     return response;
   } catch (error: any) {

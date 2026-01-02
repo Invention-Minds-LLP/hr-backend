@@ -18,12 +18,14 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     await otpService.generate(phone, otp);
 
-    await sendOtpSms({
+    const sms = await sendOtpSms({
         patientName: employee.firstName,
         otp,
         service: 'Mobile Login',
         phoneNumber: phone
     });
+
+    console.log('OTP SMS sent:', sms.data);
 
     const session = await prisma.mobileAuthSession.create({
         data: {
@@ -254,7 +256,7 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
             role: stored.user.role
         },
         process.env.JWT_SECRET!,
-        { expiresIn: '15m' }
+        { expiresIn: '12h' }
     );
 
     res.json({ accessToken });
