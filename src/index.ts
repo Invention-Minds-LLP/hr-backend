@@ -42,6 +42,7 @@ import { startSchedulers } from "./schedulers/scheduler";
 import designationRoutes from "./api/designation/designation.routes";
 import smsRoutes from "./api/sms/sms.routes";
 import mobileAuthRoutes from "./api/mobile-auth/mobile-auth.routes";
+import holidayRoutes from "./api/holidays/holidays.routes";
 
 
 
@@ -140,6 +141,7 @@ app.use('/api/incidents', incidentRouter);
 app.use("/api/designation", designationRoutes);
 app.use("/api/sms", smsRoutes);
 app.use("/api/auth", mobileAuthRoutes);
+app.use("/api/holidays", holidayRoutes);
 
 
 // Default route

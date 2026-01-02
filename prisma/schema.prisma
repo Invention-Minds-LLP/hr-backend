@@ -1543,6 +1543,36 @@ model AttendanceNotificationLog {
   createdAt DateTime @default(now())
 }
 
+model HolidayCalendar {
+  id        Int       @id @default(autoincrement())
+  year      Int
+  name      String    // e.g. "Institute Holiday Calendar 2026"
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @default(now()) @updatedAt
+
+  holidays  Holiday[]
+
+  @@unique([year])
+}
+
+model Holiday {
+  id          Int      @id @default(autoincrement())
+  calendarId  Int
+  title       String
+  date        DateTime
+  description String?
+  isOptional  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  calendar    HolidayCalendar @relation(fields: [calendarId], references: [id])
+
+  @@unique([calendarId, date])
+  @@index([date])
+}
+
+
 enum Gender {
   MALE
   FEMALE
