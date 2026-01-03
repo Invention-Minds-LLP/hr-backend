@@ -750,15 +750,35 @@ export const getManagerEmployees = async (
 };
 
 export const getManagerShiftTemplates = async (req: Request, res: Response) => {
+  const departmentId = Number(req.query.departmentId);
+  if (!departmentId) { 
+    return res.status(400).json({ message: 'departmentId is required' }); 
+  }
+
+  const shiftType = getShiftTypeByDepartment(departmentId);
+
   const shifts = await prisma.shiftTemplate.findMany({
     where: {
-      shiftType: 'EXECUTIVE'
+      shiftType: shiftType
     },
     orderBy: { name: 'asc' }
   });
 
   res.json(shifts);
 };
+const getShiftTypeByDepartment = (deptId: number) => {
+  switch (deptId) {
+    case 9:
+      return 'NURSING';
+    case 4:
+      return 'MOD';
+    case 1:
+      return 'REPORTING_MANAGER';
+    default:
+      return 'EXECUTIVE';
+  }
+};
+
 export const listManagerPatterns = async (req: Request, res: Response) => {
   const patterns = await prisma.shiftRotationPattern.findMany({
     where: {
@@ -774,7 +794,17 @@ export const listManagerPatterns = async (req: Request, res: Response) => {
     include: {
       items: {
         orderBy: { dayIndex: 'asc' },
-        include: { shift: true }
+        include: {
+          shift: {
+            select: {
+              id: true,
+              name: true,
+              shiftType: true,
+              startTime: true,
+              endTime: true
+            }
+          }
+        }
       }
     }
   });

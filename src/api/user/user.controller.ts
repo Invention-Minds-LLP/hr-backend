@@ -212,19 +212,33 @@ export const listAllUsers = async (_req: Request, res: Response) => {
   try {
     const users = await prisma.user.findMany({
       orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        employeeCode: true,
+        username: true,
+        role: true,
+        lastLogin: true,
+        createdAt: true,
+        updatedAt: true,
 
-      include: {
+        // ✅ employee details only
         employee: {
           select: {
             employeeCode: true,
             firstName: true,
             lastName: true,
             departmentId: true,
-            designation: true
+            designation: {
+              select: {
+                id: true,
+                name: true
+              }
+            }
           }
         }
-      }
 
+        // ❌ NOT returning: passwordHash, refreshTokens, loginHistory
+      }
     });
 
     res.json(users);
@@ -233,6 +247,7 @@ export const listAllUsers = async (_req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to fetch users" });
   }
 };
+
 
 export const setCandidatePassword = async (req: Request, res: Response) => {
   try {

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { PrismaClient } from '@prisma/client';
 import { createNotification } from '../notifications/notifications.controller';
+import { ShiftType } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
@@ -176,16 +177,16 @@ export async function runBiometricSync(isFinalRun: boolean) {
   //   select: { id: true, employeeCode: true },
   // });
   const employees = await prisma.employee.findMany({
-  where: {
-    employmentStatus: {
-      in: ['ACTIVE', 'NOTICE_PERIOD'],
+    where: {
+      employmentStatus: {
+        in: ['ACTIVE', 'NOTICE_PERIOD'],
+      },
     },
-  },
-  select: {
-    id: true,
-    employeeCode: true,
-  },
-});
+    select: {
+      id: true,
+      employeeCode: true,
+    },
+  });
 
 
   const empMap = new Map(employees.map(e => [e.employeeCode!, e.id]));
@@ -305,40 +306,254 @@ export async function runBiometricSync(isFinalRun: boolean) {
      PART 3: LATE LOGIN (TODAY)
   ====================================================== */
 
+  // const todayAttendance = await prisma.attendance.findMany({
+  //   where: { date: today },
+  //   select: { employeeId: true, checkIn: true },
+  // });
+
+  // const todayShifts = await prisma.shiftAssignment.findMany({
+  //   where: { date: today },
+  //   include: { shift: true },
+  // });
+
+  // const shiftStartMap = new Map<number, Date>();
+  // for (const s of todayShifts) {
+  //   if (!s.shift) continue;
+  //   shiftStartMap.set(
+  //     s.employeeId,
+  //     combineShiftStart(today, s.shift.startTime)
+  //   );
+  // }
+
+  // for (const rec of todayAttendance) {
+  //   if (!rec.checkIn) continue;
+
+  //   const shiftStart = shiftStartMap.get(rec.employeeId);
+  //   console.log(`Employee ID: ${rec.employeeId} | Shift Start: ${shiftStart} | Check-In: ${rec.checkIn}`);
+  //   if (!shiftStart) continue;
+
+  //   const lateMin = Math.round(
+  //     (rec.checkIn.getTime() - shiftStart.getTime()) / 60000
+  //   );
+
+  //   if (lateMin > 15) {
+  //     await prisma.lateLoginLog.upsert({
+  //       where: {
+  //         employeeId_date: { employeeId: rec.employeeId, date: today },
+  //       },
+  //       create: {
+  //         employeeId: rec.employeeId,
+  //         date: today,
+  //         shiftStart,
+  //         checkIn: rec.checkIn,
+  //         lateMinutes: lateMin,
+  //         source: 'BIOMETRIC',
+  //       },
+  //       update: {
+  //         shiftStart,
+  //         checkIn: rec.checkIn,
+  //         lateMinutes: lateMin,
+  //       },
+  //     });
+  //   }
+  // }
+
+  /* ======================================================
+     PART 4: OVERTIME (YESTERDAY)
+  ====================================================== */
+
+  // const yAttendance = await prisma.attendance.findMany({
+  //   where: { date: yesterday },
+  //   select: { employeeId: true, checkOut: true },
+  // });
+
+  // const yShifts = await prisma.shiftAssignment.findMany({
+  //   where: { date: yesterday },
+  //   include: { shift: true },
+  // });
+
+  // const shiftEndMap = new Map<number, Date>();
+  // for (const s of yShifts) {
+  //   if (!s.shift) continue;
+  //   shiftEndMap.set(
+  //     s.employeeId,
+  //     combineShiftEnd(yesterday, s.shift.startTime, s.shift.endTime)
+  //   );
+  // }
+
+  // for (const rec of yAttendance) {
+  //   if (!rec.checkOut) continue;
+  //   const schedEnd = shiftEndMap.get(rec.employeeId);
+  //   if (!schedEnd) continue;
+
+  //   const otMin = Math.round(
+  //     (rec.checkOut.getTime() - schedEnd.getTime()) / 60000
+  //   );
+
+  //   if (otMin > 0 && otMin <= 720) {
+  //     await prisma.overtimeApproval.upsert({
+  //       where: {
+  //         employeeId_date: { employeeId: rec.employeeId, date: yesterday },
+  //       },
+  //       create: {
+  //         employeeId: rec.employeeId,
+  //         date: yesterday,
+  //         minutes: otMin,
+  //         scheduledEnd: schedEnd,
+  //         checkOut: rec.checkOut,
+  //         status: 'PENDING',
+  //       },
+  //       update: {
+  //         minutes: otMin,
+  //         scheduledEnd: schedEnd,
+  //         checkOut: rec.checkOut,
+  //       },
+  //     });
+  //   }
+  // }
+
+
+  const allShifts = await prisma.shiftTemplate.findMany({
+    select: {
+      id: true,
+      shiftType: true,
+      startTime: true,
+      endTime: true,
+    },
+  });
+
+  const shiftsByType = new Map<ShiftType, typeof allShifts>();
+
+  for (const s of allShifts) {
+    if (!shiftsByType.has(s.shiftType)) {
+      shiftsByType.set(s.shiftType, []);
+    }
+    shiftsByType.get(s.shiftType)!.push(s);
+  }
+  const getShiftTypeByRoleAndDepartment = (
+    roleId: number,
+    departmentId: number
+  ): ShiftType => {
+    // 🎯 Role-based logic
+    if (roleId === 1 || roleId === 3) {
+      return 'REPORTING_MANAGER';
+    }
+    // 🔥 Department overrides (TOP PRIORITY)
+    if (departmentId === 3) {
+      return 'NURSING';
+    }
+
+    if (departmentId === 4) {
+      return 'MOD';
+    }
+
+    if (roleId === 2) {
+      return 'EXECUTIVE';
+    }
+
+    // 🧯 Default fallback
+    return 'EXECUTIVE';
+  };
+
+
+
+
+  const findNearestShiftStart = (
+    date: Date,
+    checkIn: Date,
+    shifts: { startTime: Date }[]
+  ): Date | null => {
+    let nearest: Date | null = null;
+    let minDiff = Infinity;
+
+    for (const s of shifts) {
+      const shiftStart = combineShiftStart(date, s.startTime);
+      const diff = Math.abs(checkIn.getTime() - shiftStart.getTime());
+
+      if (diff < minDiff) {
+        minDiff = diff;
+        nearest = shiftStart;
+      }
+    }
+
+    return nearest;
+  };
+
+  const findNearestShiftEnd = (
+    date: Date,
+    checkOut: Date,
+    shifts: { startTime: Date; endTime: Date }[]
+  ): Date | null => {
+    let nearest: Date | null = null;
+    let minDiff = Infinity;
+
+    for (const s of shifts) {
+      const shiftEnd = combineShiftEnd(date, s.startTime, s.endTime);
+      const diff = Math.abs(checkOut.getTime() - shiftEnd.getTime());
+
+      if (diff < minDiff) {
+        minDiff = diff;
+        nearest = shiftEnd;
+      }
+    }
+
+    return nearest;
+  };
+
+  /* ======================================================
+       PART 1: LATE LOGIN (TODAY) – TEMP DEPT BASED
+    ====================================================== */
+
   const todayAttendance = await prisma.attendance.findMany({
     where: { date: today },
-    select: { employeeId: true, checkIn: true },
+    include: {
+      employee: {
+        select: {
+          id: true,
+          departmentId: true,
+          roleId: true,
+        },
+      },
+    },
   });
-
-  const todayShifts = await prisma.shiftAssignment.findMany({
-    where: { date: today },
-    include: { shift: true },
-  });
-
-  const shiftStartMap = new Map<number, Date>();
-  for (const s of todayShifts) {
-    if (!s.shift) continue;
-    shiftStartMap.set(
-      s.employeeId,
-      combineShiftStart(today, s.shift.startTime)
-    );
-  }
 
   for (const rec of todayAttendance) {
     if (!rec.checkIn) continue;
 
-    const shiftStart = shiftStartMap.get(rec.employeeId);
-    console.log(`Employee ID: ${rec.employeeId} | Shift Start: ${shiftStart} | Check-In: ${rec.checkIn}`);
+    const shiftType = getShiftTypeByRoleAndDepartment(
+      rec.employee.roleId,
+      rec.employee.departmentId
+    );
+    console.log(`Employee ID: ${rec.employeeId} | Dept ID: ${rec.employee.departmentId} | Shift Type: ${shiftType}`);
+
+    const shifts = shiftsByType.get(shiftType);
+    console.log(`  Found ${shifts?.length || 0} shifts for type ${shiftType}`);
+    if (!shifts || shifts.length === 0) continue;
+
+    const shiftStart = findNearestShiftStart(
+      today,
+      rec.checkIn,
+      shifts
+    );
+    console.log(`  Shift Start: ${shiftStart} | Check-In: ${rec.checkIn}`);
     if (!shiftStart) continue;
+
+
+    console.log(`  Shift Start: ${shiftStart} | Check-In: ${rec.checkIn}`);
 
     const lateMin = Math.round(
       (rec.checkIn.getTime() - shiftStart.getTime()) / 60000
     );
 
+    console.log(`  Late Minutes: ${lateMin}`);
+
     if (lateMin > 15) {
       await prisma.lateLoginLog.upsert({
         where: {
-          employeeId_date: { employeeId: rec.employeeId, date: today },
+          employeeId_date: {
+            employeeId: rec.employeeId,
+            date: today,
+          },
         },
         create: {
           employeeId: rec.employeeId,
@@ -346,7 +561,7 @@ export async function runBiometricSync(isFinalRun: boolean) {
           shiftStart,
           checkIn: rec.checkIn,
           lateMinutes: lateMin,
-          source: 'BIOMETRIC',
+          source: 'TEMP_DEPT_SHIFT',
         },
         update: {
           shiftStart,
@@ -358,31 +573,42 @@ export async function runBiometricSync(isFinalRun: boolean) {
   }
 
   /* ======================================================
-     PART 4: OVERTIME (YESTERDAY)
+     PART 2: OVERTIME (YESTERDAY) – TEMP DEPT BASED
   ====================================================== */
 
   const yAttendance = await prisma.attendance.findMany({
     where: { date: yesterday },
-    select: { employeeId: true, checkOut: true },
+    include: {
+      employee: {
+        select: {
+          id: true,
+          departmentId: true,
+          roleId: true,
+        },
+      },
+    },
   });
-
-  const yShifts = await prisma.shiftAssignment.findMany({
-    where: { date: yesterday },
-    include: { shift: true },
-  });
-
-  const shiftEndMap = new Map<number, Date>();
-  for (const s of yShifts) {
-    if (!s.shift) continue;
-    shiftEndMap.set(
-      s.employeeId,
-      combineShiftEnd(yesterday, s.shift.startTime, s.shift.endTime)
-    );
-  }
 
   for (const rec of yAttendance) {
     if (!rec.checkOut) continue;
-    const schedEnd = shiftEndMap.get(rec.employeeId);
+
+    const shiftType = getShiftTypeByRoleAndDepartment(
+      rec.employee.roleId,
+      rec.employee.departmentId
+    );
+
+    const shifts = shiftsByType.get(shiftType);
+    if (!shifts || shifts.length === 0) continue;
+
+    const schedEnd = findNearestShiftEnd(
+      yesterday,
+      rec.checkOut,
+      shifts
+    );
+
+    console.log(`Employee ID: ${rec.employeeId} | Dept ID: ${rec.employee.departmentId} | Shift Type: ${shiftType}`);
+    console.log(`  Scheduled End: ${schedEnd} | Check-Out: ${rec.checkOut}`);
+
     if (!schedEnd) continue;
 
     const otMin = Math.round(
@@ -392,7 +618,10 @@ export async function runBiometricSync(isFinalRun: boolean) {
     if (otMin > 0 && otMin <= 720) {
       await prisma.overtimeApproval.upsert({
         where: {
-          employeeId_date: { employeeId: rec.employeeId, date: yesterday },
+          employeeId_date: {
+            employeeId: rec.employeeId,
+            date: yesterday,
+          },
         },
         create: {
           employeeId: rec.employeeId,
@@ -409,11 +638,14 @@ export async function runBiometricSync(isFinalRun: boolean) {
         },
       });
     }
+
+
+  
   }
-
   console.log('✅ Biometric sync completed');
-}
 
+
+}
 async function notifyHRShiftSummary() {
   const today = startOfDay(new Date());
   const graceMinutes = 15;
