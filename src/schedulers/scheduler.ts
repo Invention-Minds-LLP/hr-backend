@@ -16,7 +16,7 @@ export function startSchedulers() {
 }
 const schedules = [
   // 00
-  '* * * * *',
+  // '* * * * *',
   // 06
   '02 6 * * *',
   '20 6 * * *',
