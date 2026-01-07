@@ -12,7 +12,7 @@ export function startSchedulers() {
   initLeaveEndSchedular();
   initQuarterlyAppraisalScheduler();
   startShiftCron();
-  startAttendanceScheduler();
+  // startAttendanceScheduler();
 }
 const schedules = [
   // 00

@@ -80,7 +80,8 @@ export const createEmployee = async (req: Request, res: Response) => {
       rotationPatternId,    // optional
       rotationStartDate,     // optional
       employeeType,
-      sameAsPermanent
+      sameAsPermanent,
+      inchargeId
     } = req.body;
     const data = req.body;
     let finalCode = employeeCode;
@@ -114,6 +115,7 @@ export const createEmployee = async (req: Request, res: Response) => {
           bloodGroup,
           age,
           reportingManager,
+
           employeeType,
           sameAsPermanent,
           // Health & Wellness fields
@@ -151,6 +153,10 @@ export const createEmployee = async (req: Request, res: Response) => {
           Branch: { connect: { id: branchId } },
           role: { connect: { id: roleId } },
           designation: { connect: { id: designationId } },
+          incharge: inchargeId
+            ? { connect: { id: Number(inchargeId) } }
+            : undefined,
+
           Address: {
             create: addresses?.map((a: any) => ({
               type: a.type,
@@ -530,6 +536,8 @@ export const updateEmployee = async (req: Request, res: Response) => {
       dob,
       dateOfJoining,
       probationEndDate,
+      inchargeId,
+      preEmploymentCheckDate,
       ...employeeFields
     } = data;
 
@@ -545,7 +553,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
       data: {
         ...employeeFields,
         // Health & Wellness fields
-        preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
+        preEmploymentCheckDate: preEmploymentCheckDate ? new Date(preEmploymentCheckDate) : null,
         height: data.height ? parseFloat(data.height) : null,
         weight: data.weight ? parseFloat(data.weight) : null,
         bmi: data.bmi ? parseFloat(data.bmi) : null,
@@ -582,6 +590,9 @@ export const updateEmployee = async (req: Request, res: Response) => {
         Branch: { connect: { id: branchId } },
         role: { connect: { id: roleId } },
         designation: { connect: { id: designationId } },
+        incharge: inchargeId
+          ? { connect: { id: Number(inchargeId) } }
+          : { disconnect: true },
         Address: {
           deleteMany: {},
           create: addresses?.map((a: any) => ({
@@ -783,7 +794,7 @@ export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
             fileUrl,
           },
         });
-        
+
 
         uploadedDocs.push(savedDoc);
       }
@@ -1827,35 +1838,35 @@ export async function mapExcelRowToEmployee(
   if (!dob || !doj) throw new Error("Invalid DOB or Date of Joining");
 
   console.log("Mapped Employee:", {
-  gender: normalizeGender(row.gender),
-  employmentType: normalizeEmploymentType(row.employmentType),
-  employmentStatus: normalizeEmploymentStatus(row.employmentStatus),
+    gender: normalizeGender(row.gender),
+    employmentType: normalizeEmploymentType(row.employmentType),
+    employmentStatus: normalizeEmploymentStatus(row.employmentStatus),
   });
 
   return {
     employeeCode: normalizeCode(row.employeeCode),
-        referenceCode: row.referenceCode || null,
-        firstName: row.firstName,
-        lastName: row.lastName,
-        gender: normalizeGender(row.gender),
+    referenceCode: row.referenceCode || null,
+    firstName: row.firstName,
+    lastName: row.lastName,
+    gender: normalizeGender(row.gender),
 
-        dob,
-        dateOfJoining: doj,
+    dob,
+    dateOfJoining: doj,
 
-        phone: String(row.phone),
-        email: String(row.email),
+    phone: String(row.phone),
+    email: String(row.email),
 
-        employmentType: normalizeEmploymentType(row.employmentType),
-        employmentStatus: normalizeEmploymentStatus(row.employmentStatus),
-        employeeType: row.employeeType || "CLINICAL",
+    employmentType: normalizeEmploymentType(row.employmentType),
+    employmentStatus: normalizeEmploymentStatus(row.employmentStatus),
+    employeeType: row.employeeType || "CLINICAL",
 
-        reportingManager: manager ? manager.id : null,
+    reportingManager: manager ? manager.id : null,
 
-        Department: { connect: { id: dept.id } },
-        Branch: { connect: { id: branch.id } },
-        role: { connect: { id: role.id } },
-        designation: { connect: { id: designation.id } },
-        bloodGroup: 'O+',
+    Department: { connect: { id: dept.id } },
+    Branch: { connect: { id: branch.id } },
+    role: { connect: { id: role.id } },
+    designation: { connect: { id: designation.id } },
+    bloodGroup: 'O+',
   };
 }
 
@@ -2084,7 +2095,7 @@ export const bulkUploadEmployees = async (req: Request, res: Response) => {
               }
             })
           );
-          
+
           logs.push(`Row ${i + 1}: SUCCESS (${employeeCode})`);
         } catch (error: any) {
           errorRows.push({
@@ -2319,4 +2330,31 @@ export const bulkUpdateReportingManager = async (req: Request, res: Response) =>
       errors,
     });
   });
+};
+// controllers/employee.controller.ts
+export const getInchargeEmployees = async (req: Request, res: Response) => {
+  try {
+    const incharges = await prisma.employee.findMany({
+      where: {
+        roleId: 5,              // ✅ INCHARGE
+        employmentStatus: 'ACTIVE'
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        employeeCode: true
+      }
+    });
+
+    res.json(
+      incharges.map(e => ({
+        label: `${e.firstName} ${e.lastName} (${e.employeeCode})`,
+        value: e.id
+      }))
+    );
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch incharge employees' });
+  }
 };

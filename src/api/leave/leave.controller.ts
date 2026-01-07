@@ -112,27 +112,56 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
 export const getLeaveRequests = async (_req: Request, res: Response) => {
   try {
     const leaves = await prisma.leaveRequest.findMany({
-      where: {
-        status: "PENDING" // only approved leave requests
-      },
-      include: {
-        leaveType: true,
+      select: {
+        id: true,
+        status: true,
+        startDate: true,
+        endDate: true,
+        reason: true,
+        declineReason: true,
+        hodDecision: true,
+        hrDecision: true,
+        inChargeDecision: true,
+        createdAt: true,
+
+        leaveType: {
+          select: {
+            name: true,
+          },
+        },
+
         employee: {
-          include: {
-            Department: true,    // Gives departmentId + department name
-            role: true     ,
-            designation: true,      // Gives roleId + role name
-          }
-        }
+          select: {
+            id: true,
+            employeeCode: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            departmentId: true,
+            reportingManager: true,
+            inchargeId: true,
+            roleId: true,
+
+            designation: {
+              select: {
+                name: true,
+              },
+            },
+          },
+        },
       },
-      orderBy: { createdAt: "desc" }
+      orderBy: {
+        createdAt: 'desc',
+      },
     });
+
     res.json(leaves);
   } catch (error) {
-    console.error("Error fetching leave requests:", error);
-    res.status(500).json({ error: "Failed to fetch leave requests" });
+    console.error('Error fetching leave requests:', error);
+    res.status(500).json({ error: 'Failed to fetch leave requests' });
   }
 };
+
 export const createLeaveType = async (req: Request, res: Response) => {
   try {
     const { name } = req.body;
@@ -307,8 +336,42 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
     const roleId = emp.roleId;               // 1=HR Manager, 2=Employee, 3=Reporting Manager, 4=Management
     const deptId = emp.departmentId;         // HR department = 1
     const isHRDept = deptId === 1;           // HR Employee or HR Manager
+    const hasIncharge = !!emp.inchargeId;
+    const approved = status === "Approved";
 
     const data: any = {};
+
+
+    /* ================================================================
+   🔰 NEW 0️⃣ INCHARGE LEVEL (ONLY IF EXISTS)
+================================================================ */
+    if (hasIncharge && role === "INCHARGE") {
+      data.inChargeDecision = approved ? "APPROVED" : "REJECTED";
+      data.inChargeDecidedAt = new Date();
+
+      if (!approved) {
+        data.status = "REJECTED";
+        data.declinedBy = userId;
+        data.declinedDate = new Date();
+        data.declineReason = req.body.declineReason || null;
+      }
+
+      const updated = await prisma.leaveRequest.update({
+        where: { id: Number(id) },
+        data
+      });
+
+      return res.json(updated);
+    }
+
+    /* ================================================================
+       🔒 BLOCK OTHERS IF INCHARGE EXISTS & NOT APPROVED YET
+    ================================================================ */
+    if (hasIncharge && leave.inChargeDecision !== "APPROVED") {
+      return res.status(400).json({
+        error: "Incharge approval required first"
+      });
+    }
 
     // ================================================================
     //  1️⃣ HR EMPLOYEE (dept = 1, roleId ≠ HR Manager)
@@ -322,7 +385,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
       data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
       data.hodDecidedAt = new Date();
 
-    
+
       data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
       data.hrDecidedAt = new Date();
       data.status = status === "Approved" ? "APPROVED" : "REJECTED";
@@ -705,7 +768,7 @@ export async function getWhoIsOnLeaveBuckets(req: Request, res: Response) {
         startDate: true,
         endDate: true,
         employee: {
-          select: { id: true, firstName: true, lastName: true, designation: true, photoUrl: true}
+          select: { id: true, firstName: true, lastName: true, designation: true, photoUrl: true }
         }
       },
       orderBy: { startDate: 'asc' }
@@ -720,7 +783,7 @@ export async function getWhoIsOnLeaveBuckets(req: Request, res: Response) {
     const seenToday = new Set<number>();
     const seenWeek = new Set<number>();
     const seenNext = new Set<number>();
-  
+
     for (const r of rows) {
       const s = new Date(r.startDate);
       const e = new Date(r.endDate);

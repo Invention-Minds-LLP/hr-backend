@@ -135,17 +135,26 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
 export const getPermissionRequests = async (_req: Request, res: Response) => {
   try {
     const requests = await prisma.permissionRequest.findMany({
-      where: {
-        status: "PENDING" // only approved leave requests
-      },
       include: {
         employee: {
-          include: {
-            Department: true,    // Gives departmentId + department name
-            role: true,
-            designation: true,      // Gives roleId + role name
-          }
-        }
+          select: {
+            id: true,
+            employeeCode: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            departmentId: true,
+            reportingManager: true,
+            inchargeId: true,
+            roleId: true,
+
+            designation: {
+              select: {
+                name: true,
+              },
+            },
+          },
+        },
       },
       orderBy: { createdAt: "desc" }
     });
@@ -389,7 +398,7 @@ export const updatePermissionStatus = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Invalid status" });
     }
 
-    if (!["REPORTING_MANAGER", "HR_MANAGER", "MANAGEMENT"].includes(role)) {
+    if (!["INCHARGE", "REPORTING_MANAGER", "HR_MANAGER", "MANAGEMENT"].includes(role)) {
       return res.status(400).json({ error: "Invalid role" });
     }
 
@@ -407,13 +416,36 @@ export const updatePermissionStatus = async (req: Request, res: Response) => {
     }
 
     const emp = perm.employee;
-
+    const hasIncharge = !!emp.inchargeId;
     const roleId = emp.roleId;        // 1=HR Manager, 2=Employee, 3=RM, 5=HOD
     const deptId = emp.departmentId;  // HR = 1
     const isHRDept = deptId === 1;
 
     const data: any = {};
+    if (hasIncharge && role === "INCHARGE") {
 
+      data.inChargeDecision = status;
+      data.inChargeDecidedAt = new Date();
+
+      if (status === "REJECTED") {
+        data.status = "REJECTED";
+        data.declineReason = declineReason ?? null;
+        data.declinedBy = userId;
+        data.declinedDate = new Date();
+      }
+
+      const updated = await prisma.permissionRequest.update({
+        where: { id: Number(id) },
+        data,
+        include: { employee: true }
+      });
+
+      return res.json(updated);
+    }
+
+    if (hasIncharge && perm.inChargeDecision !== "APPROVED") {
+      return res.status(400).json({ error: "Incharge approval required first" });
+    }
     // ---------------------------------------------------------------
     // 1️⃣ HR EMPLOYEE (dept = 1 and not HR Manager)
     // Level 1 approver = HR Manager

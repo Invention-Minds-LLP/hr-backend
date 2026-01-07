@@ -8,61 +8,65 @@ datasource db {
 }
 
 model Employee {
-  id                       Int                        @id @default(autoincrement())
-  employeeCode             String                     @unique
-  referenceCode            String?
-  firstName                String
-  lastName                 String
-  gender                   Gender
-  dob                      DateTime
-  photoUrl                 String?
-  phone                    String
-  email                    String
-  departmentId             Int
-  branchId                 Int
-  dateOfJoining            DateTime
-  employmentType           EmploymentType
-  probationEndDate         DateTime?
-  employmentStatus         EmploymentStatus
-  roleId                   Int
-  createdAt                DateTime                   @default(now())
-  updatedAt                DateTime                   @default(now()) @updatedAt
-  shiftId                  Int?
-  sameAsPermanent          Boolean?
-  age                      Int?
-  bloodGroup               String?
-  reportingManager         Int?
-  employeeType             String?
-  alcohol                  Boolean?
-  allergies                String?
-  bloodPressure            String?
-  bloodSugar               String?
-  bmi                      Float?
-  cholesterol              String?
-  chronicConditions        String?
-  emergencyNotes           String?
-  exerciseFrequency        String?
-  healthIssues             Json?
-  height                   Float?
-  preEmploymentCheckDate   DateTime?
-  preferredHospital        String?
-  primaryPhysician         String?
-  smoking                  Boolean?
-  vaccinations             Json?
-  weight                   Float?
-  pastSurgeries            String?
-  usesGlasses              Boolean?
-  visionRemarks            String?
-  visionType               String?
-  disabilityDescription    String?
-  disabilityProofFile      String?
-  disabilityProofFileName  String?
-  disabilityProofUrl       String?
-  disabilityType           String?
-  hasDisability            Boolean?
-  healthCheckReminderSent  Boolean?                   @default(false)
-  healthCheckReminderYear  Int?
-  designationId            Int?
+  id                      Int              @id @default(autoincrement())
+  employeeCode            String           @unique
+  referenceCode           String?
+  firstName               String
+  lastName                String
+  gender                  Gender
+  dob                     DateTime
+  photoUrl                String?
+  phone                   String
+  email                   String
+  departmentId            Int
+  branchId                Int
+  dateOfJoining           DateTime
+  employmentType          EmploymentType
+  probationEndDate        DateTime?
+  employmentStatus        EmploymentStatus
+  roleId                  Int
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @default(now()) @updatedAt
+  shiftId                 Int?
+  sameAsPermanent         Boolean?
+  age                     Int?
+  bloodGroup              String?
+  reportingManager        Int?
+  employeeType            String?
+  alcohol                 Boolean?
+  allergies               String?
+  bloodPressure           String?
+  bloodSugar              String?
+  bmi                     Float?
+  cholesterol             String?
+  chronicConditions       String?
+  emergencyNotes          String?
+  exerciseFrequency       String?
+  healthIssues            Json?
+  height                  Float?
+  preEmploymentCheckDate  DateTime?
+  preferredHospital       String?
+  primaryPhysician        String?
+  smoking                 Boolean?
+  vaccinations            Json?
+  weight                  Float?
+  pastSurgeries           String?
+  usesGlasses             Boolean?
+  visionRemarks           String?
+  visionType              String?
+  disabilityDescription   String?
+  disabilityProofFile     String?
+  disabilityProofFileName String?
+  disabilityProofUrl      String?
+  disabilityType          String?
+  hasDisability           Boolean?
+  healthCheckReminderSent Boolean?         @default(false)
+  healthCheckReminderYear Int?
+  designationId           Int?
+  inchargeId              Int? // ✅ NEW
+
+  incharge                 Employee?                  @relation("EmployeeIncharge", fields: [inchargeId], references: [id])
+  subordinates             Employee[]                 @relation("EmployeeIncharge")
   Address                  Address[]
   AnnouncementAck          AnnouncementAck[]
   appraisals               AppraisalForm[]
@@ -105,7 +109,8 @@ model Employee {
   TrainingFeedback         TrainingFeedback[]
   User                     User?
   WFHRequest               WFHRequest[]
-  mobileAuthSessions MobileAuthSession[]
+  mobileAuthSessions       MobileAuthSession[]
+  shiftApprovals           ShiftApproval[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -114,6 +119,7 @@ model Employee {
   @@index([firstName])
   @@index([lastName])
   @@index([reportingManager])
+  @@index([inchargeId])
   @@index([designationId], map: "Employee_designationId_fkey")
 }
 
@@ -255,28 +261,31 @@ model LeaveType {
 }
 
 model LeaveRequest {
-  id            Int              @id @default(autoincrement())
-  employeeId    Int
-  leaveTypeId   Int
-  startDate     DateTime
-  endDate       DateTime
-  reason        String
-  status        LeaveStatus      @default(PENDING)
-  approvedBy    Int?
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @default(now()) @updatedAt
-  declineReason String?
-  declinedBy    Int?
-  approvedDate  DateTime?
-  declinedDate  DateTime?
-  hodDecidedAt  DateTime?
-  hodDecision   ApprovalDecision @default(PENDING)
-  hodNote       String?
-  hrDecidedAt   DateTime?
-  hrDecision    ApprovalDecision @default(PENDING)
-  hrNote        String?
-  employee      Employee         @relation(fields: [employeeId], references: [id])
-  leaveType     LeaveType        @relation(fields: [leaveTypeId], references: [id])
+  id                Int              @id @default(autoincrement())
+  employeeId        Int
+  leaveTypeId       Int
+  startDate         DateTime
+  endDate           DateTime
+  reason            String
+  status            LeaveStatus      @default(PENDING)
+  approvedBy        Int?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @default(now()) @updatedAt
+  declineReason     String?
+  declinedBy        Int?
+  approvedDate      DateTime?
+  declinedDate      DateTime?
+  inChargeDecision  ApprovalDecision @default(PENDING)
+  inChargeDecidedAt DateTime?
+  inChargeNote      String?
+  hodDecidedAt      DateTime?
+  hodDecision       ApprovalDecision @default(PENDING)
+  hodNote           String?
+  hrDecidedAt       DateTime?
+  hrDecision        ApprovalDecision @default(PENDING)
+  hrNote            String?
+  employee          Employee         @relation(fields: [employeeId], references: [id])
+  leaveType         LeaveType        @relation(fields: [leaveTypeId], references: [id])
 
   @@index([employeeId])
   @@index([leaveTypeId])
@@ -291,6 +300,7 @@ model ShiftTemplate {
   shiftType            ShiftType
   startTime            DateTime
   endTime              DateTime
+  shiftApprovals       ShiftApproval[]
   EmployeeShiftSetting EmployeeShiftSetting[]
   ShiftAssignment      ShiftAssignment[]
   ShiftRotationItem    ShiftRotationItem[]
@@ -313,29 +323,31 @@ model ShiftAssignment {
 }
 
 model PermissionRequest {
-  id             Int               @id @default(autoincrement())
-  employeeId     Int
-  startTime      DateTime?
-  endTime        DateTime?
-  reason         String
-  status         PermissionStatus  @default(PENDING)
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @default(now()) @updatedAt
-  approvedBy     Int?
-  approvedDate   DateTime?
-  declineReason  String?
-  declinedBy     Int?
-  declinedDate   DateTime?
-  permissionType PermissionType?
-  timing         PermissionTiming?
-  day            DateTime
-  hodDecidedAt   DateTime?
-  hodDecision    ApprovalDecision  @default(PENDING)
-  hodNote        String?
-  hrDecidedAt    DateTime?
-  hrDecision     ApprovalDecision  @default(PENDING)
-  hrNote         String?
-  employee       Employee          @relation(fields: [employeeId], references: [id])
+  id                Int               @id @default(autoincrement())
+  employeeId        Int
+  startTime         DateTime?
+  endTime           DateTime?
+  reason            String
+  status            PermissionStatus  @default(PENDING)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @default(now()) @updatedAt
+  approvedBy        Int?
+  approvedDate      DateTime?
+  declineReason     String?
+  declinedBy        Int?
+  declinedDate      DateTime?
+  permissionType    PermissionType?
+  timing            PermissionTiming?
+  day               DateTime
+  inChargeDecision  ApprovalDecision  @default(PENDING)
+  inChargeDecidedAt DateTime?
+  hodDecidedAt      DateTime?
+  hodDecision       ApprovalDecision  @default(PENDING)
+  hodNote           String?
+  hrDecidedAt       DateTime?
+  hrDecision        ApprovalDecision  @default(PENDING)
+  hrNote            String?
+  employee          Employee          @relation(fields: [employeeId], references: [id])
 
   @@index([employeeId], map: "PermissionRequest_employeeId_fkey")
 }
@@ -553,18 +565,17 @@ model Notification {
 }
 
 model User {
-  id           Int            @id @default(autoincrement())
-  employeeCode String         @unique
-  username     String         @unique
-  passwordHash String
-  role         String
-  lastLogin    DateTime?
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @default(now()) @updatedAt
-  loginHistory LoginHistory[]
-  employee     Employee       @relation(fields: [employeeCode], references: [employeeCode])
- refreshTokens RefreshToken[]
-
+  id            Int            @id @default(autoincrement())
+  employeeCode  String         @unique
+  username      String         @unique
+  passwordHash  String
+  role          String
+  lastLogin     DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @default(now()) @updatedAt
+  loginHistory  LoginHistory[]
+  employee      Employee       @relation(fields: [employeeCode], references: [employeeCode])
+  refreshTokens RefreshToken[]
 }
 
 model LoginHistory {
@@ -1509,6 +1520,7 @@ model LateLoginLog {
   @@index([employeeId])
   @@index([date])
 }
+
 model MobileAuthSession {
   id            String   @id @default(uuid())
   employeeId    Int
@@ -1522,6 +1534,7 @@ model MobileAuthSession {
 
   @@index([employeeId])
 }
+
 model RefreshToken {
   id        Int      @id @default(autoincrement())
   userId    Int
@@ -1533,6 +1546,7 @@ model RefreshToken {
 
   @@index([userId])
 }
+
 model AttendanceNotificationLog {
   id        Int      @id @default(autoincrement())
   uniqueKey String   @unique
@@ -1544,14 +1558,14 @@ model AttendanceNotificationLog {
 }
 
 model HolidayCalendar {
-  id        Int       @id @default(autoincrement())
+  id        Int      @id @default(autoincrement())
   year      Int
-  name      String    // e.g. "Institute Holiday Calendar 2026"
-  isActive  Boolean   @default(true)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @default(now()) @updatedAt
+  name      String // e.g. "Institute Holiday Calendar 2026"
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 
-  holidays  Holiday[]
+  holidays Holiday[]
 
   @@unique([year])
 }
@@ -1566,12 +1580,35 @@ model Holiday {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) @updatedAt
 
-  calendar    HolidayCalendar @relation(fields: [calendarId], references: [id])
+  calendar HolidayCalendar @relation(fields: [calendarId], references: [id])
 
   @@unique([calendarId, date])
   @@index([date])
 }
 
+model ShiftApproval {
+  id Int @id @default(autoincrement())
+
+  employeeId Int
+  shiftId    Int
+  date       DateTime
+
+  inchargeDecision  ApprovalDecision @default(PENDING)
+  inchargeDecidedAt DateTime?
+
+  rmDecision  ApprovalDecision @default(PENDING)
+  rmDecidedAt DateTime?
+
+  hrDecision  ApprovalDecision @default(PENDING)
+  hrDecidedAt DateTime?
+
+  status ApprovalDecision @default(PENDING)
+
+  employee Employee      @relation(fields: [employeeId], references: [id])
+  shift    ShiftTemplate @relation(fields: [shiftId], references: [id])
+
+  @@unique([employeeId, shiftId, date])
+}
 
 enum Gender {
   MALE
