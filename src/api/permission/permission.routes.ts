@@ -3,7 +3,8 @@ import {
   createPermissionRequest,
   getPermissionBalance,
   getPermissionRequests,
-  updatePermissionStatus
+  updatePermissionStatus,
+  getMonthlyPermissionUsage
 } from "./permission.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -13,5 +14,11 @@ router.post("/", authenticateToken,createPermissionRequest);
 router.get("/", authenticateToken,getPermissionRequests);
 router.patch("/:id/status",authenticateToken, updatePermissionStatus);
 router.get('/balance/:employeeId', authenticateToken, getPermissionBalance);
+
+router.get(
+  '/monthly-usage/:employeeId',
+  authenticateToken,
+  getMonthlyPermissionUsage
+);
 
 export default router;

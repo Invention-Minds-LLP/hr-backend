@@ -56,7 +56,7 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       include: {
         leaveType: true,
         employee: {
-          select: { firstName: true, lastName: true, employeeCode: true, reportingManager: true }
+          select: { firstName: true, lastName: true, employeeCode: true, reportingManager: true, inchargeId: true }
         }
       }
     });
@@ -68,38 +68,64 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     let notifyStatus: "sent" | "skipped" | "failed" = "skipped";
     let notifyError: string | undefined;
     let mgrPhone: string | undefined;
+    const emp = leaveRequest.employee;
+    const notifyTo = emp.inchargeId ?? emp.reportingManager;
     const mgrId = leaveRequest?.employee?.reportingManager;
-    if (mgrId) {
-      const manager = await prisma.employee.findUnique({
-        where: { id: mgrId },
-        select: { phone: true, firstName: true, lastName: true }
+    // if (mgrId) {
+    //   const manager = await prisma.employee.findUnique({
+    //     where: { id: mgrId },
+    //     select: { phone: true, firstName: true, lastName: true }
+    //   });
+    //   mgrPhone = manager?.phone ?? undefined;
+    //   const name = [leaveRequest.employee.firstName, leaveRequest.employee.lastName]
+    //     .filter(Boolean)
+    //     .join(" ");
+    //   const message = `${name} has applied for leave for ${days} day(s), from ${fmtDate(
+    //     leaveRequest.startDate
+    //   )} to ${fmtDate(leaveRequest.endDate)}. Please review and take the necessary action.`;
+
+    //   await createNotification(mgrId, message);
+    // }
+
+    // if (mgrPhone) {
+    //   try {
+    //     await sendWhatsAppTemplate({
+    //       to: formatPhoneNumber(mgrPhone),
+    //       templateId: LEAVE_APPLY_TEMPLATE_ID,
+    //       placeholders,
+    //     });
+    //     notifyStatus = "sent";
+    //   } catch (e: any) {
+    //     notifyStatus = "failed";
+    //     notifyError = e?.message || "WhatsApp send failed";
+    //     // log but do NOT fail the API just because notification failed
+    //     console.error("WFH notify (manager) failed:", e);
+    //   }
+    // }
+    if (notifyTo) {
+      const approver = await prisma.employee.findUnique({
+        where: { id: notifyTo },
+        select: { phone: true }
       });
-      mgrPhone = manager?.phone ?? undefined;
       const name = [leaveRequest.employee.firstName, leaveRequest.employee.lastName]
         .filter(Boolean)
         .join(" ");
+
       const message = `${name} has applied for leave for ${days} day(s), from ${fmtDate(
         leaveRequest.startDate
       )} to ${fmtDate(leaveRequest.endDate)}. Please review and take the necessary action.`;
 
-      await createNotification(mgrId, message);
-    }
+      await createNotification(notifyTo, message);
 
-    if (mgrPhone) {
-      try {
+      if (approver?.phone) {
         await sendWhatsAppTemplate({
-          to: formatPhoneNumber(mgrPhone),
+          to: formatPhoneNumber(approver.phone),
           templateId: LEAVE_APPLY_TEMPLATE_ID,
           placeholders,
         });
-        notifyStatus = "sent";
-      } catch (e: any) {
-        notifyStatus = "failed";
-        notifyError = e?.message || "WhatsApp send failed";
-        // log but do NOT fail the API just because notification failed
-        console.error("WFH notify (manager) failed:", e);
       }
     }
+
 
     res.status(201).json(leaveRequest);
   } catch (error) {
@@ -554,6 +580,126 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
 };
 
 
+// export const createLeaveBalances = async (req: Request, res: Response) => {
+//   try {
+//     const { employeeId, year, leaves = [], permissions = [] } = req.body;
+
+//     if (!employeeId || !year) {
+//       return res.status(400).json({ error: "employeeId and year are required" });
+//     }
+
+//     const rows: any[] = [];
+
+//     // LEAVES
+//     for (const l of leaves) {
+//       rows.push({
+//         employeeId,
+//         leaveTypeId: l.leaveTypeId,
+//         permissionType: null,
+//         category: "LEAVE",
+//         year,
+//         totalAllowed: l.totalAllowed,
+//         used: 0
+//       });
+//     }
+
+//     // PERMISSIONS
+//     for (const p of permissions) {
+//       rows.push({
+//         employeeId,
+//         leaveTypeId: null,
+//         permissionType: p.permissionType,
+//         category: "PERMISSION",
+//         year,
+//         totalAllowed: p.totalAllowed,
+//         used: 0
+//       });
+//     }
+
+//     // Upsert to avoid duplicates
+//     for (const row of rows) {
+//       await prisma.employeeLeaveBalance.upsert({
+//         where: {
+//           employeeId_leaveTypeId_permissionType_year: {
+//             employeeId: row.employeeId,
+//             leaveTypeId: row.leaveTypeId,
+//             permissionType: row.permissionType,
+//             year: row.year
+//           }
+//         },
+//         update: {
+//           totalAllowed: row.totalAllowed
+//         },
+//         create: row
+//       });
+//     }
+
+//     res.json({ message: "Leave balances saved successfully" });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: "Failed to create leave balances" });
+//   }
+// };
+// export const createLeaveBalances = async (req: Request, res: Response) => {
+//   try {
+//     const { employeeId, year, leaves = [], permissions = [] } = req.body;
+
+//     if (!employeeId || !year) {
+//       return res.status(400).json({ error: "employeeId and year are required" });
+//     }
+
+//     const rows: any[] = [];
+
+//     // LEAVES
+//     for (const l of leaves) {
+//       rows.push({
+//         employeeId,
+//         leaveTypeId: l.leaveTypeId,
+//         permissionType: null,
+//         category: "LEAVE",
+//         year,
+//         totalAllowed: l.totalAllowed,
+//         used: l.used ?? 0 // ✅ IMPORTANT
+//       });
+//     }
+
+//     // PERMISSIONS
+//     for (const p of permissions) {
+//       rows.push({
+//         employeeId,
+//         leaveTypeId: null,
+//         permissionType: p.permissionType,
+//         category: "PERMISSION",
+//         year,
+//         totalAllowed: p.totalAllowed,
+//         used: p.used ?? 0 // ✅ IMPORTANT
+//       });
+//     }
+
+//     for (const row of rows) {
+//       await prisma.employeeLeaveBalance.upsert({
+//         where: {
+//           employeeId_leaveTypeId_permissionType_year: {
+//             employeeId: row.employeeId,
+//             leaveTypeId: row.leaveTypeId,
+//             permissionType: row.permissionType,
+//             year: row.year
+//           }
+//         },
+//         update: {
+//           totalAllowed: row.totalAllowed,
+//           used: row.used // ✅ UPDATE USED
+//         },
+//         create: row
+//       });
+//     }
+
+//     res.json({ message: "Leave balances saved successfully" });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: "Failed to create leave balances" });
+//   }
+// };
 export const createLeaveBalances = async (req: Request, res: Response) => {
   try {
     const { employeeId, year, leaves = [], permissions = [] } = req.body;
@@ -562,49 +708,55 @@ export const createLeaveBalances = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "employeeId and year are required" });
     }
 
-    const rows: any[] = [];
-
-    // LEAVES
+    // 🔹 LEAVES
     for (const l of leaves) {
-      rows.push({
-        employeeId,
-        leaveTypeId: l.leaveTypeId,
-        permissionType: null,
-        category: "LEAVE",
-        year,
-        totalAllowed: l.totalAllowed,
-        used: 0
-      });
-    }
-
-    // PERMISSIONS
-    for (const p of permissions) {
-      rows.push({
-        employeeId,
-        leaveTypeId: null,
-        permissionType: p.permissionType,
-        category: "PERMISSION",
-        year,
-        totalAllowed: p.totalAllowed,
-        used: 0
-      });
-    }
-
-    // Upsert to avoid duplicates
-    for (const row of rows) {
       await prisma.employeeLeaveBalance.upsert({
         where: {
-          employeeId_leaveTypeId_permissionType_year: {
-            employeeId: row.employeeId,
-            leaveTypeId: row.leaveTypeId,
-            permissionType: row.permissionType,
-            year: row.year
+          employeeId_leaveTypeId_year: {
+            employeeId,
+            leaveTypeId: l.leaveTypeId,
+            year
           }
         },
         update: {
-          totalAllowed: row.totalAllowed
+          totalAllowed: l.totalAllowed,
+          used: l.used ?? 0
         },
-        create: row
+        create: {
+          employeeId,
+          leaveTypeId: l.leaveTypeId,
+          permissionType: null,
+          category: "LEAVE",
+          year,
+          totalAllowed: l.totalAllowed,
+          used: l.used ?? 0
+        }
+      });
+    }
+
+    // 🔹 PERMISSIONS
+    for (const p of permissions) {
+      await prisma.employeeLeaveBalance.upsert({
+        where: {
+          employeeId_permissionType_year: {
+            employeeId,
+            permissionType: p.permissionType,
+            year
+          }
+        },
+        update: {
+          totalAllowed: p.totalAllowed,
+          used: p.used ?? 0
+        },
+        create: {
+          employeeId,
+          leaveTypeId: null,
+          permissionType: p.permissionType,
+          category: "PERMISSION",
+          year,
+          totalAllowed: p.totalAllowed,
+          used: p.used ?? 0
+        }
       });
     }
 
@@ -873,30 +1025,72 @@ export const getBlockedDates = async (req: Request, res: Response) => {
 
   return res.json(existing);
 };
+// export const getLeaveBalance = async (req: Request, res: Response) => {
+//   try {
+//     const employeeId = Number(req.params.employeeId);
+//     const year = Number(req.query.year) || new Date().getFullYear();
+
+//     const balances = await prisma.employeeLeaveBalance.findMany({
+//       where: { employeeId, year, category: 'LEAVE' },
+//       include: { leaveType: true }
+//     });
+
+//     res.json(
+//       balances.map(b => ({
+//         leaveTypeId: b.leaveTypeId,
+//         leaveType: b.leaveType?.name ?? null,
+//         totalAllowed: b.totalAllowed,
+//         used: b.used,
+//         remaining: b.totalAllowed - b.used,
+//         year: b.year
+//       }))
+//     );
+//   } catch (err) {
+//     res.status(500).json({ error: "Failed to fetch leave balance" });
+//   }
+// };
 export const getLeaveBalance = async (req: Request, res: Response) => {
   try {
     const employeeId = Number(req.params.employeeId);
     const year = Number(req.query.year) || new Date().getFullYear();
 
-    const balances = await prisma.employeeLeaveBalance.findMany({
-      where: { employeeId, year, category: 'LEAVE' },
-      include: { leaveType: true }
+    // 1️⃣ Fetch ALL leave types (master)
+    const leaveTypes = await prisma.leaveType.findMany({
+      select: { id: true, name: true }
     });
 
-    res.json(
-      balances.map(b => ({
-        leaveTypeId: b.leaveTypeId,
-        leaveType: b.leaveType?.name ?? null,
-        totalAllowed: b.totalAllowed,
-        used: b.used,
-        remaining: b.totalAllowed - b.used,
-        year: b.year
-      }))
-    );
+    // 2️⃣ Fetch existing balances
+    const balances = await prisma.employeeLeaveBalance.findMany({
+      where: { employeeId, year, category: 'LEAVE' },
+    });
+
+    // 3️⃣ Map balances by leaveTypeId
+    const balanceMap = new Map<number, any>();
+    balances.forEach(b => {
+      if (b.leaveTypeId) balanceMap.set(b.leaveTypeId, b);
+    });
+
+    // 4️⃣ Merge master + balance
+    const result = leaveTypes.map(lt => {
+      const b = balanceMap.get(lt.id);
+
+      return {
+        leaveTypeId: lt.id,
+        leaveType: lt.name,
+        totalAllowed: b?.totalAllowed ?? 0,
+        used: b?.used ?? 0,
+        remaining: (b?.totalAllowed ?? 0) - (b?.used ?? 0),
+        year
+      };
+    });
+
+    res.json(result);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to fetch leave balance" });
   }
 };
+
 export const initLeaveEndSchedular = () => {
   cron.schedule("0 9 * * *", async () => {
     console.log("Running leave reminder cron...");
@@ -1027,3 +1221,57 @@ export const updateLeaveType = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to update leave type" });
   }
 };
+// GET /leaves/casual/monthly-usage
+export const getMonthlyCasualUsage = async (req: Request, res: Response) => {
+  const employeeId = Number(req.query.employeeId);
+  const year = Number(req.query.year);
+  const month = Number(req.query.month);
+
+  const leaveType = await prisma.leaveType.findFirst({
+    where: { name: 'Casual Leave' }
+  });
+
+  const used = await getUsedCasualLeaveDays(
+    employeeId,
+    leaveType!.id,
+    year,
+    month
+  );
+
+  res.json({
+    used,
+    remaining: Math.max(0, 2 - used)
+  });
+};
+async function getUsedCasualLeaveDays(
+  employeeId: number,
+  leaveTypeId: number,
+  year: number,
+  month: number
+) {
+  const monthStart = new Date(year, month, 1);
+  const monthEnd = new Date(year, month + 1, 0, 23, 59, 59);
+
+  const leaves = await prisma.leaveRequest.findMany({
+    where: {
+      employeeId,
+      leaveTypeId,
+      status: { in: ['PENDING', 'APPROVED'] },
+      startDate: { lte: monthEnd },
+      endDate: { gte: monthStart }
+    }
+  });
+
+  let used = 0;
+
+  for (const l of leaves) {
+    const from = new Date(Math.max(l.startDate.getTime(), monthStart.getTime()));
+    const to = new Date(Math.min(l.endDate.getTime(), monthEnd.getTime()));
+
+    used += Math.floor(
+      (to.getTime() - from.getTime()) / (1000 * 60 * 60 * 24)
+    ) + 1;
+  }
+
+  return used;
+}

@@ -91,38 +91,71 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
     // Try to send to the manager
     let notifyStatus: "sent" | "skipped" | "failed" = "skipped";
     let notifyError: string | undefined;
-    let mgrPhone: string | undefined;
+    // let mgrPhone: string | undefined;
 
-    const mgrId = request?.employee?.reportingManager;
-    if (mgrId) {
-      const manager = await prisma.employee.findUnique({
-        where: { id: mgrId },
+    // const mgrId = request?.employee?.reportingManager;
+    // if (mgrId) {
+    //   const manager = await prisma.employee.findUnique({
+    //     where: { id: mgrId },
+    //     select: { phone: true }
+    //   });
+    //   mgrPhone = manager?.phone ?? undefined;
+    //   const message = `Dear Concern,\n${employeeName} has requested ${permissionType} permission on ${dayLabel} from ${startLabel} to ${endLabel}.\nKindly review and take appropriate action.\n\nRegards,\nTeam Rashtrotthana`;
+    //   await createNotification(mgrId, message);
+    // }
+
+    // if (mgrPhone) {
+    //   try {
+    //     await sendWhatsAppTemplate({
+    //       to: formatPhoneNumber(mgrPhone),
+    //       templateId: PERMISSION_APPLY_TEMPLATE_ID, // define in constants
+    //       placeholders: [
+    //         employeeName,
+    //         permissionType,
+    //         timing,
+    //         dayLabel,
+    //         startLabel,
+    //         endLabel
+    //       ]
+    //     });
+    //     notifyStatus = "sent";
+    //   } catch (e: any) {
+    //     notifyStatus = "failed";
+    //     notifyError = e?.message || "WhatsApp send failed";
+    //     console.error("Permission notify (manager) failed:", e);
+    //   }
+    // }
+    const emp = request.employee;
+    const notifyTo = emp.inchargeId ?? emp.reportingManager;
+
+    if (notifyTo) {
+      const approver = await prisma.employee.findUnique({
+        where: { id: notifyTo },
         select: { phone: true }
       });
-      mgrPhone = manager?.phone ?? undefined;
-      const message = `Dear Concern,\n${employeeName} has requested ${permissionType} permission on ${dayLabel} from ${startLabel} to ${endLabel}.\nKindly review and take appropriate action.\n\nRegards,\nTeam Rashtrotthana`;
-      await createNotification(mgrId, message);
-    }
 
-    if (mgrPhone) {
-      try {
-        await sendWhatsAppTemplate({
-          to: formatPhoneNumber(mgrPhone),
-          templateId: PERMISSION_APPLY_TEMPLATE_ID, // define in constants
-          placeholders: [
-            employeeName,
-            permissionType,
-            timing,
-            dayLabel,
-            startLabel,
-            endLabel
-          ]
-        });
-        notifyStatus = "sent";
-      } catch (e: any) {
-        notifyStatus = "failed";
-        notifyError = e?.message || "WhatsApp send failed";
-        console.error("Permission notify (manager) failed:", e);
+      const message = `${employeeName} has requested ${permissionType} permission on ${dayLabel}${timeRange ? ` (${timeRange})` : ""
+        }. Kindly review and take appropriate action.`;
+
+      await createNotification(notifyTo, message);
+
+      if (approver?.phone) {
+        try {
+          await sendWhatsAppTemplate({
+            to: formatPhoneNumber(approver.phone),
+            templateId: PERMISSION_APPLY_TEMPLATE_ID,
+            placeholders: [
+              employeeName,
+              permissionType,
+              timing,
+              dayLabel,
+              startLabel,
+              endLabel
+            ]
+          });
+        } catch (e) {
+          console.error("Permission notify failed:", e);
+        }
       }
     }
 
@@ -621,24 +654,110 @@ export const updatePermissionStatus = async (req: Request, res: Response) => {
   }
 };
 
+// export const getPermissionBalance = async (req: Request, res: Response) => {
+//   try {
+//     const employeeId = Number(req.params.empId);
+//     const year = Number(req.query.year) || new Date().getFullYear();
+
+//     const balances = await prisma.employeeLeaveBalance.findMany({
+//       where: { employeeId, year, category: "PERMISSION" },
+//     });
+
+//     res.json(
+//       balances.map(b => ({
+//         permissionType: b.permissionType,
+//         totalAllowed: b.totalAllowed,
+//         used: b.used,
+//         remaining: b.totalAllowed - b.used
+//       }))
+//     );
+//   } catch (e) {
+//     res.status(500).json({ error: "Failed to fetch permission balance" });
+//   }
+// };
+const ALL_PERMISSION_TYPES = ['PERSONAL', 'OFFICIAL'];
 export const getPermissionBalance = async (req: Request, res: Response) => {
   try {
-    const employeeId = Number(req.params.empId);
+    const employeeId = Number(req.params.employeeId);
     const year = Number(req.query.year) || new Date().getFullYear();
 
     const balances = await prisma.employeeLeaveBalance.findMany({
       where: { employeeId, year, category: "PERMISSION" },
     });
+    console.log(balances)
+    const balanceMap = new Map<string, any>();
+    balances.forEach(b => {
+      if (b.permissionType) balanceMap.set(b.permissionType, b);
+    });
 
-    res.json(
-      balances.map(b => ({
-        permissionType: b.permissionType,
-        totalAllowed: b.totalAllowed,
-        used: b.used,
-        remaining: b.totalAllowed - b.used
-      }))
-    );
+    const result = ALL_PERMISSION_TYPES.map(type => {
+      const b = balanceMap.get(type);
+
+      return {
+        permissionType: type,
+        totalAllowed: b?.totalAllowed ?? 0,
+        used: b?.used ?? 0,
+        remaining: (b?.totalAllowed ?? 0) - (b?.used ?? 0),
+        year
+      };
+    });
+
+    res.json(result);
   } catch (e) {
+    console.error(e);
     res.status(500).json({ error: "Failed to fetch permission balance" });
   }
 };
+
+export const getMonthlyPermissionUsage = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.employeeId);
+
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth();
+
+    const monthStart = new Date(year, month, 1, 0, 0, 0);
+    const monthEnd = new Date(year, month + 1, 0, 23, 59, 59);
+
+    const permissions = await prisma.permissionRequest.findMany({
+      where: {
+        employeeId,
+        status: {
+          in: ['APPROVED', 'PENDING']
+        },
+        day: {
+          gte: monthStart,
+          lte: monthEnd
+        },
+        startTime: { not: null },
+        endTime: { not: null }
+      },
+      select: {
+        startTime: true,
+        endTime: true
+      }
+    });
+
+    // 🔢 Calculate total hours
+    let usedHours = 0;
+
+    for (const p of permissions) {
+      const diff =
+        (new Date(p.endTime!).getTime() -
+          new Date(p.startTime!).getTime()) /
+        (1000 * 60 * 60);
+
+      if (diff > 0) usedHours += diff;
+    }
+
+    res.json({
+      usedHours: Number(usedHours.toFixed(2)),
+      maxHours: 2
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch permission usage' });
+  }
+};
+

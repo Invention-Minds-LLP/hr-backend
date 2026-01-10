@@ -36,9 +36,13 @@ async function generateEmployeeCode() {
     select: { employeeCode: true }
   });
 
+  console.log(lastEmployee)
+
   let newCode = `${prefix}${startNumber}`;
   if (lastEmployee?.employeeCode) {
+
     const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
+    console.log(lastNumber)
     newCode = `${prefix}${String(lastNumber + 1).padStart(3, '0')}`;
   }
   return newCode;
@@ -81,7 +85,11 @@ export const createEmployee = async (req: Request, res: Response) => {
       rotationStartDate,     // optional
       employeeType,
       sameAsPermanent,
-      inchargeId
+      inchargeId,
+      fatherName,
+      marital,
+      totalYearsOfExperience,
+      experience
     } = req.body;
     const data = req.body;
     let finalCode = employeeCode;
@@ -115,7 +123,10 @@ export const createEmployee = async (req: Request, res: Response) => {
           bloodGroup,
           age,
           reportingManager,
-
+          fatherName,
+          marital,
+          totalYearsOfExperience,
+          experience,
           employeeType,
           sameAsPermanent,
           // Health & Wellness fields
@@ -152,7 +163,10 @@ export const createEmployee = async (req: Request, res: Response) => {
           Department: { connect: { id: departmentId } },
           Branch: { connect: { id: branchId } },
           role: { connect: { id: roleId } },
-          designation: { connect: { id: designationId } },
+          // designation: { connect: { id: designationId } },
+          designation: designationId
+            ? { connect: { id: Number(designationId) } }
+            : undefined,
           incharge: inchargeId
             ? { connect: { id: Number(inchargeId) } }
             : undefined,
@@ -202,6 +216,7 @@ export const createEmployee = async (req: Request, res: Response) => {
         // Regenerate a fresh code and retry
 
         finalCode = await generateEmployeeCode();
+        console.log(finalCode)
         newEmployee = await prisma.employee.create({
           data: {
             employeeCode: finalCode,
@@ -214,7 +229,7 @@ export const createEmployee = async (req: Request, res: Response) => {
             phone,
             email,
             // designation,
-            designationId: designationId ?? null, // ✅ THIS IS THE FIX
+            // designationId: designationId ?? null, // ✅ THIS IS THE FIX
             dateOfJoining: new Date(dateOfJoining),
             employmentType,
             probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
@@ -224,10 +239,17 @@ export const createEmployee = async (req: Request, res: Response) => {
             reportingManager,
             employeeType,
             sameAsPermanent,
+            fatherName,
+            marital,
+            totalYearsOfExperience,
+            experience,
             // Connect relations
             Department: { connect: { id: departmentId } },
             Branch: { connect: { id: branchId } },
             role: { connect: { id: roleId } },
+            designation: designationId
+              ? { connect: { id: Number(designationId) } }
+              : undefined,
             Address: {
               create: addresses?.map((a: any) => ({
                 type: a.type,
@@ -538,6 +560,10 @@ export const updateEmployee = async (req: Request, res: Response) => {
       probationEndDate,
       inchargeId,
       preEmploymentCheckDate,
+      fatherName,
+      marital,
+      totalYearsOfExperience,
+      experience,
       ...employeeFields
     } = data;
 
@@ -561,6 +587,10 @@ export const updateEmployee = async (req: Request, res: Response) => {
         bloodSugar: data.bloodSugar,
         cholesterol: data.cholesterol,
         sameAsPermanent: data.sameAsPermanent,
+        fatherName: data.fatherName,
+        marital: data.marital,
+        totalYearsOfExperience: data.totalYearsOfExperience,
+        experience: data.experience,
 
         allergies: data.allergies,
         chronicConditions: data.chronicConditions,
@@ -716,98 +746,551 @@ async function uploadToFTP(localFilePath: string, remoteFileName: string): Promi
 }
 
 // API Handler
+// export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
+//   try {
+//     const { employeeId } = req.params;
+
+//     const form = formidable({
+//       uploadDir: TEMP_FOLDER,
+//       keepExtensions: true,
+//       multiples: true,
+//     });
+
+//     console.log(form)
+
+//     form.parse(req, async (err, fields, files) => {
+//       if (err) {
+//         console.error("Formidable Parse Error:", err);
+//         return res.status(500).json({ error: err.message });
+//       }
+
+//       const metadata = JSON.parse(fields.metadata?.[0] || "[]"); // metadata array
+
+
+
+//       if (!files.file) {
+//         return res.status(400).json({ error: "No files uploaded" });
+//       }
+
+//       const uploadedFiles = Array.isArray(files.file) ? files.file : [files.file];
+
+//       console.log(uploadedFiles)
+
+//       const uploadedDocs = [];
+
+//       for (let i = 0; i < uploadedFiles.length; i++) {
+//         const file = uploadedFiles[i];
+//         const tempFilePath = file.filepath;
+//         const fileName = sanitizeFileName(file.originalFilename || `file_${Date.now()}.png`);
+
+//         const remoteFilePath = `/public_html/documents/${fileName}`;
+//         await uploadToFTP(tempFilePath, remoteFilePath);
+//         const fileUrl = `https://hrproindia.in/documents/${fileName}`
+
+//         console.log(fileUrl);
+//         fs.unlinkSync(tempFilePath); // cleanup temp file
+
+//         // // Save in DB
+//         // const savedDoc = await prisma.document.create({
+//         //   data: {
+//         //     employeeId: Number(employeeId),
+//         //     title: metadata[i].title || metadata[i].type,
+//         //     type: metadata[i].type,
+//         //     category: metadata[i].category,
+//         //     issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+//         //     expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+//         //     fileUrl: fileUrl
+//         //   }
+//         // });
+
+//         // const savedDoc = await prisma.document.upsert({
+//         //   where: {
+//         //     employeeId_type: {
+//         //       employeeId: Number(employeeId),
+//         //       type: metadata[i].type,
+//         //     },
+//         //   },
+//         //   create: {
+//         //     employeeId: Number(employeeId),
+//         //     title: metadata[i].title || metadata[i].type,
+//         //     type: metadata[i].type,
+//         //     category: metadata[i].category,
+//         //     issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+//         //     expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+//         //     fileUrl,
+//         //   },
+//         //   update: {
+//         //     title: metadata[i].title || metadata[i].type,
+//         //     category: metadata[i].category,
+//         //     issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+//         //     expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+//         //     fileUrl,
+//         //   },
+//         // });
+
+//         const existingDoc = await prisma.document.findFirst({
+//           where: {
+//             employeeId: Number(employeeId),
+//             type: metadata[i].type,
+//           },
+//         });
+
+//         let savedDoc;
+
+//         if (existingDoc) {
+//           savedDoc = await prisma.document.update({
+//             where: { id: existingDoc.id },
+//             data: {
+//               title: metadata[i].title || metadata[i].type,
+//               category: metadata[i].category,
+//               issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+//               expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+//               fileUrl,
+//             },
+//           });
+//         } else {
+//           savedDoc = await prisma.document.create({
+//             data: {
+//               employeeId: Number(employeeId),
+//               title: metadata[i].title || metadata[i].type,
+//               type: metadata[i].type,
+//               category: metadata[i].category,
+//               issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+//               expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+//               fileUrl,
+//             },
+//           });
+//         }
+
+//         uploadedDocs.push(savedDoc);
+//       }
+
+//       res.status(201).json({ message: "Documents uploaded successfully", documents: uploadedDocs });
+//     });
+//   } catch (error) {
+//     console.error("Upload Error:", error);
+//     res.status(500).json({ error: (error as Error).message });
+//   }
+
+
+// };
+// export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
+//   try {
+//     const employeeId = Number(req.params.employeeId);
+//     if (Number.isNaN(employeeId)) {
+//       return res.status(400).json({ error: "Invalid employeeId" });
+//     }
+
+//     const form = formidable({
+//       uploadDir: TEMP_FOLDER,
+//       keepExtensions: true,
+//       multiples: true,
+//     });
+
+//     form.parse(req, async (err, fields, files) => {
+//       try {
+//         if (err) {
+//           console.error("Formidable error:", err);
+//           return res.status(500).json({ error: err.message });
+//         }
+
+//         /* ----------------------------------
+//            1️⃣ Parse metadata
+//         ---------------------------------- */
+//         const metadata: any[] = JSON.parse(
+//           (fields.metadata?.[0] as string) || "[]"
+//         );
+
+//         /* ----------------------------------
+//            2️⃣ Parse fileIndex (FormArray index)
+//         ---------------------------------- */
+//         const fileIndexRaw = fields.fileIndex;
+//         const fileIndexes: number[] = Array.isArray(fileIndexRaw)
+//           ? fileIndexRaw.map((x) => Number(x))
+//           : fileIndexRaw
+//           ? [Number(fileIndexRaw)]
+//           : [];
+
+//         /* ----------------------------------
+//            3️⃣ Normalize uploaded files
+//         ---------------------------------- */
+//         const uploaded = files.file;
+//         const uploadedFiles = Array.isArray(uploaded)
+//           ? uploaded
+//           : uploaded
+//           ? [uploaded]
+//           : [];
+
+//         /* ----------------------------------
+//            4️⃣ Map: formIndex → file
+//         ---------------------------------- */
+//         const fileMap = new Map<number, any>();
+//         for (let i = 0; i < uploadedFiles.length; i++) {
+//           const idx = fileIndexes[i];
+//           if (Number.isFinite(idx)) {
+//             fileMap.set(idx, uploadedFiles[i]);
+//           }
+//         }
+
+//         const savedDocuments: any[] = [];
+
+//         /* ----------------------------------
+//            5️⃣ Process each metadata row
+//         ---------------------------------- */
+//         for (let i = 0; i < metadata.length; i++) {
+//           const meta = metadata[i];
+//           if (!meta?.type) continue;
+
+//           const issueDate = meta.issueDate ? new Date(meta.issueDate) : null;
+//           const expiryDate = meta.expiryDate ? new Date(meta.expiryDate) : null;
+
+//           let newFileUrl: string | null = null;
+
+//           /* ---------- Upload only if new file exists ---------- */
+//           const f = fileMap.get(i);
+//           if (f?.filepath) {
+//             const tempFilePath = f.filepath;
+//             const originalName =
+//               f.originalFilename || `doc_${employeeId}_${Date.now()}`;
+//             const fileName = sanitizeFileName(originalName);
+
+//             const remotePath = `/public_html/documents/${fileName}`;
+//             await uploadToFTP(tempFilePath, remotePath);
+
+//             try {
+//               fs.unlinkSync(tempFilePath);
+//             } catch {}
+
+//             newFileUrl = `https://hrproindia.in/documents/${fileName}`;
+//           }
+
+//           /* ---------- UPDATE ---------- */
+//           if (meta.id) {
+//             const existing = await prisma.document.findUnique({
+//               where: { id: Number(meta.id) },
+//               select: { fileUrl: true },
+//             });
+
+//             const updatedDoc = await prisma.document.update({
+//               where: { id: Number(meta.id) },
+//               data: {
+//                 employeeId,
+//                 title: meta.title || meta.type || "",
+//                 category: meta.category ?? undefined,
+//                 type: meta.type,
+//                 issueDate,
+//                 expiryDate,
+//                 // ✅ keep old if no new upload
+//                 fileUrl: newFileUrl ?? existing?.fileUrl ?? undefined,
+//               },
+//             });
+
+//             savedDocuments.push(updatedDoc);
+//             continue;
+//           }
+
+//           /* ---------- CREATE (only if file uploaded) ---------- */
+//           if (!newFileUrl) continue;
+
+//           const createdDoc = await prisma.document.create({
+//             data: {
+//               employeeId,
+//               title: meta.title || meta.type || "",
+//               category: meta.category ?? undefined,
+//               type: meta.type,
+//               issueDate,
+//               expiryDate,
+//               fileUrl: newFileUrl,
+//             },
+//           });
+
+//           savedDocuments.push(createdDoc);
+//         }
+
+//         return res.status(201).json({
+//           message: "Documents uploaded successfully",
+//           documents: savedDocuments,
+//         });
+//       } catch (e: any) {
+//         console.error("uploadEmployeeDocuments inner error:", e);
+//         return res.status(500).json({ error: e?.message || "Upload failed" });
+//       }
+//     });
+//   } catch (error: any) {
+//     console.error("uploadEmployeeDocuments error:", error);
+//     return res.status(500).json({ error: error?.message || "Upload failed" });
+//   }
+// };
+// export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
+//   try {
+//     const employeeId = Number(req.params.employeeId);
+//     if (Number.isNaN(employeeId)) {
+//       return res.status(400).json({ error: "Invalid employeeId" });
+//     }
+
+//     const form = formidable({
+//       uploadDir: TEMP_FOLDER,
+//       keepExtensions: true,
+//       multiples: true
+//     });
+
+//     form.parse(req, async (err, fields, files) => {
+//       try {
+//         if (err) {
+//           console.error("Formidable error:", err);
+//           return res.status(500).json({ error: err.message });
+//         }
+
+//         /* -------------------- 1️⃣ Metadata -------------------- */
+//         const metadata: any[] = JSON.parse(
+//           (fields.metadata?.[0] as string) || "[]"
+//         );
+
+//         /* -------------------- 2️⃣ File indexes -------------------- */
+//         const rawIndex = fields.fileIndex;
+//         const fileIndexes: number[] = Array.isArray(rawIndex)
+//           ? rawIndex.map(Number)
+//           : rawIndex
+//             ? [Number(rawIndex)]
+//             : [];
+
+//         /* -------------------- 3️⃣ Uploaded files -------------------- */
+//         const uploaded = files.file;
+//         const uploadedFiles = Array.isArray(uploaded)
+//           ? uploaded
+//           : uploaded
+//             ? [uploaded]
+//             : [];
+
+//         /* -------------------- 4️⃣ SAFETY CHECK -------------------- */
+//         if (fileIndexes.length !== uploadedFiles.length) {
+//           return res.status(400).json({
+//             error: "File index mismatch",
+//             fileIndexes,
+//             uploadedFiles: uploadedFiles.length
+//           });
+//         }
+
+//         /* -------------------- 5️⃣ Map index → file -------------------- */
+//         const fileMap = new Map<number, any>();
+//         uploadedFiles.forEach((file, i) => {
+//           fileMap.set(fileIndexes[i], file);
+//         });
+
+//         console.log("METADATA:", metadata.length);
+//         console.log("FILE MAP:", [...fileMap.keys()]);
+
+//         const savedDocuments: any[] = [];
+
+//         /* -------------------- 6️⃣ Process rows -------------------- */
+//         metadata.forEach(async (meta, index) => {
+//           if (!meta?.type) return;
+
+//           const issueDate = meta.issueDate ? new Date(meta.issueDate) : null;
+//           const expiryDate = meta.expiryDate ? new Date(meta.expiryDate) : null;
+
+//           let newFileUrl: string | null = null;
+
+//           const f = fileMap.get(index);
+//           if (f?.filepath) {
+//             const safeName = sanitizeFileName(
+//               f.originalFilename || `doc_${employeeId}_${Date.now()}`
+//             );
+
+//             const remotePath = `/public_html/documents/${safeName}`;
+//             await uploadToFTP(f.filepath, remotePath);
+
+//             try {
+//               fs.unlinkSync(f.filepath);
+//             } catch { }
+
+//             newFileUrl = `https://hrproindia.in/documents/${safeName}`;
+//           }
+
+//           /* ---------- UPDATE ---------- */
+//           if (meta.id) {
+//             const updated = await prisma.document.update({
+//               where: { id: Number(meta.id) },
+//               data: {
+//                 employeeId,
+//                 title: meta.title || meta.type,
+//                 category: meta.category ?? undefined,
+//                 type: meta.type,
+//                 issueDate,
+//                 expiryDate,
+//                 ...(newFileUrl ? { fileUrl: newFileUrl } : {})
+//               }
+//             });
+
+//             savedDocuments.push(updated);
+//             return;
+//           }
+
+//           /* ---------- CREATE ---------- */
+//           if (!newFileUrl) return;
+
+//           const created = await prisma.document.create({
+//             data: {
+//               employeeId,
+//               title: meta.title || meta.type,
+//               category: meta.category ?? undefined,
+//               type: meta.type,
+//               issueDate,
+//               expiryDate,
+//               fileUrl: newFileUrl
+//             }
+//           });
+
+//           savedDocuments.push(created);
+//         });
+
+//         return res.status(201).json({
+//           message: "Documents uploaded successfully",
+//           documents: savedDocuments
+//         });
+//       } catch (e: any) {
+//         console.error("Upload inner error:", e);
+//         return res.status(500).json({ error: e.message });
+//       }
+//     });
+//   } catch (error: any) {
+//     console.error("Upload error:", error);
+//     return res.status(500).json({ error: error.message });
+//   }
+// };
 export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
   try {
-    const { employeeId } = req.params;
+    const employeeId = Number(req.params.employeeId);
+    if (Number.isNaN(employeeId)) {
+      return res.status(400).json({ error: "Invalid employeeId" });
+    }
 
     const form = formidable({
       uploadDir: TEMP_FOLDER,
       keepExtensions: true,
-      multiples: true,
+      multiples: true
     });
-
-    console.log(form)
 
     form.parse(req, async (err, fields, files) => {
-      if (err) {
-        console.error("Formidable Parse Error:", err);
-        return res.status(500).json({ error: err.message });
-      }
+      try {
+        if (err) {
+          console.error("Formidable error:", err);
+          return res.status(500).json({ error: err.message });
+        }
 
-      const metadata = JSON.parse(fields.metadata?.[0] || "[]"); // metadata array
+        /* -------------------- 1️⃣ Metadata -------------------- */
+        const metadata: any[] = JSON.parse(
+          (fields.metadata?.[0] as string) || "[]"
+        );
 
-      if (!files.file) {
-        return res.status(400).json({ error: "No files uploaded" });
-      }
+        /* -------------------- 2️⃣ File Keys -------------------- */
+        const rawKeys = fields.fileKey;
+        const fileKeys: string[] = Array.isArray(rawKeys)
+          ? rawKeys
+          : rawKeys
+            ? [rawKeys]
+            : [];
 
-      const uploadedFiles = Array.isArray(files.file) ? files.file : [files.file];
+        /* -------------------- 3️⃣ Uploaded Files -------------------- */
+        const uploaded = files.file;
+        const uploadedFiles = Array.isArray(uploaded)
+          ? uploaded
+          : uploaded
+            ? [uploaded]
+            : [];
 
-      console.log(uploadedFiles)
+        if (fileKeys.length !== uploadedFiles.length) {
+          return res.status(400).json({
+            error: "fileKey and file count mismatch"
+          });
+        }
 
-      const uploadedDocs = [];
-
-      for (let i = 0; i < uploadedFiles.length; i++) {
-        const file = uploadedFiles[i];
-        const tempFilePath = file.filepath;
-        const fileName = sanitizeFileName(file.originalFilename || `file_${Date.now()}.png`);
-
-        const remoteFilePath = `/public_html/documents/${fileName}`;
-        await uploadToFTP(tempFilePath, remoteFilePath);
-        const fileUrl = `https://hrproindia.in/documents/${fileName}`
-
-        console.log(fileUrl);
-        fs.unlinkSync(tempFilePath); // cleanup temp file
-
-        // // Save in DB
-        // const savedDoc = await prisma.document.create({
-        //   data: {
-        //     employeeId: Number(employeeId),
-        //     title: metadata[i].title || metadata[i].type,
-        //     type: metadata[i].type,
-        //     category: metadata[i].category,
-        //     issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
-        //     expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
-        //     fileUrl: fileUrl
-        //   }
-        // });
-        const savedDoc = await prisma.document.upsert({
-          where: {
-            employeeId_type: {
-              employeeId: Number(employeeId),
-              type: metadata[i].type,
-            },
-          },
-          create: {
-            employeeId: Number(employeeId),
-            title: metadata[i].title || metadata[i].type,
-            type: metadata[i].type,
-            category: metadata[i].category,
-            issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
-            expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
-            fileUrl,
-          },
-          update: {
-            title: metadata[i].title || metadata[i].type,
-            category: metadata[i].category,
-            issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
-            expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
-            fileUrl,
-          },
+        /* -------------------- 4️⃣ Build fileMap -------------------- */
+        const fileMap = new Map<string, any>();
+        uploadedFiles.forEach((file, i) => {
+          fileMap.set(fileKeys[i], file);
         });
 
+        const savedDocuments: any[] = [];
 
-        uploadedDocs.push(savedDoc);
+        /* -------------------- 5️⃣ Process Documents (SAFE LOOP) -------------------- */
+        for (const meta of metadata) {
+          if (!meta?.type) continue;
+
+          const issueDate = meta.issueDate ? new Date(meta.issueDate) : null;
+          const expiryDate = meta.expiryDate ? new Date(meta.expiryDate) : null;
+
+          let newFileUrl: string | null = null;
+          const file = meta.fileKey ? fileMap.get(meta.fileKey) : null;
+
+          if (file?.filepath) {
+            const safeName = sanitizeFileName(
+              file.originalFilename || `doc_${employeeId}_${Date.now()}`
+            );
+
+            const remotePath = `/public_html/documents/${safeName}`;
+            await uploadToFTP(file.filepath, remotePath);
+
+            try {
+              fs.unlinkSync(file.filepath);
+            } catch { }
+
+            newFileUrl = `https://hrproindia.in/documents/${safeName}`;
+          }
+
+          /* ---------- UPDATE EXISTING DOCUMENT ---------- */
+          if (meta.id) {
+            const updated = await prisma.document.update({
+              where: { id: Number(meta.id) },
+              data: {
+                employeeId,
+                title: meta.title || meta.type,
+                category: meta.category,
+                type: meta.type,
+                issueDate,
+                expiryDate,
+                ...(newFileUrl ? { fileUrl: newFileUrl } : {})
+              }
+            });
+
+            savedDocuments.push(updated);
+          }
+
+          /* ---------- CREATE NEW DOCUMENT ---------- */
+          else if (newFileUrl) {
+            const created = await prisma.document.create({
+              data: {
+                employeeId,
+                title: meta.title || meta.type,
+                category: meta.category,
+                type: meta.type,
+                issueDate,
+                expiryDate,
+                fileUrl: newFileUrl
+              }
+            });
+
+            savedDocuments.push(created);
+          }
+        }
+
+        return res.status(201).json({
+          message: "Documents uploaded successfully",
+          documents: savedDocuments
+        });
+      } catch (e: any) {
+        console.error("Upload inner error:", e);
+        return res.status(500).json({ error: e.message });
       }
-
-      res.status(201).json({ message: "Documents uploaded successfully", documents: uploadedDocs });
     });
-  } catch (error) {
-    console.error("Upload Error:", error);
-    res.status(500).json({ error: (error as Error).message });
+  } catch (error: any) {
+    console.error("Upload error:", error);
+    return res.status(500).json({ error: error.message });
   }
-
-
 };
+
+
+
 export const uploadEmployeePhoto = async (req: Request, res: Response) => {
   try {
     const { employeeId } = req.params;
@@ -2358,3 +2841,58 @@ export const getInchargeEmployees = async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Failed to fetch incharge employees' });
   }
 };
+export const deleteEmployeeDocument = async (req: Request, res: Response) => {
+  try {
+    const docId = Number(req.params.documentId);
+
+    const doc = await prisma.document.findUnique({
+      where: { id: docId }
+    });
+
+    if (!doc) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    // 🔥 DELETE FILE FROM FTP
+    if (doc.fileUrl) {
+      const fileName = doc.fileUrl.split('/').pop();
+      if (fileName) {
+        const ftpPath = `/public_html/documents/${fileName}`;
+
+        try {
+          await deleteFromFTP(ftpPath);
+        } catch (ftpErr) {
+          console.warn('FTP delete failed:', ftpErr);
+          // ❗ Do NOT fail DB deletion if FTP fails
+        }
+      }
+    }
+
+    // 🗑️ DELETE DB ROW
+    await prisma.document.delete({
+      where: { id: docId }
+    });
+
+    res.json({ message: 'Document deleted successfully' });
+  } catch (error) {
+    console.error('Delete document error:', error);
+    res.status(500).json({ error: 'Failed to delete document' });
+  }
+};
+export async function deleteFromFTP(remotePath: string) {
+  const client = new Client();
+  client.ftp.verbose = false;
+
+  try {
+    await client.access({
+      host: FTP_CONFIG.host!,
+      user: FTP_CONFIG.user!,
+      password: FTP_CONFIG.password!,
+      secure: false,
+    });
+
+    await client.remove(remotePath);
+  } finally {
+    client.close();
+  }
+}

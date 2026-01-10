@@ -1,2 +1,0 @@
--- AlterTable
-ALTER TABLE `Employee` MODIFY `employmentStatus` ENUM('ACTIVE', 'TERMINATED', 'SUSPENDED', 'NOTICE_PERIOD', 'RESIGNED') NOT NULL;

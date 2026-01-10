@@ -19,7 +19,8 @@ import {
   getUnreportedAbsentees,
   bulkUploadEmployees,
   bulkUpdateReportingManager,
-  getInchargeEmployees
+  getInchargeEmployees,
+  deleteEmployeeDocument
 } from "./employee.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -44,6 +45,7 @@ router.put("/:id",authenticateToken, updateEmployee);
 router.delete("/:id",authenticateToken, deleteEmployee);
 router.post('/:employeeId/vaccinations/:vaccineIndex/proof',authenticateToken, uploadVaccineProof);
 router.post('/:employeeId/disability',authenticateToken, uploadEmployeeDisabilityProof);
+router.delete('/documents/:documentId', authenticateToken, deleteEmployeeDocument)
 
 
 

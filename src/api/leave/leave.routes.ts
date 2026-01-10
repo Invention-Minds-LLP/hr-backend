@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { createLeaveBalances, createLeaveRequest, createLeaveType, getBlockedDates, getLeaveBalance, getLeaveDashboard, getLeaveRequests, getLeaveTypes, getWhoIsOnLeaveBuckets, getWhoIsOnLeaveToday, updateLeaveStatus, updateLeaveType } from "./leave.controller";
+import { createLeaveBalances, createLeaveRequest, createLeaveType, getBlockedDates, getLeaveBalance, getLeaveDashboard, getLeaveRequests, getLeaveTypes, getMonthlyCasualUsage, getWhoIsOnLeaveBuckets, getWhoIsOnLeaveToday, updateLeaveStatus, updateLeaveType } from "./leave.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
@@ -9,7 +9,11 @@ router.get("/",authenticateToken, getLeaveRequests);
 router.post("/types",authenticateToken, createLeaveType);
 router.get("/types",authenticateToken, getLeaveTypes);
 router.post("/leave-balances", createLeaveBalances);
-
+router.get(
+  '/casual/monthly-usage',
+  authenticateToken,
+  getMonthlyCasualUsage
+);
 router.put("/update-leave-type/:id", updateLeaveType);
 router.patch("/:id/status",authenticateToken, updateLeaveStatus);
 router.get('/:id/dashboard',authenticateToken, getLeaveDashboard);

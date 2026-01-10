@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { PrismaClient, ShiftAssignMode } from "@prisma/client";
 import cron from 'node-cron';
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { createNotification } from "../notifications/notifications.controller";
 
 const prisma = new PrismaClient();
 
@@ -470,6 +471,27 @@ export function startShiftCron() {
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+
+
+    /* =====================================================
+       1️⃣ APPLY APPROVED SHIFT CHANGES EFFECTIVE TODAY
+       ===================================================== */
+    const pendingApprovals = await prisma.shiftApproval.findMany({
+      where: {
+        status: 'APPROVED',
+        appliedAt: null,
+        startDate: { lte: today }
+      }
+    });
+
+    for (const approval of pendingApprovals) {
+      await applyApprovedShift(approval);
+
+      await prisma.shiftApproval.update({
+        where: { id: approval.id },
+        data: { appliedAt: today }
+      });
+    }
     const employees = await prisma.employee.findMany({
       where: {
         employmentStatus: {
@@ -496,6 +518,11 @@ export function startShiftCron() {
 
       // ROTATIONAL
       if (setting.mode === 'ROTATIONAL') {
+        const start = startOfDay(setting.startDate);
+
+        // 🚫 Do not apply rotation before startDate
+        if (today < start) continue;
+
         shiftId = await getRotationalShiftId(
           setting.rotationPatternId!,
           setting.startDate,
@@ -697,20 +724,90 @@ export const assignFixed = async (req: Request, res: Response) => {
 };
 
 
+// export const getManagerEmployees = async (
+//   req: AuthenticatedRequest,
+//   res: Response
+// ) => {
+//   try {
+//     const managerId = req.user.empId;
+//     console.log(req.user)
+//     console.log('getManagerEmployees for managerId:', managerId);
+
+//     const employees = await prisma.employee.findMany({
+//       where: {
+//         reportingManager: managerId,
+//         employmentStatus: 'ACTIVE'
+//       },
+//       select: {
+//         id: true,
+//         firstName: true,
+//         lastName: true,
+//         employeeCode: true,
+//         phone: true,
+//         employmentType: true,
+
+//         Department: {
+//           select: {
+//             name: true
+//           }
+//         },
+
+//         designation: {
+//           select: {
+//             name: true
+//           }
+//         },
+
+//         EmployeeShiftSetting: {
+//           select: {
+//             mode: true,
+//             fixedShiftId: true,
+//             rotationPatternId: true,
+//             startDate: true
+//           }
+//         }
+//       }
+//     });
+
+//     res.json(employees);
+//   } catch (error) {
+//     console.error('getManagerEmployees error:', error);
+//     res.status(500).json({ error: 'Failed to fetch manager employees' });
+//   }
+// };
+
 export const getManagerEmployees = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {
   try {
-    const managerId = req.user.empId;
-    console.log(req.user)
-    console.log('getManagerEmployees for managerId:', managerId);
+    const empId = req.user.empId;
+    const roleId = req.user.roleId;
+
+    console.log('getManagerEmployees:', { empId, roleId });
+
+    const where: any = {
+      employmentStatus: {
+        in: ['ACTIVE', 'NOTICE_PERIOD'],
+      },
+    };
+
+    // Reporting Manager → use reportingManager
+    if (roleId === 3) {
+      where.reportingManager = empId;
+    }
+
+    // In-charge → use inchargeId
+    else if (roleId === 5) {
+      where.inchargeId = empId;
+    }
+
+    else {
+      return res.status(403).json({ error: 'Unauthorized role' });
+    }
 
     const employees = await prisma.employee.findMany({
-      where: {
-        reportingManager: managerId,
-        employmentStatus: 'ACTIVE'
-      },
+      where,
       select: {
         id: true,
         firstName: true,
@@ -720,15 +817,11 @@ export const getManagerEmployees = async (
         employmentType: true,
 
         Department: {
-          select: {
-            name: true
-          }
+          select: { name: true }
         },
 
         designation: {
-          select: {
-            name: true
-          }
+          select: { name: true }
         },
 
         EmployeeShiftSetting: {
@@ -751,8 +844,8 @@ export const getManagerEmployees = async (
 
 export const getManagerShiftTemplates = async (req: Request, res: Response) => {
   const departmentId = Number(req.query.departmentId);
-  if (!departmentId) { 
-    return res.status(400).json({ message: 'departmentId is required' }); 
+  if (!departmentId) {
+    return res.status(400).json({ message: 'departmentId is required' });
   }
 
   const shiftType = getShiftTypeByDepartment(departmentId);
@@ -811,3 +904,476 @@ export const listManagerPatterns = async (req: Request, res: Response) => {
 
   res.json(patterns);
 };
+// export const requestShiftChange = async (req: Request, res: Response) => {
+//   const { employeeId, shiftId, date } = req.body;
+
+//   const reqShift = await prisma.shiftApproval.create({
+//     data: {
+//       employeeId,
+//       shiftId,
+//       date: new Date(date)
+//     }
+//   });
+
+//   res.status(201).json(reqShift);
+// };
+// export const updateShiftApproval = async (req: Request, res: Response) => {
+//   const { id } = req.params;
+//   const { role, status } = req.body;
+
+//   const approval = await prisma.shiftApproval.findUnique({
+//     where: { id: Number(id) }
+//   });
+//   if (!approval) return res.status(404).json({ error: "Not found" });
+
+//   const approved = status === "APPROVED";
+//   const data: any = {};
+
+//   if (role === "INCHARGE") {
+//     data.inchargeDecision = status;
+//     data.inchargeDecidedAt = new Date();
+//   }
+
+//   else if (role === "REPORTING_MANAGER") {
+
+//     data.rmDecision = status;
+//     data.rmDecidedAt = new Date();
+//   }
+
+//   else if (role === "HR_MANAGER") {
+//     if (approval.rmDecision !== "APPROVED")
+//       return res.status(400).json({ error: "RM first" });
+
+//     data.hrDecision = status;
+//     data.hrDecidedAt = new Date();
+//     data.status = status;
+
+//     // FINAL → CREATE SHIFT
+//     if (approved) {
+//       await prisma.shiftAssignment.create({
+//         data: {
+//           employeeId: approval.employeeId,
+//           shiftId: approval.fixedShiftId ?? null,
+//           startDate: approval.startDate
+//         }
+//       });
+//     }
+//   }
+
+//   else return res.status(403).json({ error: "Unauthorized" });
+
+//   const updated = await prisma.shiftApproval.update({
+//     where: { id: Number(id) },
+//     data
+//   });
+
+//   res.json(updated);
+// };
+
+
+export const requestShiftChange = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  const { employeeId, mode, shiftId, patternId, startDate } = req.body;
+  const requesterId = req.user.empId;
+
+
+
+  const employee = await prisma.employee.findUnique({
+    where: { id: employeeId },
+    select: {
+      inchargeId: true,
+      reportingManager: true,
+      firstName: true,
+      lastName: true,
+    }
+  });
+
+  if (!employee) return res.status(404).json({ error: 'Employee not found' });
+
+  const hasIncharge = !!employee.inchargeId;
+
+  // 🔐 Authorization
+  if (hasIncharge && requesterId !== employee.inchargeId)
+    return res.status(403).json({ error: 'Only incharge can request' });
+
+  if (!hasIncharge && requesterId !== employee.reportingManager)
+    return res.status(403).json({ error: 'Only reporting manager can request' });
+
+  const approval = await prisma.shiftApproval.create({
+    data: {
+      employeeId,
+      requestedMode: mode,
+      fixedShiftId: mode === 'FIXED' ? shiftId : null,
+      patternId: mode === 'ROTATIONAL' ? patternId : null,
+      startDate: new Date(startDate),
+      requestedBy: requesterId,
+      hasIncharge
+    }
+  });
+  let notifyTo: number | null = null;
+
+  if (hasIncharge) {
+    // Incharge raised → notify Reporting Manager
+    notifyTo = employee.reportingManager;
+  } else {
+    // Reporting Manager raised → notify HR
+  // Reporting Manager raised → notify ALL HR
+  const hrIds = await getHRManagerId();
+
+  await Promise.all(
+    hrIds.map(id =>
+      createNotification(
+        id,
+        `${requesterName} has requested a shift change for ${employeeName} effective from ${fmtDate(
+          approval.startDate
+        )}.`
+      )
+    )
+  );
+  }
+
+  const requester = await prisma.employee.findUnique({
+    where: { id: requesterId },
+    select: { firstName: true, lastName: true }
+  });
+
+  const requesterName = requester
+    ? `${requester.firstName} ${requester.lastName}`
+    : 'Concerned Authority';
+
+  const employeeName = `${employee.firstName} ${employee.lastName}`;
+
+  if (notifyTo) {
+    await createNotification(
+      notifyTo,
+      `${requesterName} has requested a shift change for ${employeeName} effective from ${fmtDate(
+        approval.startDate
+      )}.`
+    );
+  }
+
+  res.status(201).json(approval);
+};
+export const approveShiftChange = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  const { id } = req.params;
+  const { role, decision, reason } = req.body; // RM | HR
+  const approverId = req.user.empId;
+
+  const approval = await prisma.shiftApproval.findUnique({
+    where: { id: Number(id) },
+    include: {
+      employee: {
+        select: {
+          reportingManager: true,
+          firstName: true,
+          lastName: true,
+          id: true,
+          inchargeId: true
+
+        }
+      }
+    }
+  });
+
+  if (!approval) return res.status(404).json({ error: 'Not found' });
+
+  const data: any = {};
+
+  // RM approval only if incharge exists
+  if (role === 'RM') {
+    if (!approval.hasIncharge)
+      return res.status(400).json({ error: 'RM approval not required' });
+
+    if (approverId !== approval.employee.reportingManager)
+      return res.status(403).json({ error: 'Not reporting manager' });
+
+    data.rmDecision = decision;
+    data.rmDecidedAt = new Date();
+    if (decision === 'REJECTED') {
+      data.rmRejectReason = reason;
+    }
+  }
+
+  // HR approval (always final)
+  if (role === 'HR') {
+    if (approval.hasIncharge && approval.rmDecision !== 'APPROVED')
+      return res.status(400).json({ error: 'RM approval pending' });
+
+    data.hrDecision = decision;
+    data.hrDecidedAt = new Date();
+    data.status = decision;
+    if (decision === 'REJECTED') {
+      data.hrRejectReason = reason;
+    }
+  }
+
+  const updated = await prisma.shiftApproval.update({
+    where: { id: Number(id) },
+    data
+  });
+
+  // 🔥 APPLY ONLY WHEN FINAL APPROVED
+  // const fullyApproved =
+  //   updated.hrDecision === 'APPROVED' &&
+  //   (!updated.hasIncharge || updated.rmDecision === 'APPROVED');
+
+  // if (fullyApproved) {
+  //   await applyApprovedShift(updated);
+  // }
+  const today = startOfDay(new Date());
+  const effectiveFrom = startOfDay(new Date(updated.startDate));
+
+  const fullyApproved =
+    updated.hrDecision === 'APPROVED' &&
+    (!updated.hasIncharge || updated.rmDecision === 'APPROVED');
+
+  // ✅ APPLY IMMEDIATELY IF startDate IS TODAY
+  if (fullyApproved && effectiveFrom.getTime() === today.getTime()) {
+    await applyApprovedShift(updated);
+
+    await prisma.shiftApproval.update({
+      where: { id: updated.id },
+      data: { appliedAt: new Date() }
+    });
+  }
+
+  // ---------------- NOTIFY EMPLOYEE ----------------
+
+  // ---------------- NOTIFY NEXT APPROVER ----------------
+if (role === 'RM' && decision === 'APPROVED') {
+  // 1️⃣ Notify ALL HR users
+  const hrIds = await getHRManagerId();
+
+  await notifyUsers(
+    hrIds,
+    `Shift change request for ${approval.employee.firstName} ${approval.employee.lastName} is awaiting HR approval.`
+  );
+
+  // 2️⃣ Notify requester (Incharge or RM who raised it)
+  await createNotification(
+    updated.requestedBy,
+    `Your shift change request for ${approval.employee.firstName} ${
+      approval.employee.lastName
+    } effective from ${fmtDate(updated.startDate)} has been approved by the Reporting Manager.`
+  );
+}
+
+  // ---------------- FINAL STATUS ----------------
+  const isFinalApproved =
+    updated.hrDecision === 'APPROVED' &&
+    (!updated.hasIncharge || updated.rmDecision === 'APPROVED');
+
+  const msg = `Shift change for ${approval.employee.firstName} ${approval.employee.lastName
+    } effective from ${fmtDate(updated.startDate)} has been ${updated.status}.`;
+
+  if (role === 'HR' && decision === 'APPROVED') {
+    await notifyUsers(
+      [
+        approval.employee.id,          // Employee
+        approval.employee.reportingManager,
+        approval.employee.inchargeId
+      ],
+      msg
+    );
+  }
+  if (decision === 'REJECTED') {
+    await notifyUsers(
+      [
+        approval.employee.reportingManager,
+        approval.employee.inchargeId
+      ],
+      `Shift change request for ${approval.employee.firstName} ${approval.employee.lastName
+      } effective from ${fmtDate(updated.startDate)} was rejected.`
+    );
+  }
+
+
+
+
+  res.json(updated);
+};
+async function notifyUsers(userIds: (number | null | undefined)[], message: string) {
+  const uniqueIds = [...new Set(userIds.filter(Boolean))] as number[];
+  await Promise.all(
+    uniqueIds.map(id => createNotification(id, message))
+  );
+}
+
+async function applyApprovedShift(approval: any) {
+  await prisma.employeeShiftSetting.upsert({
+    where: { employeeId: approval.employeeId },
+    update: {
+      mode: approval.requestedMode,
+      fixedShiftId: approval.fixedShiftId,
+      rotationPatternId: approval.patternId,
+      startDate: approval.startDate
+    },
+    create: {
+      employeeId: approval.employeeId,
+      mode: approval.requestedMode,
+      fixedShiftId: approval.fixedShiftId,
+      rotationPatternId: approval.patternId,
+      startDate: approval.startDate
+    }
+  });
+
+  await prisma.shiftAssignment.deleteMany({
+    where: {
+      employeeId: approval.employeeId,
+      date: { gte: startOfDay(approval.startDate) }
+    }
+  });
+}
+export const listApprovalsInbox = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const empId = req.user.empId;
+    const roleId = req.user.roleId; // adjust based on your auth payload
+    const where: any = {};
+
+    // HR inbox: pending final decisions
+    if (roleId === 1 || (roleId === 2 && req.user.deptId === 1)) {
+      where.status = 'PENDING';
+      // HR can approve:
+      // - if hasIncharge=false (RM not required)
+      // - or hasIncharge=true AND rmDecision=APPROVED
+      where.OR = [
+        { hasIncharge: false },
+        { hasIncharge: true, rmDecision: 'APPROVED' }
+      ];
+    }
+
+
+    // RM inbox: only when incharge exists and RM decision pending
+    if (roleId === 3) {
+      where.OR = [
+        { hasIncharge: false },
+        { hasIncharge: true, rmDecision: 'APPROVED' }
+      ];
+
+      where.OR = [
+        // 1️⃣ Team members (reporting manager)
+        { employee: { reportingManager: empId } },
+
+        // 2️⃣ In-charge employees under RM
+        { employee: { inchargeId: empId } },
+
+        // 3️⃣ RM’s own requests
+        { requestedBy: empId }
+      ];
+    }
+
+
+    if (roleId === 5) {
+      where.hasIncharge = true;
+      where.employee = { inchargeId: empId };
+    }
+
+    const rows = await prisma.shiftApproval.findMany({
+      where,
+      orderBy: { requestedAt: 'desc' },
+      include: {
+        employee: {
+          select: {
+            id: true, firstName: true, lastName: true, employeeCode: true,
+            inchargeId: true, reportingManager: true,
+            Department: { select: { name: true } },
+            designation: { select: { name: true } }
+          }
+        },
+        requestedByEmployee: { select: { id: true, firstName: true, lastName: true, employeeCode: true } },
+        fixedShift: { select: { id: true, name: true, startTime: true, endTime: true, shiftType: true } },
+        pattern: {
+          select: {
+            id: true, name: true, cycleDays: true,
+            items: { orderBy: { dayIndex: 'asc' }, select: { dayIndex: true, shiftId: true } }
+          }
+        }
+      }
+    });
+
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to fetch approvals inbox' });
+  }
+};
+export const listMyShiftRequests = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const empId = req.user.empId;
+
+    const rows = await prisma.shiftApproval.findMany({
+      where: { requestedBy: empId },
+      orderBy: { requestedAt: 'desc' },
+      include: {
+        employee: {
+          select: {
+            id: true, firstName: true, lastName: true, employeeCode: true,
+            Department: { select: { name: true } },
+            designation: { select: { name: true } }
+          }
+        },
+        fixedShift: { select: { id: true, name: true, startTime: true, endTime: true } },
+        pattern: { select: { id: true, name: true } }
+      }
+    });
+
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to fetch my shift requests' });
+  }
+};
+export const listEmployeeShiftRequests = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const employeeId = Number(req.params.employeeId);
+
+    // Optional: restrict visibility (RM can view only their team, HR can view all, etc.)
+
+    const rows = await prisma.shiftApproval.findMany({
+      where: { employeeId },
+      orderBy: { requestedAt: 'desc' },
+      take: 5, // last 5 requests
+      include: {
+        fixedShift: { select: { id: true, name: true, startTime: true, endTime: true } },
+        pattern: { select: { id: true, name: true } },
+        requestedByEmployee: { select: { id: true, firstName: true, lastName: true, employeeCode: true } }
+      }
+    });
+
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to fetch employee shift requests' });
+  }
+};
+export async function getHRManagerId(): Promise<number[]> {
+  const hrs = await prisma.employee.findMany({
+    where: {
+      departmentId: 1,              // HR department
+      employmentStatus: "ACTIVE"
+    },
+    select: { id: true }
+  });
+
+  if (!hrs.length) {
+    throw new Error("No active HR users found");
+  }
+
+  return hrs.map(h => h.id);
+}
+export function fmtDate(date: Date | string | null | undefined): string {
+  if (!date) return "";
+
+  const d = typeof date === "string" ? new Date(date) : date;
+
+  return d.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric"
+  });
+}

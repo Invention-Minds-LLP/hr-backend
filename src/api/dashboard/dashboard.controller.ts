@@ -635,8 +635,83 @@ export class DashboardController {
                 announcementStats.length;
         }
 
+        const currentYear = new Date().getFullYear();
+        const todayStartIST = startOfDayIST(); // 2025-01-09 00:00 IST
+        const todayEndIST = endOfDayIST();     // 2025-01-09 23:59 IST
+        const windowStart = addDays(todayStartIST, -372); // 365 + 7
+        const windowEnd = addDays(todayEndIST, -358);     // 365 - 7
+
+        // normalize (always do this)
+        const rangeStart = windowStart < windowEnd ? windowStart : windowEnd;
+        const rangeEnd = windowStart < windowEnd ? windowEnd : windowStart;
+
+
+
+        // const ahcDueToday = await prisma.employee.count({
+        //     where: {
+        //         employmentStatus: 'ACTIVE',
+        //         AND: [
+        //             {
+        //                 OR: [
+        //                     {
+        //                         preEmploymentCheckDate: {
+        //                             lte: addDays(todayStart, -365),
+        //                         },
+        //                     },
+        //                     {
+        //                         preEmploymentCheckDate: null,
+        //                         dateOfJoining: {
+        //                             lte: addDays(todayStart, -365),
+        //                         },
+        //                     },
+        //                 ],
+        //             },
+        //             {
+        //                 OR: [
+        //                     { healthCheckReminderYear: null },
+        //                     { healthCheckReminderYear: { lt: currentYear } },
+        //                 ],
+        //             },
+        //         ],
+        //     },
+        // });
 
         // ---- Attention widgets
+        const ahcDueToday = await prisma.employee.count({
+            where: {
+                employmentStatus: 'ACTIVE',
+                AND: [
+                    {
+                        OR: [
+                            {
+                                preEmploymentCheckDate: {
+                                    gte: rangeStart,
+                                    lte: rangeEnd,
+                                },
+                            },
+                            {
+                                preEmploymentCheckDate: null,
+                                dateOfJoining: {
+                                    gte: rangeStart,
+                                    lte: rangeEnd,
+                                },
+                            },
+                        ],
+                    },
+                    {
+                        OR: [
+                            { healthCheckReminderYear: null },
+                            { healthCheckReminderYear: { lt: currentYear } },
+                        ],
+                    },
+                ],
+            },
+        });
+        console.log('Today IST:', todayStartIST, todayEndIST);
+        console.log('Due range UTC:', rangeStart, rangeEnd);
+
+        console.log(ahcDueToday)
+
         const [attendanceSplit, pendingApprovals, docsExpiring, offersAwaiting, overdueClearances] = await Promise.all([
             // this.countUnmarkedAttendance(employeeIds, todayStart, todayEnd),
             this.getLateAttendanceSplit(employeeIds, todayStart, todayEnd),
@@ -840,6 +915,12 @@ export class DashboardController {
             { label: 'Contracts expiring soon (30 days)', count: docsExpiring, severity: 'warn', modal: 'docs' },
             { label: 'Applicants waiting in pipeline (7 days)', count: offersAwaiting, severity: 'warn', modal: 'offersPendingSignature' },
             { label: 'Overdue exit clearances', count: overdueClearances, severity: 'danger', modal: 'clearances' },
+            {
+                label: 'Annual health checkup due (7 days)',
+                count: ahcDueToday,
+                severity: ahcDueToday ? 'warn' : 'good',
+                modal: 'ahc',
+            }
 
         ];
 
@@ -1069,6 +1150,129 @@ export class DashboardController {
                 selectable: true
             });
         }
+        if (key === 'ahc') {
+            const todayStart = startOfDayIST(new Date());
+            const todayEnd = endOfDayIST(new Date());
+            const currentYear = new Date().getFullYear();
+            const todayStartIST = startOfDayIST(); // 2025-01-09 00:00 IST
+            const todayEndIST = endOfDayIST();     // 2025-01-09 23:59 IST
+            const windowStart = addDays(todayStartIST, -372); // 365 + 7
+            const windowEnd = addDays(todayEndIST, -358);     // 365 - 7
+
+            // normalize (always do this)
+            const rangeStart = windowStart < windowEnd ? windowStart : windowEnd;
+            const rangeEnd = windowStart < windowEnd ? windowEnd : windowStart;
+
+            // const employees = await prisma.employee.findMany({
+            //     where: {
+            //         employmentStatus: 'ACTIVE',
+            //         AND: [
+            //             {
+            //                 OR: [
+            //                     {
+            //                         preEmploymentCheckDate: {
+            //                             lte: addDays(start, -365),
+            //                         },
+            //                     },
+            //                     {
+            //                         preEmploymentCheckDate: null,
+            //                         dateOfJoining: {
+            //                             lte: addDays(start, -365),
+            //                         },
+            //                     },
+            //                 ],
+            //             },
+            //             {
+            //                 OR: [
+            //                     { healthCheckReminderYear: null },
+            //                     { healthCheckReminderYear: { lt: currentYear } },
+            //                 ],
+            //             },
+            //         ],
+            //     },
+            //     select: {
+            //         id: true,
+            //         firstName: true,
+            //         lastName: true,
+            //         employeeCode: true,
+            //         Department: { select: { name: true } },
+            //         preEmploymentCheckDate: true,
+            //         dateOfJoining: true,
+            //         healthCheckReminderYear: true,
+            //     },
+            //     take: 500,
+            // });
+            const employees = await prisma.employee.findMany({
+                where: {
+                    employmentStatus: 'ACTIVE',
+                    AND: [
+                        {
+                            OR: [
+                                {
+                                    preEmploymentCheckDate: {
+                                        gte: rangeStart,
+                                        lte: rangeEnd,
+                                    },
+                                },
+                                {
+                                    preEmploymentCheckDate: null,
+                                    dateOfJoining: {
+                                        gte: rangeStart,
+                                        lte: rangeEnd,
+                                    },
+                                },
+                            ],
+                        },
+                        {
+                            OR: [
+                                { healthCheckReminderYear: null },
+                                { healthCheckReminderYear: { lt: currentYear } },
+                            ],
+                        },
+                    ],
+                },
+                select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    employeeCode: true,
+                    Department: { select: { name: true } },
+                    preEmploymentCheckDate: true,
+                    dateOfJoining: true,
+                    healthCheckReminderYear: true,
+                },
+            });
+
+            const rows = employees.map(e => ({
+                id: e.id,
+                data: [
+                    `${e.firstName} ${e.lastName}`,
+                    e.employeeCode || '—',
+                    e.Department?.name || '—',
+                    e.preEmploymentCheckDate
+                        ? fmtDate(e.preEmploymentCheckDate)
+                        : fmtDate(e.dateOfJoining),
+                    e.healthCheckReminderYear
+                        ? String(e.healthCheckReminderYear)
+                        : 'Never',
+                ],
+            }));
+
+            return res.json({
+                title: 'Annual Health Checkup Due (7 days)',
+                cols: [
+                    'Employee',
+                    'EMP ID',
+                    'Department',
+                    'Last Health Check / DOJ',
+                    'Last Reminder Year',
+                ],
+                rows,
+                actions: ['Send reminder', 'Mark completed'],
+                selectable: true,
+            });
+        }
+
 
         if (key === 'interviewsToday') {
             const items = await prisma.interview.findMany({

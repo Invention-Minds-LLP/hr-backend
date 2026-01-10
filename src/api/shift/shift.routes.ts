@@ -21,6 +21,11 @@ import {
   getManagerEmployees,
   listManagerPatterns,
   getManagerShiftTemplates,
+  requestShiftChange,
+  approveShiftChange,
+  listApprovalsInbox,
+  listMyShiftRequests,
+  listEmployeeShiftRequests,
 } from "./shift.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -66,5 +71,14 @@ router.post('/rotation-patterns/:patternId/items/bulk', authenticateToken, addRo
 
 // Assign rotational to employee
 router.post('/assign-rotational', authenticateToken, assignRotational);
+router.post(" /request", requestShiftChange);
+// router.patch("  /approve/:id", updateShiftApproval);
+router.post('/request', authenticateToken, requestShiftChange);
+router.post('/approve/:id', authenticateToken, approveShiftChange);
+
+router.get('/approvals/inbox', authenticateToken, listApprovalsInbox);
+router.get('/approvals/mine', authenticateToken, listMyShiftRequests);
+router.get('/approvals/employee/:employeeId', authenticateToken, listEmployeeShiftRequests);
+
 
 export default router;

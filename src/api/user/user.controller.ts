@@ -117,6 +117,7 @@ export const loginUser = async (req: Request, res: Response) => {
       deptId: employee.departmentId,
       employeeCode: user.employeeCode,
       username: user.username,
+      roleId: employee.roleId
     };
 
     const token = jwt.sign(payload, process.env.JWT_SECRET as string, { expiresIn: "12h" });
