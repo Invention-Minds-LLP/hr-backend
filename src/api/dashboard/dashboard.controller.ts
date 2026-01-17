@@ -1550,7 +1550,7 @@ export class DashboardController {
                 `${l.employee.firstName} ${l.employee.lastName}`,
                 l.employee.employeeCode || '—',
                 l.employee.Department?.name || '—',
-                l.employee.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
+                l.employee.employeeType || '—',
                 fmtTime(l.shiftStart),
                 fmtTime(l.checkIn),
                 `${l.lateMinutes}`,
