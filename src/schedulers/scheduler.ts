@@ -82,7 +82,7 @@ export function startAttendanceScheduler() {
       );
 
       try {
-        // await runBiometricSync(isFinalRun);
+        await runBiometricSync(isFinalRun);
       } catch (err) {
         console.error('[CRON] Attendance sync failed', err);
       }
