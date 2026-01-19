@@ -2896,3 +2896,93 @@ export async function deleteFromFTP(remotePath: string) {
     client.close();
   }
 }
+// controllers/employee.controller.ts
+
+export const updateEmployeeProfile = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.id);
+    if (!employeeId) {
+      return res.status(400).json({ error: 'Invalid employee id' });
+    }
+
+    const {
+      firstName,
+      lastName,
+      bloodGroup,
+      phone,
+      email
+    } = req.body;
+
+    // ✅ OPTIONAL VALIDATION
+    if (!firstName || !lastName) {
+      return res.status(400).json({
+        error: 'First name and last name are required'
+      });
+    }
+
+    const updatedEmployee = await prisma.employee.update({
+      where: { id: employeeId },
+      data: {
+        firstName,
+        lastName,
+        bloodGroup,
+        phone,
+        email
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        bloodGroup: true,
+        phone: true,
+        email: true,
+        photoUrl: true
+      }
+    });
+
+    return res.json({
+      message: 'Profile updated successfully',
+      employee: updatedEmployee
+    });
+
+  } catch (error) {
+    console.error('updateEmployeeProfile error:', error);
+    return res.status(500).json({
+      error: 'Failed to update profile'
+    });
+  }
+};
+// controllers/employee.controller.ts
+
+export const getEmployeeProfile = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.id);
+    if (!employeeId) {
+      return res.status(400).json({ error: 'Invalid employee id' });
+    }
+
+    const employee = await prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        bloodGroup: true,
+        phone: true,
+        email: true,
+        photoUrl: true
+      }
+    });
+
+    if (!employee) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+
+    return res.json(employee);
+  } catch (error) {
+    console.error('getEmployeeProfile error:', error);
+    return res.status(500).json({
+      error: 'Failed to fetch profile'
+    });
+  }
+};

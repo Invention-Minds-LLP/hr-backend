@@ -9,7 +9,9 @@ const prisma = new PrismaClient();
    COSEC CONFIG
 ---------------------------------- */
 
-const COSEC_BASE_URL = 'http://192.168.14.114:83/COSEC/api.svc/v2';
+// const COSEC_BASE_URL = 'http://192.168.14.114:83/COSEC/api.svc/v2';
+
+const COSEC_BASE_URL = 'http://14.194.12.229:83/COSEC/api.svc/v2';
 const COSEC_USERNAME = 'api';
 const COSEC_PASSWORD = 'Api@123';
 
@@ -166,11 +168,16 @@ async function fetchAttendanceDaily(date: Date) {
    MAIN BIOMETRIC SYNC
 ---------------------------------- */
 
-export async function runBiometricSync(isFinalRun: boolean) {
-  const today = startOfDay(new Date());
-  // console.log(`🔄 Starting biometric sync | Date: ${today.toDateString()} | Final: ${isFinalRun}`);
-  const yesterday = startOfDay(new Date(Date.now() - 86400000));
-  // console.log(`🔄 Yesterday date: ${yesterday.toDateString()}`);
+export async function runBiometricSync(date: Date, isFinalRun: boolean) {
+  // const today = startOfDay(new Date());
+  const today = startOfDay(date);
+  const yesterday = startOfDay(
+    new Date(date.getTime() - 86400000)
+  );
+
+  console.log(`🔄 Starting biometric sync | Date: ${today.toDateString()} | Final: ${isFinalRun}`);
+  // const yesterday = startOfDay(new Date(Date.now() - 86400000));
+  console.log(`🔄 Yesterday date: ${yesterday.toDateString()}`);
 
   // const employees = await prisma.employee.findMany({
   //   where: { employmentStatus: 'ACTIVE' },
@@ -191,19 +198,22 @@ export async function runBiometricSync(isFinalRun: boolean) {
 
   const empMap = new Map(employees.map(e => [e.employeeCode!, e.id]));
 
+
+
   /* ======================================================
      PART 1: PROCESS TODAY'S BIOMETRIC (CHECK-IN)
   ====================================================== */
 
   const todayRecords = await fetchAttendanceDaily(today);
-  // console.log(`  Fetched ${todayRecords.length} biometric records for today`);
+  console.log(`  Fetched ${todayRecords.length} biometric records for today`);
 
   for (const r of todayRecords) {
     const employeeId = empMap.get(r.userid);
+    console.log(employeeId)
     if (!employeeId) continue;
 
     const date = parseDate(r.processdate);
-    // console.log(`Processing attendance for Employee ID: ${employeeId} | Date: ${date.toDateString()}`);
+    console.log(`Processing attendance for Employee ID: ${employeeId} | Date: ${date.toDateString()}`);
     const punches = extractPunches(r);
     // console.log(`  Extracted punches: ${punches.length}`);
     // console.log(`  Punch times: ${punches.map(p => p.toISOString()).join(', ')}`);
@@ -640,7 +650,7 @@ export async function runBiometricSync(isFinalRun: boolean) {
     }
 
 
-  
+
   }
   console.log('✅ Biometric sync completed');
 

@@ -20,7 +20,9 @@ import {
   bulkUploadEmployees,
   bulkUpdateReportingManager,
   getInchargeEmployees,
-  deleteEmployeeDocument
+  deleteEmployeeDocument,
+  updateEmployeeProfile,
+  getEmployeeProfile
 } from "./employee.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -31,6 +33,8 @@ router.get("/", authenticateToken,getEmployees);
 router.get("/by-departments", authenticateToken, getEmployeesByDepartments);
 router.get("/absent-without-leave", getUnreportedAbsentees);
 router.get('/incharge', authenticateToken, getInchargeEmployees);
+router.get('/:id/profile', getEmployeeProfile);
+router.put('/:id/profile',updateEmployeeProfile);
 router.post('/bulk-upload',authenticateToken, bulkUploadEmployees);
 router.post('/:employeeId/documents/upload',authenticateToken, uploadEmployeeDocuments);
 router.post('/:employeeId/photo',authenticateToken, uploadEmployeePhoto)

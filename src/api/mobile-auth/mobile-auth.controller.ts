@@ -10,6 +10,73 @@ import { sendEmailOtp } from '../../utils/sendEmailOtp';
 export const mobilePhoneInit = async (req: Request, res: Response) => {
     const { phone } = req.body;
 
+    // ✅ PLAY STORE REVIEW AUTO LOGIN
+    if (
+        process.env.PLAY_REVIEW_MODE === 'true' &&
+        phone === process.env.PLAY_REVIEW_PHONE
+    ) {
+        const employee = await prisma.employee.findFirst({
+            where: { phone },
+            include: { designation: true }
+        });
+
+        if (!employee) {
+            return res.status(404).json({ message: 'Review employee not found' });
+        }
+
+        const user = await prisma.user.findUnique({
+            where: { employeeCode: employee.employeeCode }
+        });
+
+        if (!user) {
+            return res.status(404).json({ message: 'Review user not found' });
+        }
+
+        // 🔐 Generate tokens directly
+        const accessToken = jwt.sign(
+            {
+                userId: user.id,
+                empId: employee.id,
+                role: user.role,
+                reviewMode: true
+            },
+            process.env.JWT_SECRET!,
+            { expiresIn: '1h' }
+        );
+
+        const refreshToken = crypto.randomUUID();
+
+        await prisma.refreshToken.create({
+            data: {
+                userId: user.id,
+                token: refreshToken,
+                expiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000)
+            }
+        });
+
+        return res.json({
+            autoLogin: true,
+            reviewMode: true,
+
+            // tokens
+            accessToken,
+            refreshToken,
+
+            // user info
+            username: user.username,
+            employeeCode: user.employeeCode,
+            id: user.id,
+            role: user.role,
+
+            // employee info
+            empId: employee.id,
+            deptId: employee.departmentId,
+            designation: employee.designation?.name || '',
+            photoUrl: employee.photoUrl || null,
+            roleId: employee.roleId
+        });
+    }
+
     const employee = await prisma.employee.findFirst({ where: { phone } });
     if (!employee) {
         return res.status(404).json({ message: 'Phone not registered' });

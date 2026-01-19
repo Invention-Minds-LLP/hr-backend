@@ -87,6 +87,8 @@ const allowedOrigins = [
   'https://localhost',
   'capacitor://localhost',     // Capacitor iOS
   'http://localhost:8100',
+  'https://hrminds.imapps.in',
+  'https://hrmindsjmrh.imapps.in'
 ];
 
 app.use(cors({

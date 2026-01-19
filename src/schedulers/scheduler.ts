@@ -6,13 +6,14 @@ import { startShiftCron } from "../api/shift/shift.controller";
 import cron from 'node-cron';
 import { runBiometricSync } from "../api/biometric/biometric.controller";
 
-export function startSchedulers() {
+export async function startSchedulers() {
   initSurveyScheduler();
   initNoticePeriodSchedular();
   initLeaveEndSchedular();
   initQuarterlyAppraisalScheduler();
   startShiftCron();
   startAttendanceScheduler();
+  // await runBiometricBackfill();
 }
 const schedules = [
   // 00
@@ -81,10 +82,24 @@ export function startAttendanceScheduler() {
       );
 
       try {
-        await runBiometricSync(isFinalRun);
+        // await runBiometricSync(isFinalRun);
       } catch (err) {
         console.error('[CRON] Attendance sync failed', err);
       }
     });
   }
+}
+async function runBiometricBackfill() {
+  const dates = [
+    new Date('2026-01-07'),
+    new Date('2026-01-08'),
+    new Date('2026-01-09'),
+  ];
+
+  for (const date of dates) {
+    console.log(`🚀 Running biometric sync for ${date.toDateString()}`);
+    await runBiometricSync(date, true); // final run
+  }
+
+  console.log('✅ Backfill completed for all dates');
 }
