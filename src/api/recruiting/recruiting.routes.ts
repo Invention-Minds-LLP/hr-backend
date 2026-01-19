@@ -8,12 +8,12 @@ export const recruitingRouter = Router();
 
 // Jobs
 recruitingRouter.post('/jobs',authenticateToken, rc.createJob);
-recruitingRouter.get('/jobs',authenticateToken, rc.listJobs);
+recruitingRouter.get('/jobs', rc.listJobs);
 recruitingRouter.patch('/jobs/:id/status', authenticateToken,rc.changeJobStatus);
 
 // Candidates & Applications
 recruitingRouter.post('/candidates',authenticateToken, rc.createCandidate);
-recruitingRouter.post('/applications', authenticateToken,rc.createApplication);
+recruitingRouter.post('/applications',rc.createApplication);
 recruitingRouter.get('/applications',authenticateToken, rc.listApplications);
 recruitingRouter.patch('/applications/:id/status',authenticateToken, rc.moveApplication);
 
