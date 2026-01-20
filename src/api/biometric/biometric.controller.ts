@@ -9,9 +9,9 @@ const prisma = new PrismaClient();
    COSEC CONFIG
 ---------------------------------- */
 
-// const COSEC_BASE_URL = 'http://192.168.14.114:83/COSEC/api.svc/v2';
+const COSEC_BASE_URL = 'http://192.168.14.114:83/COSEC/api.svc/v2';
 
-const COSEC_BASE_URL = 'http://14.194.12.229:83/COSEC/api.svc/v2';
+// const COSEC_BASE_URL = 'http://14.194.12.229:83/COSEC/api.svc/v2';
 const COSEC_USERNAME = 'api';
 const COSEC_PASSWORD = 'Api@123';
 
