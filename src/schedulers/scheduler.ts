@@ -13,7 +13,7 @@ export async function startSchedulers() {
   initQuarterlyAppraisalScheduler();
   startShiftCron();
   startAttendanceScheduler();
-  // await runBiometricBackfill();
+  await runBiometricBackfill();
 }
 const schedules = [
   // 00
@@ -82,7 +82,7 @@ export function startAttendanceScheduler() {
       );
 
       try {
-        await runBiometricSync(isFinalRun);
+        // await runBiometricSync(isFinalRun);
       } catch (err) {
         console.error('[CRON] Attendance sync failed', err);
       }
@@ -94,11 +94,12 @@ async function runBiometricBackfill() {
     new Date('2026-01-07'),
     new Date('2026-01-08'),
     new Date('2026-01-09'),
+    new Date('2026-01-19')
   ];
 
   for (const date of dates) {
     console.log(`🚀 Running biometric sync for ${date.toDateString()}`);
-    // await runBiometricSync(date, true); // final run
+    await runBiometricSync(date, true); // final run
   }
 
   console.log('✅ Backfill completed for all dates');

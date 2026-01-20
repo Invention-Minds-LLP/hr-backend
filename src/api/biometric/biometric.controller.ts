@@ -9,9 +9,9 @@ const prisma = new PrismaClient();
    COSEC CONFIG
 ---------------------------------- */
 
-const COSEC_BASE_URL = 'http://192.168.14.114:83/COSEC/api.svc/v2';
+// const COSEC_BASE_URL = 'http://192.168.14.114:83/COSEC/api.svc/v2';
 
-// const COSEC_BASE_URL = 'http://14.194.12.229:83/COSEC/api.svc/v2';
+const COSEC_BASE_URL = 'http://14.194.12.229:83/COSEC/api.svc/v2';
 const COSEC_USERNAME = 'api';
 const COSEC_PASSWORD = 'Api@123';
 
@@ -168,16 +168,16 @@ async function fetchAttendanceDaily(date: Date) {
    MAIN BIOMETRIC SYNC
 ---------------------------------- */
 
-export async function runBiometricSync(isFinalRun: boolean) {
-  const today = startOfDay(new Date());
-  // const today = startOfDay(date);
-  // const yesterday = startOfDay(
-  //   new Date(date.getTime() - 86400000)
-  // );
+export async function runBiometricSync(date: Date, isFinalRun: boolean) {
+  // const today = startOfDay(new Date());
+    // const yesterday = startOfDay(new Date(Date.now() - 86400000));
+  const today = startOfDay(date);
+  const yesterday = startOfDay(
+    new Date(date.getTime() - 86400000)
+  );
 
-  // console.log(`🔄 Starting biometric sync | Date: ${today.toDateString()} | Final: ${isFinalRun}`);
-  const yesterday = startOfDay(new Date(Date.now() - 86400000));
-  // console.log(`🔄 Yesterday date: ${yesterday.toDateString()}`);
+  console.log(`🔄 Starting biometric sync | Date: ${today.toDateString()} | Final: ${isFinalRun}`);
+  console.log(`🔄 Yesterday date: ${yesterday.toDateString()}`);
 
   // const employees = await prisma.employee.findMany({
   //   where: { employmentStatus: 'ACTIVE' },
@@ -197,6 +197,7 @@ export async function runBiometricSync(isFinalRun: boolean) {
 
 
   const empMap = new Map(employees.map(e => [e.employeeCode!, e.id]));
+  // console.log(empMap)
 
 
 
@@ -208,8 +209,9 @@ export async function runBiometricSync(isFinalRun: boolean) {
   console.log(`  Fetched ${todayRecords.length} biometric records for today`);
 
   for (const r of todayRecords) {
+    // console.log(r.userId, 'userId')
     const employeeId = empMap.get(r.userid);
-    console.log(employeeId)
+    // console.log(employeeId)
     if (!employeeId) continue;
 
     const date = parseDate(r.processdate);
