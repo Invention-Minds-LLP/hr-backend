@@ -64,10 +64,10 @@ model Employee {
   healthCheckReminderYear  Int?
   designationId            Int?
   inchargeId               Int?
+  experience               Int?
   fatherName               String?
   marital                  String?
   totalYearsOfExperience   Int?
-  experience               Int?
   Address                  Address[]
   AnnouncementAck          AnnouncementAck[]
   appraisals               AppraisalForm[]
@@ -75,6 +75,7 @@ model Employee {
   attendances              Attendance[]
   bagChecks                BagCheck[]
   ComplaintAcknowledgement ComplaintAcknowledgement[]
+  documents                Document[]
   emergencyContacts        EmergencyContact[]
   Branch                   Branch                     @relation(fields: [branchId], references: [id])
   Department               Department                 @relation(fields: [departmentId], references: [id])
@@ -82,7 +83,6 @@ model Employee {
   incharge                 Employee?                  @relation("EmployeeIncharge", fields: [inchargeId], references: [id])
   subordinates             Employee[]                 @relation("EmployeeIncharge")
   role                     Role                       @relation(fields: [roleId], references: [id])
-  EmployeeLeaveBalance     EmployeeLeaveBalance[]
   EmployeeShiftSetting     EmployeeShiftSetting?
   EmployeeSurvey           EmployeeSurvey[]
   evaluations              EvaluationAttempt[]
@@ -105,6 +105,8 @@ model Employee {
   qualifications           Qualification[]
   ResignationClearance     ResignationClearance[]
   ResignationRequest       ResignationRequest[]
+  shiftApprovals           ShiftApproval[]
+  requestedShiftApprovals  ShiftApproval[]            @relation("ShiftApprovalRequestedBy")
   shifts                   ShiftAssignment[]
   Training                 Training[]
   TrainingAssignment       TrainingAssignment[]
@@ -112,9 +114,6 @@ model Employee {
   TrainingFeedback         TrainingFeedback[]
   User                     User?
   WFHRequest               WFHRequest[]
-  shiftApprovals           ShiftApproval[]
-  requestedShiftApprovals  ShiftApproval[]            @relation("ShiftApprovalRequestedBy")
-  documents                Document[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -184,6 +183,8 @@ model Document {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @default(now()) @updatedAt
   employee   Employee  @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId], map: "Document_employeeId_fkey")
 }
 
 model Department {
@@ -303,9 +304,9 @@ model ShiftTemplate {
   startTime            DateTime
   endTime              DateTime
   EmployeeShiftSetting EmployeeShiftSetting[]
+  shiftApprovals       ShiftApproval[]
   ShiftAssignment      ShiftAssignment[]
   ShiftRotationItem    ShiftRotationItem[]
-  shiftApprovals       ShiftApproval[]
 }
 
 model ShiftAssignment {
@@ -634,11 +635,14 @@ model ShiftRotationPattern {
   name                 String
   cycleDays            Int
   isActive             Boolean                @default(true)
+  source               String? // 'MONTHLY'
+  month                Int?
+  year                 Int?
   createdAt            DateTime               @default(now())
   updatedAt            DateTime               @default(now()) @updatedAt
   EmployeeShiftSetting EmployeeShiftSetting[]
-  items                ShiftRotationItem[]
   shiftApprovals       ShiftApproval[]
+  items                ShiftRotationItem[]
 }
 
 model ShiftRotationItem {
@@ -1451,11 +1455,9 @@ model EmployeeLeaveBalance {
   year           Int
   totalAllowed   Int             @default(0)
   used           Int             @default(0)
-  employee       Employee        @relation(fields: [employeeId], references: [id])
   leaveType      LeaveType?      @relation(fields: [leaveTypeId], references: [id])
 
-  // @@unique([employeeId, leaveTypeId, permissionType, year])
-   @@unique([employeeId, leaveTypeId, year])
+  @@unique([employeeId, leaveTypeId, year])
   @@unique([employeeId, permissionType, year])
   @@index([leaveTypeId], map: "EmployeeLeaveBalance_leaveTypeId_fkey")
 }
@@ -1586,28 +1588,29 @@ model Holiday {
 }
 
 model ShiftApproval {
-  id             Int              @id @default(autoincrement())
-  employeeId     Int
-  rmDecision     ApprovalDecision @default(PENDING)
-  rmDecidedAt    DateTime?
-  rmRejectReason String?          @db.Text
-  hrDecision     ApprovalDecision @default(PENDING)
-  hrDecidedAt    DateTime?
-  hrRejectReason String?          @db.Text
-  status         ApprovalDecision @default(PENDING)
-  fixedShiftId   Int?
-  hasIncharge    Boolean
-  patternId      Int?
-  requestedAt    DateTime         @default(now())
-  requestedBy    Int
-
-  appliedAt DateTime?
-
+  id                  Int                   @id @default(autoincrement())
+  employeeId          Int
+  rmDecision          ApprovalDecision      @default(PENDING)
+  rmDecidedAt         DateTime?
+  hrDecision          ApprovalDecision      @default(PENDING)
+  hrDecidedAt         DateTime?
+  status              ApprovalDecision      @default(PENDING)
+  fixedShiftId        Int?
+  hasIncharge         Boolean
+  patternId           Int?
+  month               Int?
+  year                Int?
+  isMonthly           Boolean?              @default(false)
+  requestedAt         DateTime              @default(now())
+  requestedBy         Int
   requestedMode       ShiftAssignMode
   startDate           DateTime
-  pattern             ShiftRotationPattern? @relation(fields: [patternId], references: [id])
-  fixedShift          ShiftTemplate?        @relation(fields: [fixedShiftId], references: [id])
+  appliedAt           DateTime?
+  hrRejectReason      String?               @db.Text
+  rmRejectReason      String?               @db.Text
   employee            Employee              @relation(fields: [employeeId], references: [id])
+  fixedShift          ShiftTemplate?        @relation(fields: [fixedShiftId], references: [id])
+  pattern             ShiftRotationPattern? @relation(fields: [patternId], references: [id])
   requestedByEmployee Employee              @relation("ShiftApprovalRequestedBy", fields: [requestedBy], references: [id])
 
   @@index([employeeId])

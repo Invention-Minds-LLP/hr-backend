@@ -26,6 +26,9 @@ import {
   listApprovalsInbox,
   listMyShiftRequests,
   listEmployeeShiftRequests,
+  requestMonthlyShift,
+  getMonthlyShiftStatus,
+  getEmployeeDailyShiftsForRange,
 } from "./shift.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -74,6 +77,13 @@ router.post('/assign-rotational', authenticateToken, assignRotational);
 router.post(" /request", requestShiftChange);
 // router.patch("  /approve/:id", updateShiftApproval);
 router.post('/request', authenticateToken, requestShiftChange);
+router.post('/monthly-request', authenticateToken, requestMonthlyShift);
+router.post('/monthly/status', authenticateToken, getMonthlyShiftStatus);
+router.get(
+  '/daily-range',
+  authenticateToken,
+  getEmployeeDailyShiftsForRange
+);
 router.post('/approve/:id', authenticateToken, approveShiftChange);
 
 router.get('/approvals/inbox', authenticateToken, listApprovalsInbox);

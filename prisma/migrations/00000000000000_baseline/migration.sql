@@ -56,6 +56,10 @@ CREATE TABLE `Employee` (
     `healthCheckReminderYear` INTEGER NULL,
     `designationId` INTEGER NULL,
     `inchargeId` INTEGER NULL,
+    `fatherName` VARCHAR(191) NULL,
+    `marital` VARCHAR(191) NULL,
+    `totalYearsOfExperience` INTEGER NULL,
+    `experience` INTEGER NULL,
 
     UNIQUE INDEX `Employee_employeeCode_key`(`employeeCode`),
     INDEX `Employee_employmentStatus_idx`(`employmentStatus`),
@@ -612,6 +616,9 @@ CREATE TABLE `ShiftRotationPattern` (
     `name` VARCHAR(191) NOT NULL,
     `cycleDays` INTEGER NOT NULL,
     `isActive` BOOLEAN NOT NULL DEFAULT true,
+    `source` VARCHAR(191) NULL,
+    `month` INTEGER NULL,
+    `year` INTEGER NULL,
     `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     `updatedAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 
@@ -1437,7 +1444,8 @@ CREATE TABLE `EmployeeLeaveBalance` (
     `used` INTEGER NOT NULL DEFAULT 0,
 
     INDEX `EmployeeLeaveBalance_leaveTypeId_fkey`(`leaveTypeId`),
-    UNIQUE INDEX `EmployeeLeaveBalance_employeeId_leaveTypeId_permissionType_y_key`(`employeeId`, `leaveTypeId`, `permissionType`, `year`),
+    UNIQUE INDEX `EmployeeLeaveBalance_employeeId_leaveTypeId_year_key`(`employeeId`, `leaveTypeId`, `year`),
+    UNIQUE INDEX `EmployeeLeaveBalance_employeeId_permissionType_year_key`(`employeeId`, `permissionType`, `year`),
     PRIMARY KEY (`id`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
@@ -1591,18 +1599,27 @@ CREATE TABLE `ShiftApproval` (
     `employeeId` INTEGER NOT NULL,
     `rmDecision` ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'PENDING',
     `rmDecidedAt` DATETIME(3) NULL,
+    `rmRejectReason` TEXT NULL,
     `hrDecision` ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'PENDING',
     `hrDecidedAt` DATETIME(3) NULL,
+    `hrRejectReason` TEXT NULL,
     `status` ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'PENDING',
     `fixedShiftId` INTEGER NULL,
     `hasIncharge` BOOLEAN NOT NULL,
     `patternId` INTEGER NULL,
+    `month` INTEGER NULL,
+    `year` INTEGER NULL,
+    `isMonthly` BOOLEAN NULL DEFAULT true,
     `requestedAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     `requestedBy` INTEGER NOT NULL,
+    `appliedAt` DATETIME(3) NULL,
     `requestedMode` ENUM('FIXED', 'ROTATIONAL') NOT NULL,
     `startDate` DATETIME(3) NOT NULL,
 
     INDEX `ShiftApproval_employeeId_idx`(`employeeId`),
+    INDEX `ShiftApproval_fixedShiftId_idx`(`fixedShiftId`),
+    INDEX `ShiftApproval_patternId_idx`(`patternId`),
+    INDEX `ShiftApproval_requestedBy_idx`(`requestedBy`),
     PRIMARY KEY (`id`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
@@ -1638,6 +1655,9 @@ ALTER TABLE `Address` ADD CONSTRAINT `Address_employeeId_fkey` FOREIGN KEY (`emp
 
 -- AddForeignKey
 ALTER TABLE `Qualification` ADD CONSTRAINT `Qualification_employeeId_fkey` FOREIGN KEY (`employeeId`) REFERENCES `Employee`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE `Document` ADD CONSTRAINT `Document_employeeId_fkey` FOREIGN KEY (`employeeId`) REFERENCES `Employee`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE `Attendance` ADD CONSTRAINT `Attendance_employeeId_fkey` FOREIGN KEY (`employeeId`) REFERENCES `Employee`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -1908,6 +1928,18 @@ ALTER TABLE `RefreshToken` ADD CONSTRAINT `RefreshToken_userId_fkey` FOREIGN KEY
 
 -- AddForeignKey
 ALTER TABLE `Holiday` ADD CONSTRAINT `Holiday_calendarId_fkey` FOREIGN KEY (`calendarId`) REFERENCES `HolidayCalendar`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE `ShiftApproval` ADD CONSTRAINT `ShiftApproval_patternId_fkey` FOREIGN KEY (`patternId`) REFERENCES `ShiftRotationPattern`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE `ShiftApproval` ADD CONSTRAINT `ShiftApproval_fixedShiftId_fkey` FOREIGN KEY (`fixedShiftId`) REFERENCES `ShiftTemplate`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE `ShiftApproval` ADD CONSTRAINT `ShiftApproval_employeeId_fkey` FOREIGN KEY (`employeeId`) REFERENCES `Employee`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE `ShiftApproval` ADD CONSTRAINT `ShiftApproval_requestedBy_fkey` FOREIGN KEY (`requestedBy`) REFERENCES `Employee`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE `_PermissionToRole` ADD CONSTRAINT `_PermissionToRole_A_fkey` FOREIGN KEY (`A`) REFERENCES `Permission`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;

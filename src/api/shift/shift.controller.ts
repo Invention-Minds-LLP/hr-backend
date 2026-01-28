@@ -6,6 +6,15 @@ import { createNotification } from "../notifications/notifications.controller";
 
 const prisma = new PrismaClient();
 
+
+export function startOfWeek(date: Date): Date {
+  const d = new Date(date);
+  d.setDate(d.getDate() - d.getDay()); // Sunday
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+
 /* ==========================
    SHIFT TEMPLATE CONTROLLERS
    ========================== */
@@ -465,13 +474,102 @@ export const listShiftTemplates = async (_req: Request, res: Response) => {
   }
 };
 
+// export function startShiftCron() {
+//   cron.schedule('5 0 * * *', async () => {
+//     console.log('🕛 Running daily shift generation');
+
+//     const today = new Date();
+//     today.setHours(0, 0, 0, 0);
+
+
+//     /* =====================================================
+//        1️⃣ APPLY APPROVED SHIFT CHANGES EFFECTIVE TODAY
+//        ===================================================== */
+//     const pendingApprovals = await prisma.shiftApproval.findMany({
+//       where: {
+//         status: 'APPROVED',
+//         appliedAt: null,
+//         startDate: { lte: today }
+//       }
+//     });
+
+//     for (const approval of pendingApprovals) {
+//       await applyApprovedShift(approval);
+
+//       await prisma.shiftApproval.update({
+//         where: { id: approval.id },
+//         data: { appliedAt: today }
+//       });
+//     }
+//     const employees = await prisma.employee.findMany({
+//       where: {
+//         employmentStatus: {
+//           in: ['ACTIVE', 'NOTICE_PERIOD'],
+//         },
+//         EmployeeShiftSetting: {
+//           isNot: null,
+//         },
+//       },
+//       include: {
+//         EmployeeShiftSetting: true,
+//       },
+//     });
+
+
+//     for (const emp of employees) {
+//       const setting = emp.EmployeeShiftSetting!;
+//       let shiftId: number | null = null;
+
+//       // FIXED
+//       if (setting.mode === 'FIXED') {
+//         shiftId = setting.fixedShiftId;
+//       }
+
+//       // ROTATIONAL
+//       if (setting.mode === 'ROTATIONAL') {
+//         const start = startOfDay(setting.startDate);
+
+//         // 🚫 Do not apply rotation before startDate
+//         if (today < start) continue;
+
+//         shiftId = await getRotationalShiftId(
+//           setting.rotationPatternId!,
+//           setting.startDate,
+//           today
+//         );
+//       }
+
+//       if (!shiftId) continue;
+
+//       // 🔎 Check if assignment already exists
+//       const existing = await prisma.shiftAssignment.findFirst({
+//         where: {
+//           employeeId: emp.id,
+//           date: today
+//         }
+//       });
+
+//       // ✅ Do nothing if already exists (AUTO or MANUAL)
+//       if (existing) continue;
+
+//       // ✅ Create only if missing
+//       await prisma.shiftAssignment.create({
+//         data: {
+//           employeeId: emp.id,
+//           shiftId,
+//           date: today,
+//           // source: 'AUTO'
+//         }
+//       });
+//     }
+//   });
+// }
 export function startShiftCron() {
   cron.schedule('5 0 * * *', async () => {
-    console.log('🕛 Running daily shift generation');
+    console.log('🕛 Running daily fixed shift generation');
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-
 
     /* =====================================================
        1️⃣ APPLY APPROVED SHIFT CHANGES EFFECTIVE TODAY
@@ -480,8 +578,8 @@ export function startShiftCron() {
       where: {
         status: 'APPROVED',
         appliedAt: null,
-        startDate: { lte: today }
-      }
+        startDate: { lte: today },
+      },
     });
 
     for (const approval of pendingApprovals) {
@@ -489,16 +587,22 @@ export function startShiftCron() {
 
       await prisma.shiftApproval.update({
         where: { id: approval.id },
-        data: { appliedAt: today }
+        data: { appliedAt: today },
       });
     }
+
+    /* =====================================================
+       2️⃣ AUTO-GENERATE SHIFTS — FIXED ONLY
+       ===================================================== */
     const employees = await prisma.employee.findMany({
       where: {
         employmentStatus: {
           in: ['ACTIVE', 'NOTICE_PERIOD'],
         },
         EmployeeShiftSetting: {
-          isNot: null,
+          is: {
+            mode: 'FIXED',
+          },
         },
       },
       include: {
@@ -506,29 +610,9 @@ export function startShiftCron() {
       },
     });
 
-
     for (const emp of employees) {
       const setting = emp.EmployeeShiftSetting!;
-      let shiftId: number | null = null;
-
-      // FIXED
-      if (setting.mode === 'FIXED') {
-        shiftId = setting.fixedShiftId;
-      }
-
-      // ROTATIONAL
-      if (setting.mode === 'ROTATIONAL') {
-        const start = startOfDay(setting.startDate);
-
-        // 🚫 Do not apply rotation before startDate
-        if (today < start) continue;
-
-        shiftId = await getRotationalShiftId(
-          setting.rotationPatternId!,
-          setting.startDate,
-          today
-        );
-      }
+      const shiftId = setting.fixedShiftId;
 
       if (!shiftId) continue;
 
@@ -536,21 +620,21 @@ export function startShiftCron() {
       const existing = await prisma.shiftAssignment.findFirst({
         where: {
           employeeId: emp.id,
-          date: today
-        }
+          date: today,
+        },
       });
 
-      // ✅ Do nothing if already exists (AUTO or MANUAL)
+      // ✅ Skip if already assigned (AUTO or MANUAL)
       if (existing) continue;
 
-      // ✅ Create only if missing
+      // ✅ Create fixed shift assignment
       await prisma.shiftAssignment.create({
         data: {
           employeeId: emp.id,
           shiftId,
           date: today,
-          // source: 'AUTO'
-        }
+          // source: 'AUTO',
+        },
       });
     }
   });
@@ -668,19 +752,99 @@ export const listEmployeeShifts = async (req: Request, res: Response) => {
   res.json(shifts);
 };
 
+// export const updateEmployeeShift = async (req: Request, res: Response) => {
+//   const { assignmentId } = req.params;
+//   const { shiftId } = req.body;
+
+//   const updated = await prisma.shiftAssignment.update({
+//     where: { id: Number(assignmentId) },
+//     data: {
+//       shiftId,
+//     }
+//   });
+
+//   res.json(updated);
+// };
+// export const updateEmployeeShift = async (req: Request, res: Response) => {
+//   const { assignmentId } = req.params;
+//   const { shiftId } = req.body; // only shiftId comes from UI
+
+//   // get existing assignment
+//   const existing = await prisma.shiftAssignment.findUnique({
+//     where: { id: Number(assignmentId) },
+//     include: {
+//       shift: true,
+//       employee: {
+//         include: {
+//           reportingManagerId: true,
+//         },
+//       },
+//     },
+//   });
+
+//   if (!existing) {
+//     return res.status(404).json({ message: "Assignment not found" });
+//   }
+
+//   // update shift
+//   const updated = await prisma.shiftAssignment.update({
+//     where: { id: Number(assignmentId) },
+//     data: { shiftId },
+//     include: { shift: true },
+//   });
+
+//   // notify manager
+//   const managerId = existing.employee.reportingManager?.id;
+
+//   if (managerId) {
+//     await createNotification(
+//       managerId,
+//       `Shift updated for ${existing.employee.name}: ${existing.shift.name} → ${updated.shift.name} from ${fmtDate(existing.startDate)} to ${fmtDate(existing.endDate)}.`
+//     );
+//   }
+
+//   res.json(updated);
+// };
 export const updateEmployeeShift = async (req: Request, res: Response) => {
   const { assignmentId } = req.params;
   const { shiftId } = req.body;
 
+  // 1. Get existing assignment
+  const existing = await prisma.shiftAssignment.findUnique({
+    where: { id: Number(assignmentId) },
+    include: {
+      shift: true,
+      employee: true, // reportingManager comes automatically
+    },
+  });
+
+  if (!existing) {
+    return res.status(404).json({ message: "Assignment not found" });
+  }
+
+  // 2. Update shift
   const updated = await prisma.shiftAssignment.update({
     where: { id: Number(assignmentId) },
-    data: {
-      shiftId,
-    }
+    data: { shiftId },
+    include: {
+      shift: true,
+    },
   });
+
+  // 3. Notify reporting manager
+  const managerId = existing.employee.reportingManager;
+
+  if (managerId) {
+    await createNotification(
+      managerId,
+      `Shift updated for ${existing.employee.firstName} ${existing.employee.lastName}: ${existing.shift.name} → ${updated.shift.name} on ${fmtDate(existing.date)}.`
+    );
+  }
 
   res.json(updated);
 };
+
+
 export const assignFixed = async (req: Request, res: Response) => {
   try {
     const { employeeId, shiftId, startDate } = req.body;
@@ -793,7 +957,7 @@ export const getManagerEmployees = async (
     };
 
     // Reporting Manager → use reportingManager
-    if (roleId === 3) {
+    if (roleId === 3 || roleId === 1) {
       where.reportingManager = empId;
     }
 
@@ -1019,19 +1183,19 @@ export const requestShiftChange = async (
     notifyTo = employee.reportingManager;
   } else {
     // Reporting Manager raised → notify HR
-  // Reporting Manager raised → notify ALL HR
-  const hrIds = await getHRManagerId();
+    // Reporting Manager raised → notify ALL HR
+    const hrIds = await getHRManagerId();
 
-  await Promise.all(
-    hrIds.map(id =>
-      createNotification(
-        id,
-        `${requesterName} has requested a shift change for ${employeeName} effective from ${fmtDate(
-          approval.startDate
-        )}.`
+    await Promise.all(
+      hrIds.map(id =>
+        createNotification(
+          id,
+          `${requesterName} has requested a shift change for ${employeeName} effective from ${fmtDate(
+            approval.startDate
+          )}.`
+        )
       )
-    )
-  );
+    );
   }
 
   const requester = await prisma.employee.findUnique({
@@ -1132,9 +1296,27 @@ export const approveShiftChange = async (
     updated.hrDecision === 'APPROVED' &&
     (!updated.hasIncharge || updated.rmDecision === 'APPROVED');
 
-  // ✅ APPLY IMMEDIATELY IF startDate IS TODAY
-  if (fullyApproved && effectiveFrom.getTime() === today.getTime()) {
-    await applyApprovedShift(updated);
+  if (fullyApproved) {
+    if (approval.patternId) {
+      await applyMonthlyPattern(approval);
+    }
+    await prisma.employeeShiftSetting.upsert({
+      where: { employeeId: approval.employeeId },
+      update: {
+        mode: approval.requestedMode,
+        fixedShiftId: approval.fixedShiftId,
+        rotationPatternId: approval.patternId,
+        startDate: approval.startDate
+      },
+      create: {
+        employeeId: approval.employeeId,
+        mode: approval.requestedMode,
+        fixedShiftId: approval.fixedShiftId,
+        rotationPatternId: approval.patternId,
+        startDate: approval.startDate
+      }
+    });
+    // await applyApprovedShift(updated);
 
     await prisma.shiftApproval.update({
       where: { id: updated.id },
@@ -1145,23 +1327,22 @@ export const approveShiftChange = async (
   // ---------------- NOTIFY EMPLOYEE ----------------
 
   // ---------------- NOTIFY NEXT APPROVER ----------------
-if (role === 'RM' && decision === 'APPROVED') {
-  // 1️⃣ Notify ALL HR users
-  const hrIds = await getHRManagerId();
+  if (role === 'RM' && decision === 'APPROVED') {
+    // 1️⃣ Notify ALL HR users
+    const hrIds = await getHRManagerId();
 
-  await notifyUsers(
-    hrIds,
-    `Shift change request for ${approval.employee.firstName} ${approval.employee.lastName} is awaiting HR approval.`
-  );
+    await notifyUsers(
+      hrIds,
+      `Shift change request for ${approval.employee.firstName} ${approval.employee.lastName} is awaiting HR approval.`
+    );
 
-  // 2️⃣ Notify requester (Incharge or RM who raised it)
-  await createNotification(
-    updated.requestedBy,
-    `Your shift change request for ${approval.employee.firstName} ${
-      approval.employee.lastName
-    } effective from ${fmtDate(updated.startDate)} has been approved by the Reporting Manager.`
-  );
-}
+    // 2️⃣ Notify requester (Incharge or RM who raised it)
+    await createNotification(
+      updated.requestedBy,
+      `Your shift change request for ${approval.employee.firstName} ${approval.employee.lastName
+      } effective from ${fmtDate(updated.startDate)} has been approved by the Reporting Manager.`
+    );
+  }
 
   // ---------------- FINAL STATUS ----------------
   const isFinalApproved =
@@ -1289,7 +1470,7 @@ export const listApprovalsInbox = async (req: AuthenticatedRequest, res: Respons
         fixedShift: { select: { id: true, name: true, startTime: true, endTime: true, shiftType: true } },
         pattern: {
           select: {
-            id: true, name: true, cycleDays: true,
+            id: true, name: true, cycleDays: true, month: true, year: true, source: true,
             items: { orderBy: { dayIndex: 'asc' }, select: { dayIndex: true, shiftId: true } }
           }
         }
@@ -1377,3 +1558,852 @@ export function fmtDate(date: Date | string | null | undefined): string {
     year: "numeric"
   });
 }
+const MONTH_NAMES = [
+  'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+  'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'
+];
+
+function getMonthName(month: number) {
+  return MONTH_NAMES[month - 1]; // month is 1-based
+}
+
+// export const requestMonthlyShift = async (
+//   req: AuthenticatedRequest,
+//   res: Response
+// ) => {
+//   const { employeeId, month, year, weekShifts } = req.body;
+//   const requesterId = req.user.empId;
+
+//   // 1️⃣ Fetch employee hierarchy
+//   const employee = await prisma.employee.findUnique({
+//     where: { id: employeeId },
+//     select: {
+//       inchargeId: true,
+//       reportingManager: true,
+//       firstName: true,
+//       lastName: true
+//     }
+//   });
+
+//   if (!employee)
+//     return res.status(404).json({ error: 'Employee not found' });
+
+//   const hasIncharge = !!employee.inchargeId;
+
+//   // 2️⃣ Authorization (ROLE-WISE)
+//   if (hasIncharge && requesterId !== employee.inchargeId) {
+//     return res.status(403).json({
+//       error: 'Only in-charge can request monthly shift'
+//     });
+//   }
+
+//   if (!hasIncharge && requesterId !== employee.reportingManager) {
+//     return res.status(403).json({
+//       error: 'Only reporting manager can request monthly shift'
+//     });
+//   }
+
+//   // 3️⃣ Build date range (same logic you already had)
+//   const monthStart = new Date(year, month - 1, 1);
+//   const monthEnd = new Date(year, month, 0);
+
+//   const firstWeekStart = startOfWeek(monthStart);
+
+//   const lastWeekEnd = new Date(startOfWeek(monthEnd));
+//   lastWeekEnd.setDate(lastWeekEnd.getDate() + 6);
+
+//   const items: { dayIndex: number; shiftId: number }[] = [];
+//   let index = 0;
+//   let current = new Date(firstWeekStart);
+
+//   while (current <= lastWeekEnd) {
+//     const weekIndex = Math.floor(
+//       (current.getTime() - firstWeekStart.getTime()) / (7 * 86400000)
+//     );
+
+//     const shiftId = weekShifts[weekIndex];
+//     if (!shiftId) {
+//       return res.status(400).json({
+//         error: `Shift missing for week ${weekIndex + 1}`
+//       });
+//     }
+
+//     items.push({ dayIndex: index, shiftId });
+//     index++;
+//     current.setDate(current.getDate() + 1);
+//   }
+
+//   // 4️⃣ Create rotation pattern
+//   const pattern = await prisma.shiftRotationPattern.create({
+//     data: {
+//       name: `MONTH-${month}-${year}-EMP-${employeeId}`,
+//       cycleDays: items.length,
+//       source: 'MONTHLY',
+//       month,
+//       year
+//     }
+//   });
+
+//   await prisma.shiftRotationItem.createMany({
+//     data: items.map(i => ({ ...i, patternId: pattern.id }))
+//   });
+
+//   // 5️⃣ Create approval
+//   const approval = await prisma.shiftApproval.create({
+//     data: {
+//       employeeId,
+//       requestedMode: 'ROTATIONAL',
+//       patternId: pattern.id,
+//       startDate: monthStart, // legacy, ignored
+//       requestedBy: requesterId,
+//       hasIncharge
+//     }
+//   });
+
+//   // 6️⃣ Notifications (NEXT APPROVER)
+//   const employeeName = `${employee.firstName} ${employee.lastName}`;
+
+//   if (hasIncharge) {
+//     // In-charge → RM
+//     await createNotification(
+//       employee.reportingManager!,
+//       `Monthly shift request raised for ${employeeName}`
+//     );
+//   } else {
+//     // RM → HR
+//     const hrIds = await getHRManagerId();
+//     await Promise.all(
+//       hrIds.map(id =>
+//         createNotification(
+//           id,
+//           `Monthly shift request raised for ${employeeName}`
+//         )
+//       )
+//     );
+//   }
+
+//   res.status(201).json({
+//     message: 'Monthly shift request submitted successfully',
+//     approvalId: approval.id
+//   });
+// };
+
+
+
+// export async function applyMonthlyPattern(approval: any) {
+//   const pattern = await prisma.shiftRotationPattern.findUnique({
+//     where: { id: approval.patternId },
+//     include: { items: true }
+//   });
+
+//   if (!pattern) return;
+
+//   const monthStart = new Date(pattern.year!, (pattern.month!) - 1, 1);
+//   const firstWeekStart = startOfWeek(monthStart);
+
+//   const lastWeekEnd = new Date(
+//     startOfWeek(new Date(pattern.year!, pattern.month!, 0))
+//   );
+//   lastWeekEnd.setDate(lastWeekEnd.getDate() + 6);
+
+//   await prisma.shiftAssignment.deleteMany({
+//     where: {
+//       employeeId: approval.employeeId,
+//       date: { gte: firstWeekStart, lte: lastWeekEnd }
+//     }
+//   });
+
+//   const assignments = pattern.items.map(item => ({
+//     employeeId: approval.employeeId,
+//     shiftId: item.shiftId,
+//     date: new Date(firstWeekStart.getTime() + item.dayIndex * 86400000),
+//     acknowledged: false
+//   }));
+
+//   await prisma.shiftAssignment.createMany({
+//     data: assignments
+//   });
+// }
+// export const requestMonthlyShift = async (
+//   req: AuthenticatedRequest,
+//   res: Response
+// ) => {
+//   try {
+//     const { employeeId, month, year, weekShifts } = req.body;
+//     const requesterId = req.user.empId;
+
+//     /* ------------------------------------------------
+//      1️⃣ Fetch employee & hierarchy
+//     ------------------------------------------------ */
+//     const employee = await prisma.employee.findUnique({
+//       where: { id: employeeId },
+//       select: {
+//         inchargeId: true,
+//         reportingManager: true,
+//         firstName: true,
+//         lastName: true
+//       }
+//     });
+
+//     if (!employee) {
+//       return res.status(404).json({ error: 'Employee not found' });
+//     }
+
+//     const hasIncharge = !!employee.inchargeId;
+
+//     /* ------------------------------------------------
+//      2️⃣ Authorization
+//     ------------------------------------------------ */
+//     if (hasIncharge && requesterId !== employee.inchargeId) {
+//       return res.status(403).json({
+//         error: 'Only in-charge can request monthly shift'
+//       });
+//     }
+
+//     if (!hasIncharge && requesterId !== employee.reportingManager) {
+//       return res.status(403).json({
+//         error: 'Only reporting manager can request monthly shift'
+//       });
+//     }
+
+//     /* ------------------------------------------------
+//      3️⃣ Build FULL week range for the month
+//     ------------------------------------------------ */
+//     const monthStart = new Date(year, month - 1, 1);
+//     const monthEnd = new Date(year, month, 0);
+
+//     const firstWeekStart = startOfWeek(monthStart);
+//     const lastWeekEnd = new Date(startOfWeek(monthEnd));
+//     lastWeekEnd.setDate(lastWeekEnd.getDate() + 6);
+
+//     /* ------------------------------------------------
+//      4️⃣ Build rotation items
+//          - Loop WEEK by WEEK
+//          - Expand DAYS only when needed
+//     ------------------------------------------------ */
+//     const items: { dayIndex: number; shiftId: number }[] = [];
+
+//     let dayIndex = 0;
+//     let current = new Date(firstWeekStart);
+
+//     while (current <= lastWeekEnd) {
+//       const weekIndex = Math.floor(
+//         (current.getTime() - firstWeekStart.getTime()) / (7 * 86400000)
+//       );
+
+//       const shiftId = weekShifts?.[weekIndex];
+
+//       /* --------------------------------------------
+//          A️⃣ Week NOT sent from UI
+//          → check if already assigned (cross-month)
+//       -------------------------------------------- */
+//       if (!shiftId) {
+//         const existing = await prisma.shiftAssignment.findFirst({
+//           where: {
+//             employeeId,
+//             date: {
+//               gte: current,
+//               lte: new Date(new Date(current).setDate(current.getDate() + 6))
+//             }
+//           }
+//         });
+
+//         if (existing) {
+//           // ✅ Week already covered → skip
+//           current.setDate(current.getDate() + 7);
+//           continue;
+//         }
+
+//         // ❌ Truly missing week
+//         return res.status(400).json({
+//           error: `Shift missing for week ${weekIndex + 1}`
+//         });
+//       }
+
+//       /* --------------------------------------------
+//          B️⃣ Expand selected week into 7 days
+//       -------------------------------------------- */
+//       for (let d = 0; d < 7; d++) {
+//         const date = new Date(current);
+//         date.setDate(current.getDate() + d);
+
+//         if (date < firstWeekStart || date > lastWeekEnd) continue;
+
+//         items.push({
+//           dayIndex,
+//           shiftId
+//         });
+
+//         dayIndex++;
+//       }
+
+//       // ⏭ move to next week
+//       current.setDate(current.getDate() + 7);
+//     }
+
+//     /* ------------------------------------------------
+//      5️⃣ Create MONTHLY rotation pattern
+//     ------------------------------------------------ */
+//     const pattern = await prisma.shiftRotationPattern.create({
+//       data: {
+//         name: `MONTH-${month}-${year}-EMP-${employeeId}`,
+//         cycleDays: items.length,
+//         source: 'MONTHLY',
+//         month,
+//         year
+//       }
+//     });
+
+//     await prisma.shiftRotationItem.createMany({
+//       data: items.map(i => ({
+//         ...i,
+//         patternId: pattern.id
+//       }))
+//     });
+
+//     /* ------------------------------------------------
+//      6️⃣ Create approval
+//     ------------------------------------------------ */
+//     const approval = await prisma.shiftApproval.create({
+//       data: {
+//         employeeId,
+//         requestedMode: 'ROTATIONAL',
+//         patternId: pattern.id,
+//         startDate: monthStart, // legacy
+//         requestedBy: requesterId,
+//         hasIncharge
+//       }
+//     });
+
+//     /* ------------------------------------------------
+//      7️⃣ Notifications
+//     ------------------------------------------------ */
+//     const employeeName = `${employee.firstName} ${employee.lastName}`;
+
+//     if (hasIncharge) {
+//       await createNotification(
+//         employee.reportingManager!,
+//         `Monthly shift request raised for ${employeeName}`
+//       );
+//     } else {
+//       const hrIds = await getHRManagerId();
+//       await Promise.all(
+//         hrIds.map(id =>
+//           createNotification(
+//             id,
+//             `Monthly shift request raised for ${employeeName}`
+//           )
+//         )
+//       );
+//     }
+
+//     /* ------------------------------------------------
+//      8️⃣ Success
+//     ------------------------------------------------ */
+//     return res.status(201).json({
+//       message: 'Monthly shift request submitted successfully',
+//       approvalId: approval.id
+//     });
+
+//   } catch (err) {
+//     console.error('requestMonthlyShift error:', err);
+//     return res.status(500).json({
+//       error: 'Failed to submit monthly shift request'
+//     });
+//   }
+// };
+// export async function applyMonthlyPattern(approval: any) {
+//   const pattern = await prisma.shiftRotationPattern.findUnique({
+//     where: { id: approval.patternId },
+//     include: { items: true }
+//   });
+
+//   if (!pattern) return;
+
+//   const monthStart = new Date(pattern.year!, pattern.month! - 1, 1);
+//   const firstWeekStart = startOfWeek(monthStart);
+
+//   const lastDayIndex = Math.max(...pattern.items.map(i => i.dayIndex));
+//   const lastDate = new Date(
+//     firstWeekStart.getTime() + lastDayIndex * 86400000
+//   );
+
+//   // ✅ DELETE ENTIRE PATTERN RANGE
+//   await prisma.shiftAssignment.deleteMany({
+//     where: {
+//       employeeId: approval.employeeId,
+//       date: {
+//         gte: firstWeekStart,
+//         lte: lastDate
+//       }
+//     }
+//   });
+
+//   // ✅ RECREATE ALL DAYS CLEANLY
+//   const assignments = pattern.items.map(item => ({
+//     employeeId: approval.employeeId,
+//     shiftId: item.shiftId,
+//     date: new Date(
+//       firstWeekStart.getTime() + item.dayIndex * 86400000
+//     ),
+//     acknowledged: false
+//   }));
+
+//   await prisma.shiftAssignment.createMany({ data: assignments });
+// }
+
+
+// export const getMonthlyShiftStatus = async (req:Request, res: Response) => {
+//   const { employeeId, month, year } = req.body;
+
+//   const pattern = await prisma.shiftRotationPattern.findFirst({
+//     where: {
+//       source: 'MONTHLY',
+//       month,
+//       year,
+//       shiftApprovals: {
+//         some: {
+//           employeeId,
+//           status: 'APPROVED'
+//         }
+//       }
+//     },
+//     include: {
+//       items: {
+//         orderBy: { dayIndex: 'asc' }
+//       }
+//     }
+//   });
+
+//   if (!pattern) {
+//     return res.json({ isMonthAssigned: false });
+//   }
+
+//   // weekIndex → shiftId
+//   const weekShifts: Record<number, number> = {};
+
+//   pattern.items.forEach((item: { dayIndex: number; shiftId: number }) => {
+//     const weekIndex = Math.floor(item.dayIndex / 7);
+
+//     if (weekShifts[weekIndex] === undefined) {
+//       weekShifts[weekIndex] = item.shiftId;
+//     }
+//   });
+
+//   return res.json({
+//     isMonthAssigned: true,
+//     weekShifts
+//   });
+// };
+export const requestMonthlyShift = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const { employeeId, month, year, weekShifts } = req.body;
+    const requesterId = req.user.empId;
+
+    /* -----------------------------
+       1️⃣ Authorization (unchanged)
+    ----------------------------- */
+
+    const employee = await prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        inchargeId: true,
+        reportingManager: true,
+        firstName: true,
+        lastName: true,
+        employeeCode: true
+      }
+    });
+
+    if (!employee) {
+      return res.status(404).json({ error: 'Employee not found' });
+    }
+
+    const hasIncharge = !!employee.inchargeId;
+
+    if (hasIncharge && requesterId !== employee.inchargeId) {
+      return res.status(403).json({ error: 'Only in-charge can request monthly shift' });
+    }
+
+    if (!hasIncharge && requesterId !== employee.reportingManager) {
+      return res.status(403).json({ error: 'Only reporting manager can request monthly shift' });
+    }
+
+    /* -----------------------------
+       2️⃣ Calculate range
+    ----------------------------- */
+
+    const monthStart = new Date(year, month - 1, 1);
+    const monthEnd = new Date(year, month, 0);
+
+    const firstWeekStart = startOfWeek(monthStart);
+    const lastWeekEnd = new Date(startOfWeek(monthEnd));
+    lastWeekEnd.setDate(lastWeekEnd.getDate() + 6);
+
+    /* -----------------------------
+       3️⃣ Build items (FIXED)
+    ----------------------------- */
+
+    const items: { dayIndex: number; shiftId: number }[] = [];
+
+    let current = new Date(firstWeekStart);
+
+    while (current <= lastWeekEnd) {
+      const weekIndex = Math.floor(
+        (current.getTime() - firstWeekStart.getTime()) / (7 * 86400000)
+      );
+
+      const shiftId = weekShifts?.[weekIndex];
+
+      if (!shiftId) {
+        // skip locked / past weeks
+        current.setDate(current.getDate() + 7);
+        continue;
+      }
+
+      // ✅ EXPAND WEEK → dayIndex FROM DATE
+      for (let d = 0; d < 7; d++) {
+        const date = new Date(current);
+        date.setDate(current.getDate() + d);
+
+        if (date < firstWeekStart || date > lastWeekEnd) continue;
+
+        const dayIndex = Math.floor(
+          (date.getTime() - firstWeekStart.getTime()) / 86400000
+        );
+
+        items.push({
+          dayIndex,
+          shiftId
+        });
+      }
+
+      current.setDate(current.getDate() + 7);
+    }
+
+    /* -----------------------------
+       4️⃣ Create pattern
+    ----------------------------- */
+    const monthName = getMonthName(month);
+    const pattern = await prisma.shiftRotationPattern.create({
+      data: {
+        name: `MONTH-${monthName}-${year}-EMP-${employee.employeeCode}`,
+        cycleDays: items.length,
+        source: 'MONTHLY',
+        month,
+        year
+      }
+    });
+
+    await prisma.shiftRotationItem.createMany({
+      data: items.map(i => ({
+        ...i,
+        patternId: pattern.id
+      }))
+    });
+
+    /* -----------------------------
+       5️⃣ Approval (unchanged)
+    ----------------------------- */
+
+    const approval = await prisma.shiftApproval.create({
+      data: {
+        employeeId,
+        requestedMode: 'ROTATIONAL',
+        patternId: pattern.id,
+        startDate: monthStart,
+        requestedBy: requesterId,
+        hasIncharge
+      }
+    });
+
+    return res.status(201).json({
+      message: 'Monthly shift request submitted successfully',
+      approvalId: approval.id
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to submit monthly shift request' });
+  }
+};
+
+// export async function applyMonthlyPattern(approval: any) {
+//   const pattern = await prisma.shiftRotationPattern.findUnique({
+//     where: { id: approval.patternId },
+//     include: { items: true }
+//   });
+
+//   if (!pattern || pattern.items.length === 0) return;
+
+//   /* ------------------------------------------------
+//      1️⃣ Calculate EXACT coverage range
+//   ------------------------------------------------ */
+//   const monthStart = new Date(pattern.year!, pattern.month! - 1, 1);
+//   const firstWeekStart = startOfWeek(monthStart);
+
+//   const coverageStart = new Date(firstWeekStart);
+//   const coverageEnd = new Date(
+//     firstWeekStart.getTime() +
+//     (pattern.items.length - 1) * 86400000
+//   );
+
+//   console.log(coverageStart, coverageEnd, 'coverage')
+
+//   /* ------------------------------------------------
+//      2️⃣ DELETE only covered range (NOT full month)
+//   ------------------------------------------------ */
+//   // await prisma.shiftAssignment.deleteMany({
+//   //   where: {
+//   //     employeeId: approval.employeeId,
+//   //     date: {
+//   //       gte: coverageStart,
+//   //       lte: coverageEnd
+//   //     }
+//   //   }
+//   // });
+
+//   // const monthStart = new Date(pattern.year!, pattern.month! - 1, 1);
+// const monthEnd = new Date(pattern.year!, pattern.month!, 0);
+
+
+// console.log(monthStart, monthEnd)
+
+// await prisma.shiftAssignment.deleteMany({
+//   where: {
+//     employeeId: approval.employeeId,
+//     date: {
+//       gte: monthStart,
+//       lte: monthEnd
+//     }
+//   }
+// });
+
+
+//   /* ------------------------------------------------
+//      3️⃣ Re-create assignments
+//   ------------------------------------------------ */
+//   const assignments = pattern.items.map(item => ({
+//     employeeId: approval.employeeId,
+//     shiftId: item.shiftId,
+//     date: new Date(
+//       firstWeekStart.getTime() + item.dayIndex * 86400000
+//     ),
+//     acknowledged: false
+//   }));
+
+//   await prisma.shiftAssignment.createMany({
+//     data: assignments
+//   });
+// }
+
+export async function applyMonthlyPattern(approval: any) {
+  console.log('================ APPLY MONTHLY PATTERN ================');
+  console.log('Approval ID:', approval.id);
+  console.log('Employee ID:', approval.employeeId);
+  console.log('Pattern ID:', approval.patternId);
+
+  const pattern = await prisma.shiftRotationPattern.findUnique({
+    where: { id: approval.patternId },
+    include: { items: true }
+  });
+
+  if (!pattern || pattern.items.length === 0) {
+    console.log('❌ Pattern not found or empty');
+    return;
+  }
+
+  console.log('Pattern:', {
+    id: pattern.id,
+    month: pattern.month,
+    year: pattern.year,
+    totalItems: pattern.items.length
+  });
+
+  const monthStart = new Date(pattern.year!, pattern.month! - 1, 1);
+  const firstWeekStart = startOfWeek(monthStart);
+
+  console.log('Month Start:', monthStart.toISOString());
+  console.log('First Week Start:', firstWeekStart.toISOString());
+
+  const dayIndexes = pattern.items.map(i => i.dayIndex).sort((a, b) => a - b);
+  const minDayIndex = dayIndexes[0];
+  const maxDayIndex = dayIndexes[dayIndexes.length - 1];
+
+  console.log('DayIndexes:', dayIndexes);
+  console.log('Min DayIndex:', minDayIndex);
+  console.log('Max DayIndex:', maxDayIndex);
+
+  const coverageStart = new Date(
+    firstWeekStart.getTime() + minDayIndex * 86400000
+  );
+  const coverageEnd = new Date(
+    firstWeekStart.getTime() + maxDayIndex * 86400000
+  );
+
+  console.log('Coverage Start:', coverageStart.toISOString());
+  console.log('Coverage End:', coverageEnd.toISOString());
+
+  // 🔍 SEE WHAT WILL BE DELETED
+  const willDelete = await prisma.shiftAssignment.findMany({
+    where: {
+      employeeId: approval.employeeId,
+      date: {
+        gte: coverageStart,
+        lte: coverageEnd
+      }
+    },
+    select: { id: true, date: true, shiftId: true }
+  });
+
+  console.log(
+    `⚠️ Assignments to be deleted (${willDelete.length}):`,
+    willDelete.map(a => ({
+      id: a.id,
+      date: a.date.toISOString(),
+      shiftId: a.shiftId
+    }))
+  );
+
+  // ✅ DELETE
+  await prisma.shiftAssignment.deleteMany({
+    where: {
+      employeeId: approval.employeeId,
+      date: {
+        gte: coverageStart,
+        lte: coverageEnd
+      }
+    }
+  });
+
+  console.log('✅ Deleted assignments');
+
+  // 🔁 CREATE NEW ASSIGNMENTS
+  const assignments = pattern.items.map(item => {
+    const date = new Date(
+      firstWeekStart.getTime() + item.dayIndex * 86400000
+    );
+
+    console.log('Creating assignment:', {
+      dayIndex: item.dayIndex,
+      shiftId: item.shiftId,
+      date: date.toISOString()
+    });
+
+    return {
+      employeeId: approval.employeeId,
+      shiftId: item.shiftId,
+      date,
+      acknowledged: false
+    };
+  });
+
+  await prisma.shiftAssignment.createMany({ data: assignments });
+
+  console.log(
+    `✅ Created ${assignments.length} assignments`
+  );
+  console.log('=======================================================');
+}
+
+
+export const getMonthlyShiftStatus = async (req: Request, res: Response) => {
+  const { employeeId, month, year } = req.body;
+
+  const pattern = await prisma.shiftRotationPattern.findFirst({
+    where: {
+      source: 'MONTHLY',
+      month,
+      year,
+      shiftApprovals: {
+        some: {
+          employeeId,
+          status: 'APPROVED'
+        }
+      }
+    },
+    include: {
+      items: { orderBy: { dayIndex: 'asc' } }
+    }
+  });
+
+  if (!pattern) {
+    return res.json({ isMonthAssigned: false });
+  }
+
+  const monthStart = new Date(year, month - 1, 1);
+  const monthEnd = new Date(year, month, 0);
+  const firstWeekStart = startOfWeek(monthStart);
+
+  const weekShifts: Record<number, number> = {};
+
+  pattern.items.forEach(item => {
+    const date = new Date(
+      firstWeekStart.getTime() + item.dayIndex * 86400000
+    );
+
+    // ❌ ignore days outside month
+    if (date < monthStart || date > monthEnd) return;
+
+    const weekIndex = Math.floor(
+      (date.getTime() - firstWeekStart.getTime()) / (7 * 86400000)
+    );
+
+    if (weekShifts[weekIndex] === undefined) {
+      weekShifts[weekIndex] = item.shiftId;
+    }
+  });
+
+  return res.json({
+    isMonthAssigned: true,
+    weekShifts
+  });
+};
+
+export const getEmployeeDailyShiftsForRange = async (
+  req: Request,
+  res: Response
+) => {
+  try {
+    const { employeeId, from, to } = req.query;
+
+    if (!employeeId || !from || !to) {
+      return res.status(400).json({
+        error: 'employeeId, from and to are required'
+      });
+    }
+
+    const shifts = await prisma.shiftAssignment.findMany({
+      where: {
+        employeeId: Number(employeeId),
+        date: {
+          gte: new Date(from as string),
+          lte: new Date(to as string)
+        }
+      },
+      orderBy: { date: 'asc' },
+      select: {
+        date: true,
+        shiftId: true,
+        shift: {
+          select: {
+            id: true,
+            name: true,
+            startTime: true,
+            endTime: true
+          }
+        }
+      }
+    });
+
+    res.json(shifts);
+  } catch (error) {
+    console.error('getEmployeeDailyShiftsForRange error:', error);
+    res.status(500).json({
+      error: 'Failed to fetch daily shifts'
+    });
+  }
+};

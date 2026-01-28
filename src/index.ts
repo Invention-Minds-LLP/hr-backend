@@ -90,7 +90,8 @@ const allowedOrigins = [
   'https://hrminds.imapps.in',
   'https://hrmindsjmrh.imapps.in',
   'http://localhost:4200',
-  'https://rashtrotthanahospital.com'
+  'https://rashtrotthanahospital.com',
+  'http://192.168.8.189:4300'
 ];
 
 app.use(cors({
