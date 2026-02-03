@@ -2,6 +2,11 @@ import { Request, Response } from 'express';
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 
+type WeekOffConfig = {
+  weeks: Record<number, number>;
+};
+
+
 import { prisma } from "../../lib/prisma";
 
 export const getAttendanceCalendar = async (req: Request, res: Response) => {
@@ -51,86 +56,292 @@ export const getAttendanceCalendar = async (req: Request, res: Response) => {
       })
     ]);
 
+    const approvedMonthlyShift = await prisma.shiftApproval.findFirst({
+      where: {
+        employeeId,
+        status: 'APPROVED',
+        requestedMode: 'ROTATIONAL',
+        pattern: {
+          source: 'MONTHLY',
+          month: start.getMonth() + 1,
+          year: start.getFullYear()
+        }
+      },
+      select: {
+        weekOffConfig: true
+      }
+    });
+
+
+    const approvedWeekOffDates = new Set<any>();
+
+    // if (approvedMonthlyShift?.weekOffConfig?.weeks) {
+    //   const firstWeekStart = new Date(start);
+    //   firstWeekStart.setDate(start.getDate() - start.getDay()); // Sunday
+
+    //   Object.entries(approvedMonthlyShift.weekOffConfig.weeks).forEach(
+    //     ([weekIndexStr, dayOfWeek]) => {
+    //       const weekIndex = Number(weekIndexStr);
+
+    //       const date = new Date(firstWeekStart);
+    //       date.setDate(
+    //         firstWeekStart.getDate() + weekIndex * 7 + Number(dayOfWeek)
+    //       );
+
+    //       if (date >= start && date < end) {
+    //         approvedWeekOffDates.add(date.toISOString().slice(0, 10));
+    //       }
+    //     }
+    //   );
+    // }
+    const weekOffConfig = approvedMonthlyShift?.weekOffConfig as
+      | WeekOffConfig
+      | null
+      | undefined;
+
+    if (weekOffConfig?.weeks) {
+      const firstWeekStart = new Date(start);
+      firstWeekStart.setDate(start.getDate() - start.getDay()); // Sunday
+      firstWeekStart.setHours(0, 0, 0, 0);
+
+      Object.entries(weekOffConfig.weeks).forEach(
+        ([weekIndexStr, dayOfWeek]) => {
+          const weekIndex = Number(weekIndexStr);
+
+          if (
+            Number.isNaN(weekIndex) ||
+            typeof dayOfWeek !== 'number'
+          ) {
+            return;
+          }
+
+          const date = new Date(firstWeekStart);
+          date.setDate(
+            firstWeekStart.getDate() + weekIndex * 7 + dayOfWeek
+          );
+
+          if (date >= start && date < end) {
+            approvedWeekOffDates.add(
+              date.toISOString().slice(0, 10)
+            );
+          }
+        }
+      );
+    }
+
+
     // console.log('Attendance records:', attendance);
     const shiftMap = buildShiftMap(shiftSettings, start);
+    const result: any[] = [];
 
+    // Attendance
+    attendance.forEach(a => {
+      const checkIn = a.checkIn ? new Date(a.checkIn) : null;
+      const checkOut = a.checkOut ? new Date(a.checkOut) : null;
 
-    const result = [
-      ...attendance.map(a => {
-        const checkIn = a.checkIn ? new Date(a.checkIn) : null;
-        const checkOut = a.checkOut ? new Date(a.checkOut) : null;
+      const shift = shiftMap.get(a.employeeId);
+      const shiftStart = shift?.start || null;
+      const shiftEnd = shift?.end || null;
 
-        const shift = shiftMap.get(a.employeeId);
-        const shiftStart = shift?.start || null;
-        const shiftEnd = shift?.end || null;
+      const hours =
+        checkIn && checkOut
+          ? Math.round((checkOut.getTime() - checkIn.getTime()) / 3600000)
+          : 0;
 
-        // ------ WORKING HOURS ------
-        const hours = checkIn && checkOut ? Math.round(((checkOut.getTime() - checkIn.getTime())) / 3600000) : 0;
+      let flag: string | null = null;
 
-        // ------ FLAGS ------
-        let flag = null;
+      if (checkIn && shiftStart && checkIn > shiftStart) flag = 'late-login';
+      if (checkOut && shiftEnd && checkOut < shiftEnd)
+        flag = flag ? `${flag},early-logout` : 'early-logout';
+      if (hours > 0 && hours < 4) flag = 'half-day';
 
-        // Late login
-        if (checkIn && shiftStart && checkIn > shiftStart) {
-          flag = "late-login";
-        }
+      let finalStatus = a.status;
 
-        // Early logout
-        if (checkOut && shiftEnd && checkOut < shiftEnd) {
-          flag = flag ? `${flag},early-logout` : "early-logout";
-        }
+      if (flag) {
+        if (!a.attendanceApproval) finalStatus = 'PendingApproval';
+        else if (a.attendanceApproval === 'APPROVED') finalStatus = 'Present';
+        else if (a.attendanceApproval === 'REJECTED') finalStatus = 'Absent';
+      }
 
-        // Half day
-        if (hours > 0 && hours < 4) {
-          flag = "half-day";
-        }
-        // ----- Determine finalStatus -----
-        let finalStatus = a.status;  // Present / Absent from DB
+      result.push({
+        title: `Worked ${hours}h`,
+        start: a.date,
+        type: 'attendance',
+        status: a.status,
+        checkIn: a.checkIn,
+        checkOut: a.checkOut,
+        hours,
+        flag,
+        finalStatus,
+        needsApproval: !!flag && a.attendanceApproval === null,
+        attendanceId: a.id,
+      });
+    });
 
-        if (flag) {   // late login, early logout, half day
-          if (!a.attendanceApproval) {
-            finalStatus = 'PendingApproval';
-          }
-          else if (a.attendanceApproval === 'APPROVED') {
-            finalStatus = 'Present';
-          }
-          else if (a.attendanceApproval === 'REJECTED') {
-            finalStatus = 'Absent';
-          }
-        }
-        return {
-          title: `Worked ${hours}h`,
-          start: a.date,
-          type: 'attendance',
-          status: a.status,
-          checkIn: a.checkIn,
-          checkOut: a.checkOut,
-          hours,
-          shiftStart,
-          shiftEnd,
-          flag,
-          finalStatus,   // ⭐ THIS is your computed attendance status
-          needsApproval: !!flag && a.attendanceApproval === null,
-          attendanceApproval: a.attendanceApproval,
-          approvedBy: a.approvedBy,
-          approvedAt: a.approvedAt,
-          attendanceId: a.id,
-        };
-      }),
+    // Leaves
+    leaves.forEach(l => {
+      let current = new Date(l.startDate);
+      const endDate = new Date(l.endDate);
 
+      while (current <= endDate) {
+        result.push({
+          title: `Leave (${l.leaveType?.name ?? 'Leave'})`,
+          start: new Date(current),
+          type: 'leave',
+        });
+        current.setDate(current.getDate() + 1);
+      }
+    });
 
-      ...leaves.map(l => ({
-        title: `Leave (${l.leaveType?.name ?? 'Unknown'})`,
-        start: l.startDate,
-        end: l.endDate,
-        type: 'leave',
-      })),
-      ...permissions.map(p => ({
+    // Permissions
+    permissions.forEach(p => {
+      result.push({
         title: `Permission ${p.timing ?? ''}`,
         start: p.day,
         type: 'permission',
-      })),
-    ];
+      });
+    });
+
+    /* ---------------------------------------
+       6️⃣ WEEK OFF EVENTS (IMPORTANT PART)
+    --------------------------------------- */
+
+    let cursor = new Date(start);
+
+    while (cursor < end) {
+      const iso = cursor.toISOString().slice(0, 10);
+
+      if (approvedWeekOffDates.size > 0) {
+        // ✅ Approved month → ONLY approved week-offs
+        if (approvedWeekOffDates.has(iso)) {
+          result.push({
+            title: 'Week Off',
+            start: new Date(cursor),
+            type: 'weekoff',
+            approved: true
+          });
+        }
+      } else {
+        // ❌ Not approved → Sunday fallback
+        if (cursor.getDay() === 0) {
+          result.push({
+            title: 'Week Off',
+            start: new Date(cursor),
+            type: 'weekoff',
+            approved: false
+          });
+        }
+      }
+
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    // const result = [
+    //   ...attendance.map(a => {
+    //     const checkIn = a.checkIn ? new Date(a.checkIn) : null;
+    //     const checkOut = a.checkOut ? new Date(a.checkOut) : null;
+
+    //     const shift = shiftMap.get(a.employeeId);
+    //     const shiftStart = shift?.start || null;
+    //     const shiftEnd = shift?.end || null;
+
+    //     // ------ WORKING HOURS ------
+    //     const hours = checkIn && checkOut ? Math.round(((checkOut.getTime() - checkIn.getTime())) / 3600000) : 0;
+
+    //     // ------ FLAGS ------
+    //     let flag = null;
+
+    //     // Late login
+    //     if (checkIn && shiftStart && checkIn > shiftStart) {
+    //       flag = "late-login";
+    //     }
+
+    //     // Early logout
+    //     if (checkOut && shiftEnd && checkOut < shiftEnd) {
+    //       flag = flag ? `${flag},early-logout` : "early-logout";
+    //     }
+
+    //     // Half day
+    //     if (hours > 0 && hours < 4) {
+    //       flag = "half-day";
+    //     }
+    //     // ----- Determine finalStatus -----
+    //     let finalStatus = a.status;  // Present / Absent from DB
+
+    //     if (flag) {   // late login, early logout, half day
+    //       if (!a.attendanceApproval) {
+    //         finalStatus = 'PendingApproval';
+    //       }
+    //       else if (a.attendanceApproval === 'APPROVED') {
+    //         finalStatus = 'Present';
+    //       }
+    //       else if (a.attendanceApproval === 'REJECTED') {
+    //         finalStatus = 'Absent';
+    //       }
+    //     }
+    //     return {
+    //       title: `Worked ${hours}h`,
+    //       start: a.date,
+    //       type: 'attendance',
+    //       status: a.status,
+    //       checkIn: a.checkIn,
+    //       checkOut: a.checkOut,
+    //       hours,
+    //       shiftStart,
+    //       shiftEnd,
+    //       flag,
+    //       finalStatus,   // ⭐ THIS is your computed attendance status
+    //       needsApproval: !!flag && a.attendanceApproval === null,
+    //       attendanceApproval: a.attendanceApproval,
+    //       approvedBy: a.approvedBy,
+    //       approvedAt: a.approvedAt,
+    //       attendanceId: a.id,
+    //     };
+    //   }),
+
+
+    //   ...leaves.map(l => ({
+    //     title: `Leave (${l.leaveType?.name ?? 'Unknown'})`,
+    //     start: l.startDate,
+    //     end: l.endDate,
+    //     type: 'leave',
+    //   })),
+    //   ...permissions.map(p => ({
+    //     title: `Permission ${p.timing ?? ''}`,
+    //     start: p.day,
+    //     type: 'permission',
+    //   })),
+    // ];
+
+    // let cursor = new Date(start);
+
+    // while (cursor < end) {
+    //   const iso = cursor.toISOString().slice(0, 10);
+
+    //   if (approvedWeekOffDates.size > 0) {
+    //     // ✅ Approved month → ONLY approved week-offs
+    //     if (approvedWeekOffDates.has(iso)) {
+    //       result.push({
+    //         title: 'Week Off',
+    //         start: new Date(cursor),
+    //         type: 'weekoff',
+    //         approved: true
+    //       });
+    //     }
+    //   } else {
+    //     // ❌ Not approved → Sunday fallback
+    //     if (cursor.getDay() === 0) {
+    //       result.push({
+    //         title: 'Week Off',
+    //         start: new Date(cursor),
+    //         type: 'weekoff',
+    //         approved: false
+    //       });
+    //     }
+    //   }
+
+    //   cursor.setDate(cursor.getDate() + 1);
+    // }
 
     res.json(result);
   } catch (err) {

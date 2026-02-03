@@ -1601,6 +1601,7 @@ model ShiftApproval {
   month               Int?
   year                Int?
   isMonthly           Boolean?              @default(false)
+  weekOffConfig       Json? 
   requestedAt         DateTime              @default(now())
   requestedBy         Int
   requestedMode       ShiftAssignMode
