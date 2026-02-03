@@ -12,7 +12,7 @@ export async function startSchedulers() {
   initLeaveEndSchedular();
   initQuarterlyAppraisalScheduler();
   startShiftCron();
-  startAttendanceScheduler();
+  // startAttendanceScheduler();
   // await runBiometricBackfill();
 }
 const schedules = [

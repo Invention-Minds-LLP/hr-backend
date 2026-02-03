@@ -56,7 +56,7 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       include: {
         leaveType: true,
         employee: {
-          select: { firstName: true, lastName: true, employeeCode: true, reportingManager: true, inchargeId: true }
+          select: { firstName: true, lastName: true, employeeCode: true, reportingManager: true, inchargeId: true, departmentId: true }
         }
       }
     });
@@ -102,6 +102,45 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     //     console.error("WFH notify (manager) failed:", e);
     //   }
     // }
+    const recipients = new Set<number>();
+
+    // If employee is HR (dept 1)
+    if (emp.departmentId === 1) {
+      if (emp.reportingManager) {
+        recipients.add(emp.reportingManager);
+      }
+    } else {
+      // Normal employee
+
+      if (emp.inchargeId) {
+        recipients.add(emp.inchargeId);
+      }
+
+      if (emp.reportingManager) {
+        recipients.add(emp.reportingManager);
+      }
+
+      // Add HR managers (dept 1)
+      const hrManagers = await prisma.employee.findMany({
+        where: {
+          departmentId: 1,
+          employmentStatus: "ACTIVE"
+        },
+        select: { id: true }
+      });
+
+      hrManagers.forEach(hr => recipients.add(hr.id));
+    }
+    // const name = [emp.firstName, emp.lastName].filter(Boolean).join(" ");
+
+    const message = `${name} has applied for leave for ${days} day(s), from ${fmtDate(
+      leaveRequest.startDate
+    )} to ${fmtDate(leaveRequest.endDate)}. Please review and take action.`;
+
+    for (const id of recipients) {
+      await createNotification(id, message);
+    }
+
     if (notifyTo) {
       const approver = await prisma.employee.findUnique({
         where: { id: notifyTo },
@@ -111,11 +150,11 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
         .filter(Boolean)
         .join(" ");
 
-      const message = `${name} has applied for leave for ${days} day(s), from ${fmtDate(
-        leaveRequest.startDate
-      )} to ${fmtDate(leaveRequest.endDate)}. Please review and take the necessary action.`;
+      // const message = `${name} has applied for leave for ${days} day(s), from ${fmtDate(
+      //   leaveRequest.startDate
+      // )} to ${fmtDate(leaveRequest.endDate)}. Please review and take the necessary action.`;
 
-      await createNotification(notifyTo, message);
+      // await createNotification(notifyTo, message);
 
       if (approver?.phone) {
         await sendWhatsAppTemplate({

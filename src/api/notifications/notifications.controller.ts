@@ -154,6 +154,21 @@ export const saveDeviceToken = async (req: Request, res: Response) => {
 
   res.json({ success: true });
 };
+export const removeDeviceToken = async (req: Request, res: Response) => {
+  const { token } = req.body;
+
+  if (!token) {
+    return res.status(400).json({ error: "Token required" });
+  }
+
+  await prisma.deviceToken.deleteMany({
+    where: { token }
+  });
+
+  res.json({ success: true });
+};
+
+
 import admin from '../../lib/firebase';
 
 export const sendPushNotification = async (

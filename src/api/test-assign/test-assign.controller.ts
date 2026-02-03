@@ -149,7 +149,7 @@ export const getAssignedTests = async (req: Request, res: Response) => {
         status: latest ? latest.status : a.status, // if attempted, show latest status
         latestAttempt: latest,               // { id, score, status, createdAt, ... } or null
         latestScore: score,                  // number | null
-        result: pass === null ? null : pass ? 'Pass' : 'Fail', // 'Pass' | 'Fail' | null
+        result: pass === null ? null : pass ? 'Pass' : 'On-Hold', // 'Pass' | 'Fail' | null
       };
     });
 

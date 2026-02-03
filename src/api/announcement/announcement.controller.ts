@@ -42,18 +42,47 @@ function buildAudienceWhere(audienceJson?: string | null): Prisma.EmployeeWhereI
     if (f.all) {
       return where; // no extra filters (all active employees)
     }
-    if (f.departmentId?.length) {
-      where.departmentId = { in: f.departmentId.map((d: any) => Number(d)) };
+    // if (f.departmentId?.length) {
+    //   where.departmentId = { in: f.departmentId.map((d: any) => Number(d)) };
+    // }
+    // if (f.branchId?.length) {
+    //   where.branchId = { in: f.branchId.map((b: any) => Number(b)) };
+    // }
+    // if (f.roleId?.length) {
+    //   where.roleId = { in: f.roleId.map((r: any) => Number(r)) };
+    // }
+    // if (f.employeeId?.length) {
+    //   where.id = { in: f.employeeId.map((e: any) => Number(e)) };
+    // }
+    if (Array.isArray(f.departmentId) && f.departmentId.length > 0) {
+      where.departmentId = { in: f.departmentId.map(Number) };
     }
-    if (f.branchId?.length) {
-      where.branchId = { in: f.branchId.map((b: any) => Number(b)) };
+
+    if (Array.isArray(f.branchId) && f.branchId.length > 0) {
+      where.branchId = { in: f.branchId.map(Number) };
     }
-    if (f.roleId?.length) {
-      where.roleId = { in: f.roleId.map((r: any) => Number(r)) };
+
+    if (Array.isArray(f.roleId) && f.roleId.length > 0) {
+      where.roleId = { in: f.roleId.map(Number) };
     }
-    if (f.employeeId?.length) {
-      where.id = { in: f.employeeId.map((e: any) => Number(e)) };
-    }
+
+    // if (Array.isArray(f.employeeId) && f.employeeId.length > 0) {
+    //   where.id = { in: f.employeeId.map(Number) };
+    // }
+if (f.employeeId) {
+  const ids = Array.isArray(f.employeeId)
+    ? f.employeeId
+    : [f.employeeId];
+
+  where.id = {
+    in: ids.map((e: any) =>
+      typeof e === "object" ? Number(e.id) : Number(e)
+    )
+  };
+}
+
+
+
 
     return where;
   } catch (err) {
@@ -76,7 +105,7 @@ async function generateCircularCode(): Promise<string> {
 
 export async function createAnnouncement(req: Request, res: Response) {
   try {
-    const { title, body, audience, startsAt, endsAt,type, isPinned, requireAck } = req.body as {
+    const { title, body, audience, startsAt, endsAt, type, isPinned, requireAck } = req.body as {
       title: string;
       body: string;
       audience?: { departmentId?: number[]; branchId?: number[] } | null;
@@ -106,7 +135,7 @@ export async function createAnnouncement(req: Request, res: Response) {
         attachments.push({ name: f.originalname, url: publicUrl });
 
         // cleanup local temp file
-        try { fs.unlinkSync(f.path); } catch {}
+        try { fs.unlinkSync(f.path); } catch { }
       }
     }
 

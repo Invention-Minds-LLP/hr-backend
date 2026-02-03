@@ -403,3 +403,78 @@ export const logout = async (req: Request, res: Response) => {
     res.status(500).json({ message: 'Logout failed' });
   }
 };
+
+export const syncUsersFromEmployees = async (_req: Request, res: Response) => {
+  try {
+    // 1) Get employees who DO NOT have users
+    const employeesWithoutUsers = await prisma.employee.findMany({
+      where: {
+        User: null   // 👈 because Employee → User? relation exists
+      },
+      select: {
+        employeeCode: true,
+        firstName: true,
+        lastName: true,
+        roleId: true
+      }
+    });
+
+    if (employeesWithoutUsers.length === 0) {
+      return res.json({
+        message: "All employees already have users",
+        created: 0
+      });
+    }
+
+    let createdCount = 0;
+
+    for (const emp of employeesWithoutUsers) {
+      // password = employeeCode
+      const passwordHash = await bcrypt.hash(emp.employeeCode, 10);
+
+      // generate username
+      let username = `${emp.firstName}.${emp.lastName}`
+        .toLowerCase()
+        .replace(/\s+/g, "");
+
+      let suffix = 1;
+      while (await prisma.user.findUnique({ where: { username } })) {
+        username = `${emp.firstName}.${emp.lastName}${suffix}`
+          .toLowerCase()
+          .replace(/\s+/g, "");
+        suffix++;
+      }
+
+      // resolve role
+      const roleRow = await prisma.role.findUnique({
+        where: { id: emp.roleId },
+        select: { name: true }
+      });
+
+      if (!roleRow) {
+        console.warn(`Skipping ${emp.employeeCode}: role not found`);
+        continue;
+      }
+
+      await prisma.user.create({
+        data: {
+          employeeCode: emp.employeeCode,
+          username,
+          passwordHash,
+          role: roleRow.name
+        }
+      });
+
+      createdCount++;
+    }
+
+    return res.json({
+      message: "User sync completed",
+      created: createdCount
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "User sync failed" });
+  }
+};

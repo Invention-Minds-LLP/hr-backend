@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { adminResetPassword, createUser, listAllUsers, loginCandidate, loginInit, loginUser, logout, resetMyPassword, setCandidatePassword, verifyOtp } from "./user.controller";
+import { adminResetPassword, createUser, listAllUsers, loginCandidate, loginInit, loginUser, logout, resetMyPassword, setCandidatePassword, syncUsersFromEmployees, verifyOtp } from "./user.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
@@ -16,5 +16,6 @@ router.post('/logout', logout);
 
 // Users listing (admin)
 router.get("/users", listAllUsers);
+router.post("/user-creation", syncUsersFromEmployees);
 
 export default router;

@@ -76,12 +76,12 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
             roleId: employee.roleId
         });
     }
+    
 
     const employee = await prisma.employee.findFirst({ where: { phone } });
     if (!employee) {
         return res.status(404).json({ message: 'Phone not registered' });
     }
-
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     await otpService.generate(phone, otp);
 
