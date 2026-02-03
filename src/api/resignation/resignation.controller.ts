@@ -1078,7 +1078,7 @@ export async function listResignationsWithClearances(req: AuthenticatedRequest, 
     if (!isReportingManager) {
       // If not reporting manager → optional logic
       // either block access or show all (if HR/Admin)
-      return res.status(403).json({ error: 'Access denied. Only reporting managers can view clearances.' });
+      // return res.status(403).json({ error: 'Access denied. Only reporting managers can view clearances.' });
     }
 
     // Fetch resignations under this reporting manager
