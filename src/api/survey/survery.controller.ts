@@ -5,6 +5,7 @@ import { EmploymentStatus } from "@prisma/client";
 
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
+import { createNotification } from "../notifications/notifications.controller";
 
 // ================== GET QUESTIONS ==================
 export async function getSurveyQuestions(req: Request, res: Response) {
@@ -93,7 +94,30 @@ export async function submitSurvey(req: Request, res: Response) {
         },
       },
     });
+    // 3️⃣ Notify HR
+    try {
+      // get employee details
+      const emp = await prisma.employee.findUnique({
+        where: { id: Number(employeeId) },
+        select: {
+          firstName: true,
+          lastName: true,
+          employeeCode: true,
+        },
+      });
 
+      if (emp) {
+        const hrIds = await getHRIds();
+        const empName = `${emp.firstName} ${emp.lastName}`;
+        const message = `Survey submitted by ${empName} (${emp.employeeCode}).`;
+
+        for (const hrId of hrIds) {
+          await createNotification(hrId, message);
+        }
+      }
+    } catch (err) {
+      console.error("Survey notification failed:", err);
+    }
     return res.json({
       success: true,
       surveyId: updatedSurvey.id,
@@ -186,7 +210,7 @@ export const initSurveyScheduler = () => {
       // Get all active employees
       const activeEmployees = await prisma.employee.findMany({
         where: { employmentStatus: "ACTIVE" },
-        select: { id: true, dateOfJoining: true },
+        select: { id: true, dateOfJoining: true, firstName: true, lastName: true },
       });
 
       for (const emp of activeEmployees) {
@@ -217,6 +241,15 @@ export const initSurveyScheduler = () => {
             },
           });
           console.log(`✅ Created new survey for employee ${emp.id}`);
+            // 🔔 Notify employee
+          try {
+            const empName = `${emp.firstName} ${emp.lastName}`;
+            const message = `${empName}, your 6-month employee survey is now available. Please complete it at your earliest convenience.`;
+
+            await createNotification(emp.id, message);
+          } catch (err) {
+            console.error(`Notification failed for employee ${emp.id}:`, err);
+          }
         }
       }
 
@@ -264,4 +297,15 @@ export async function getDraftSurveys(req: Request, res: Response) {
       .status(500)
       .json({ error: error.message || "Failed to fetch draft surveys" });
   }
+}
+async function getHRIds(): Promise<number[]> {
+  const hrs = await prisma.employee.findMany({
+    where: {
+      departmentId: 1,
+      employmentStatus: 'ACTIVE'
+    },
+    select: { id: true }
+  });
+
+  return hrs.map(h => h.id);
 }

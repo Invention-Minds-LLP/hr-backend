@@ -114,6 +114,7 @@ model Employee {
   TrainingFeedback         TrainingFeedback[]
   User                     User?
   WFHRequest               WFHRequest[]
+  sabbaticals Sabbatical[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -263,6 +264,11 @@ model LeaveType {
   LeaveRequest         LeaveRequest[]
 }
 
+enum HalfDaySession {
+  FIRST_HALF
+  SECOND_HALF
+}
+
 model LeaveRequest {
   id                Int              @id @default(autoincrement())
   employeeId        Int
@@ -272,6 +278,8 @@ model LeaveRequest {
   reason            String
   status            LeaveStatus      @default(PENDING)
   approvedBy        Int?
+  isHalfDay         Boolean?         @default(false)
+  halfDaySession    HalfDaySession?
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @default(now()) @updatedAt
   declineReason     String?
@@ -1455,6 +1463,7 @@ model EmployeeLeaveBalance {
   year           Int
   totalAllowed   Int             @default(0)
   used           Int             @default(0)
+  halfDayUsed    Int?             @default(0)
   leaveType      LeaveType?      @relation(fields: [leaveTypeId], references: [id])
 
   @@unique([employeeId, leaveTypeId, year])
@@ -1587,6 +1596,7 @@ model Holiday {
   @@index([date])
 }
 
+
 model ShiftApproval {
   id                  Int                   @id @default(autoincrement())
   employeeId          Int
@@ -1601,7 +1611,7 @@ model ShiftApproval {
   month               Int?
   year                Int?
   isMonthly           Boolean?              @default(false)
-  weekOffConfig       Json? 
+  weekOffConfig       Json?
   requestedAt         DateTime              @default(now())
   requestedBy         Int
   requestedMode       ShiftAssignMode
@@ -1619,6 +1629,28 @@ model ShiftApproval {
   @@index([patternId])
   @@index([requestedBy])
 }
+
+model Sabbatical {
+  id          Int              @id @default(autoincrement())
+  employeeId  Int
+  startDate   DateTime
+  endDate     DateTime
+  reason      String?
+  status      SabbaticalStatus @default(ACTIVE)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  employee    Employee         @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId])
+}
+
+enum SabbaticalStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
 
 enum Gender {
   MALE
@@ -1638,6 +1670,7 @@ enum EmploymentStatus {
   SUSPENDED
   NOTICE_PERIOD
   RESIGNED
+  SABBATICAL
 }
 
 enum LeaveStatus {

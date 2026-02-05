@@ -3,6 +3,7 @@ import { PrismaClient, ShiftAssignMode } from "@prisma/client";
 import cron from 'node-cron';
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { createNotification } from "../notifications/notifications.controller";
+import { Prisma } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
@@ -13,6 +14,10 @@ export function startOfWeek(date: Date): Date {
   d.setHours(0, 0, 0, 0);
   return d;
 }
+
+type WeekOffConfig = {
+  weeks: Record<number, number>; // weekIndex -> dayOfWeek
+};
 
 
 /* ==========================
@@ -2135,7 +2140,9 @@ if (weekOffConfig?.weeks) {
         startDate: monthStart,
         requestedBy: requesterId,
         hasIncharge,
-           weekOffConfig: weekOffConfig ?? null
+           weekOffConfig: weekOffConfig ?? null,
+           month: month,
+            year: year
       }
     });
 
@@ -2456,4 +2463,97 @@ export const getEmployeeDailyShiftsForRange = async (
       error: 'Failed to fetch daily shifts'
     });
   }
+};
+function parseWeekOffConfig(raw: unknown): WeekOffConfig | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as any;
+  if (!obj.weeks || typeof obj.weeks !== "object") return null;
+  return obj as WeekOffConfig;
+}
+
+export const getApprovedWeekOffs = async (req: Request, res: Response) => {
+  const employeeId = Number(req.query.employeeId);
+  const month = Number(req.query.month); // 1–12
+  const year = Number(req.query.year);
+
+  if (!employeeId || !month || !year) {
+    return res.status(400).json({ error: "employeeId, month, year required" });
+  }
+
+  const monthStart = new Date(year, month - 1, 1);
+  const monthEnd = new Date(year, month, 0);
+  monthStart.setHours(0, 0, 0, 0);
+  monthEnd.setHours(23, 59, 59, 999);
+
+  // 🔍 Fetch ONLY approved monthly shift
+  const approval = await prisma.shiftApproval.findFirst({
+    where: {
+      employeeId,
+      month,
+      year,
+      status: "APPROVED",
+    weekOffConfig: {
+      not: Prisma.DbNull
+    }
+    },
+    
+  });
+
+  console.log('getApprovedWeekOffs:', {
+    employeeId,
+    month,
+    year,
+    approval: approval ? {
+      id: approval.id,
+      weekOffConfig: approval.weekOffConfig
+    } : null
+  });
+
+  // ✅ CASE 1: Approved monthly shift exists
+  if (approval) {
+    const parsed = parseWeekOffConfig(approval.weekOffConfig);
+    if (!parsed) {
+      return res.json({ source: "NONE", weekOffDates: [] });
+    }
+
+    const firstWeekStart = new Date(monthStart);
+    firstWeekStart.setDate(monthStart.getDate() - monthStart.getDay()); // Sunday
+
+    const dates = new Set<string>();
+
+    Object.entries(parsed.weeks).forEach(([weekIndexStr, dayOfWeek]) => {
+      const weekIndex = Number(weekIndexStr);
+      const dow = Number(dayOfWeek);
+
+      const d = new Date(firstWeekStart);
+      d.setDate(firstWeekStart.getDate() + weekIndex * 7 + dow);
+      d.setHours(0, 0, 0, 0);
+
+      if (d >= monthStart && d <= monthEnd) {
+        dates.add(d.toISOString().slice(0, 10));
+      }
+    });
+
+    return res.json({
+      source: "MONTHLY_SHIFT",
+      weekOffDates: [...dates]
+    });
+  }
+
+  // 🔁 CASE 2: Default Sunday week off
+  const sundays: string[] = [];
+  for (
+    let d = new Date(monthStart);
+    d <= monthEnd;
+    d.setDate(d.getDate() + 1)
+  ) {
+    if (d.getDay() === 0) {
+      sundays.push(d.toISOString().slice(0, 10));
+    }
+  }
+
+  return res.json({
+    source: "SUNDAY_DEFAULT",
+    weekOffDates: sundays
+  });
 };

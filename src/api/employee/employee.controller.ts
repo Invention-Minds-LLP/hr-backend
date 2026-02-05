@@ -13,6 +13,7 @@ import XLSX from "xlsx";
 import { connect } from "http2";
 import { Employee } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import cron from 'node-cron';
 
 
 const FTP_CONFIG = {
@@ -2985,4 +2986,239 @@ export const getEmployeeProfile = async (req: Request, res: Response) => {
       error: 'Failed to fetch profile'
     });
   }
+};
+// export const initSabbaticalReminderScheduler = () => {
+//   cron.schedule("0 9 * * *", async () => {
+//     console.log("Running sabbatical reminder cron...");
+
+//     const today = new Date();
+//     today.setHours(0, 0, 0, 0);
+
+//     const reminderDate = new Date(today);
+//     reminderDate.setDate(today.getDate() + 3); // 3 days before end
+
+//     const employees = await prisma.employee.findMany({
+//       where: {
+//         employmentStatus: 'SABBATICAL',
+//         sabbaticalEndDate: {
+//           gte: today,
+//           lte: reminderDate
+//         }
+//       },
+//       select: {
+//         id: true,
+//         firstName: true,
+//         sabbaticalEndDate: true
+//       }
+//     });
+
+//     for (const emp of employees) {
+//       const message = `Your sabbatical period will end on ${fmtDate(emp.sabbaticalEndDate)}. Please contact HR regarding your next steps.`;
+
+//       // Employee notification
+//       await createNotification(emp.id, message);
+
+//       // HR notification (assuming HR role = 1)
+//       const hrUsers = await prisma.employee.findMany({
+//         where: { roleId: 1, employmentStatus: 'ACTIVE' },
+//         select: { id: true }
+//       });
+
+//       for (const hr of hrUsers) {
+//         await createNotification(
+//           hr.id,
+//           `${emp.firstName}'s sabbatical ends on ${fmtDate(emp.sabbaticalEndDate)}. Please take action.`
+//         );
+//       }
+//     }
+//     // On exact end date
+// if (isSameDate(today, emp.sabbaticalEndDate)) {
+//   const hrUsers = await prisma.employee.findMany({
+//     where: { roleId: 1, employmentStatus: 'ACTIVE' },
+//     select: { id: true }
+//   });
+
+//   for (const hr of hrUsers) {
+//     await createNotification(
+//       hr.id,
+//       `${emp.firstName}'s sabbatical ends today. Please mark as Active, Extend, or Terminate.`
+//     );
+//   }
+// }
+
+//   });
+// };
+// 1) Reactivate employee
+// employmentStatus: 'ACTIVE',
+// sabbaticalStartDate: null,
+// sabbaticalEndDate: null
+
+// 2) Extend sabbatical
+// employmentStatus: 'SABBATICAL',
+// sabbaticalEndDate: newDate
+
+// 3) Terminate
+// employmentStatus: 'TERMINATED'
+
+
+export const startSabbatical = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.employeeId);
+    const { startDate, endDate, reason } = req.body;
+
+    if (!employeeId || !startDate || !endDate) {
+      return res.status(400).json({
+        error: "employeeId, startDate, and endDate are required"
+      });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      // check if already on sabbatical
+      const active = await tx.sabbatical.findFirst({
+        where: {
+          employeeId,
+          status: "ACTIVE"
+        }
+      });
+
+      if (active) {
+        throw new Error("Employee already on sabbatical");
+      }
+
+      // create sabbatical
+      const sabbatical = await tx.sabbatical.create({
+        data: {
+          employeeId,
+          startDate: new Date(startDate),
+          endDate: new Date(endDate),
+          reason,
+          status: "ACTIVE"
+        }
+      });
+
+      // update employee status
+      await tx.employee.update({
+        where: { id: employeeId },
+        data: { employmentStatus: "SABBATICAL" }
+      });
+
+      return sabbatical;
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
+};
+export const extendSabbatical = async (req: Request, res: Response) => {
+  try {
+    const sabbaticalId = Number(req.params.id);
+    const { endDate } = req.body;
+
+    const result = await prisma.sabbatical.update({
+      where: { id: sabbaticalId },
+      data: {
+        endDate: new Date(endDate)
+      }
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
+};
+export const endSabbatical = async (req: Request, res: Response) => {
+  try {
+    const sabbaticalId = Number(req.params.id);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const sabbatical = await tx.sabbatical.update({
+        where: { id: sabbaticalId },
+        data: { status: "COMPLETED" }
+      });
+
+      await tx.employee.update({
+        where: { id: sabbatical.employeeId },
+        data: { employmentStatus: "ACTIVE" }
+      });
+
+      return sabbatical;
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
+};
+export const terminateFromSabbatical = async (req: Request, res: Response) => {
+  try {
+    const sabbaticalId = Number(req.params.id);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const sabbatical = await tx.sabbatical.update({
+        where: { id: sabbaticalId },
+        data: { status: "COMPLETED" }
+      });
+
+      await tx.employee.update({
+        where: { id: sabbatical.employeeId },
+        data: { employmentStatus: "TERMINATED" }
+      });
+
+      return sabbatical;
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
+};
+
+export const initSabbaticalReminderScheduler = () => {
+  cron.schedule("0 9 * * *", async () => {
+    console.log("Running sabbatical reminder cron...");
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const reminderDate = new Date(today);
+    reminderDate.setDate(today.getDate() + 3);
+
+    const sabbaticals = await prisma.sabbatical.findMany({
+      where: {
+        status: "ACTIVE",
+        endDate: {
+          gte: today,
+          lte: reminderDate
+        }
+      },
+      include: {
+        employee: true
+      }
+    });
+
+    for (const sab of sabbaticals) {
+      const emp = sab.employee;
+
+      const message = `Your sabbatical ends on ${sab.endDate.toDateString()}. Please contact HR.`;
+
+      await createNotification(emp.id, message);
+
+      const hrUsers = await prisma.employee.findMany({
+        where: { roleId: 1, employmentStatus: "ACTIVE" },
+        select: { id: true }
+      });
+
+      for (const hr of hrUsers) {
+        await createNotification(
+          hr.id,
+          `${emp.firstName}'s sabbatical ends on ${sab.endDate.toDateString()}`
+        );
+      }
+    }
+  });
 };

@@ -14,6 +14,7 @@ import { ClearanceType } from '@prisma/client';
 const prisma = new PrismaClient();
 import cron from 'node-cron';
 import { sendHealthCheckReminders } from '../employee/employee.controller';
+import { createNotification } from '../notifications/notifications.controller';
 
 type ClearanceRow = {
   type: string;                    // IT / Finance / HR / Admin / Security / Other
@@ -49,7 +50,7 @@ export async function createResignation(req: Request, res: Response) {
     // capture manager at the time of submission
     const emp = await prisma.employee.findUnique({
       where: { id: Number(employeeId) },
-      select: { reportingManager: true }
+      select: { reportingManager: true, employeeCode: true, firstName: true, lastName: true }
     });
     if (!emp) return res.status(404).json({ error: 'Employee not found' });
 
@@ -67,6 +68,24 @@ export async function createResignation(req: Request, res: Response) {
         status: 'SUBMITTED'
       }
     });
+
+    // 🔔 Notify manager + HR
+    try {
+      const hrIds = await getHRIds();
+      const notifyIds = new Set<number>();
+
+      if (emp.reportingManager) notifyIds.add(emp.reportingManager);
+      hrIds.forEach(id => notifyIds.add(id));
+
+      const message = `New resignation submitted by Employee ${emp.firstName} ${emp.lastName} (${emp.employeeCode}).`;
+
+      for (const id of notifyIds) {
+        await createNotification(id, message);
+      }
+    } catch (err) {
+      console.error("Resignation notification failed:", err);
+    }
+
 
     res.status(201).json(rec);
   } catch (e) {
@@ -118,7 +137,7 @@ export async function getResignationById(req: Request, res: Response) {
       where: { id },
       select: {
         id: true,
-    
+
         // Only the minimal employee info you use
         employee: {
           select: {
@@ -127,7 +146,7 @@ export async function getResignationById(req: Request, res: Response) {
             lastName: true
           }
         },
-    
+
         // Tasks
         handoverTasks: {
           select: {
@@ -140,7 +159,7 @@ export async function getResignationById(req: Request, res: Response) {
             completedAt: true
           }
         },
-    
+
         // Clearances
         clearances: {
           select: {
@@ -157,7 +176,7 @@ export async function getResignationById(req: Request, res: Response) {
             }
           }
         },
-    
+
         // Exit Interview
         exitInterview: {
           select: {
@@ -166,7 +185,7 @@ export async function getResignationById(req: Request, res: Response) {
             notes: true
           }
         },
-    
+
         // Final Settlement
         finalSettlement: {
           select: {
@@ -176,7 +195,7 @@ export async function getResignationById(req: Request, res: Response) {
         }
       }
     });
-    
+
     if (!row) return res.status(404).json({ error: 'Resignation not found' });
     res.json(row);
   } catch (e) {
@@ -218,10 +237,31 @@ export async function managerApprove(req: Request, res: Response) {
     };
     if (overrideLastWorkingDay) data.proposedLastWorkingDay = new Date(overrideLastWorkingDay);
 
-    const upd = await prisma.resignationRequest.update({
+   const upd = await prisma.resignationRequest.update({
       where: { id },
-      data
+      data,
+      include: {
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            employeeCode: true
+          }
+        }
+      }
     });
+    // 🔔 Notify HR after manager decision
+    try {
+      const hrIds = await getHRIds();
+      const message = `Manager has approved the resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
+
+      for (const hrId of hrIds) {
+        await createNotification(hrId, message);
+      }
+    } catch (err) {
+      console.error("Manager action notification failed:", err);
+    }
+
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -240,8 +280,29 @@ export async function managerReject(req: Request, res: Response) {
         managerDecidedAt: new Date(),
         managerNote: note,
         status: 'REJECTED'
+      },
+      include: {
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            employeeCode: true
+          }
+        } 
       }
     });
+    // 🔔 Notify HR after manager decision
+    try {
+      const hrIds = await getHRIds();
+      const message = `Manager has rejected the resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
+
+      for (const hrId of hrIds) {
+        await createNotification(hrId, message);
+      }
+    } catch (err) {
+      console.error("Manager action notification failed:", err);
+    }
+
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -307,6 +368,15 @@ export async function hrApprove(req: Request, res: Response) {
       console.log(`✅ Created new job for replacement: Job ID ${newJob.id}`);
     }
 
+    // 🔔 Notify employee about HR approval
+    try {
+      const message = `Your resignation has been approved. Please complete exit formalities.`;
+      await createNotification(upd.employeeId, message);
+    } catch (err) {
+      console.error("HR approval notification failed:", err);
+    }
+
+
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -328,6 +398,12 @@ export async function hrReject(req: Request, res: Response) {
         status: 'REJECTED'
       }
     });
+    try {
+      const message = `Your resignation has been rejected by HR.`;
+      await createNotification(upd.employeeId, message);
+    } catch (err) {
+      console.error("HR rejection notification failed:", err);
+    }
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -342,6 +418,12 @@ export async function hrCancel(req: Request, res: Response) {
       where: { id },
       data: { status: 'CANCELLED' }
     });
+    try {
+      const message = `Your resignation has been cancelled by HR.`;
+      await createNotification(upd.employeeId, message);
+    } catch (err) {
+      console.error("HR cancel notification failed:", err);
+    }
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -451,6 +533,14 @@ export async function scheduleExitInterview(req: Request, res: Response) {
         notes
       }
     });
+    // 🔔 Notify employee about exit interview
+    try {
+      const message = `Your exit interview has been scheduled. Please check details.`;
+      await createNotification(resignation.employeeId, message);
+    } catch (err) {
+      console.error("Exit interview notification failed:", err);
+    }
+
     res.json(row);
   } catch (e) {
     console.error(e);
@@ -603,6 +693,14 @@ export async function markCompleted(req: Request, res: Response) {
       where: { id },
       data: { status: 'COMPLETED' }
     });
+    try {
+      await createNotification(
+        upd.employeeId,
+        "Your exit process has been completed. We wish you all the best."
+      );
+    } catch (err) {
+      console.error("Completion notification failed:", err);
+    }
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -624,7 +722,14 @@ export async function hrHold(req: Request, res: Response) {
         // hrDecidedAt: null  // optional: clear decidedAt if it was set
       }
     });
-
+    try {
+      await createNotification(
+        upd.employeeId,
+        "Your resignation has been placed on hold by HR. Please contact HR for details."
+      );
+    } catch (err) {
+      console.error("HR hold notification failed:", err);
+    }
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -654,7 +759,28 @@ export async function requestWithdraw(req: Request, res: Response) {
         withdrawDecision: null,
         withdrawDecidedAt: null,
       },
+      include: {
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            employeeCode: true
+          }
+        }
+      }
     });
+    // 🔔 Notify HR about withdraw request
+    try {
+      const hrIds = await getHRIds();
+      const message = `Withdraw request submitted for resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
+
+      for (const hrId of hrIds) {
+        await createNotification(hrId, message);
+      }
+    } catch (err) {
+      console.error("Withdraw notification failed:", err);
+    }
+
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -683,6 +809,14 @@ export async function hrApproveWithdraw(req: Request, res: Response) {
         withdrawStatusChangedBy: approvedBy,
       },
     });
+    // 🔔 Notify employee withdraw approved
+    try {
+      const message = `Your resignation withdrawal has been approved.`;
+      await createNotification(row.employeeId, message);
+    } catch (err) {
+      console.error("Employee withdraw notification failed:", err);
+    }
+
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -710,6 +844,14 @@ export async function hrRejectWithdraw(req: Request, res: Response) {
         status: "SUBMITTED", // go back to normal resignation workflow
       },
     });
+    // 🔔 Notify employee withdraw approved
+    try {
+      const message = `Your resignation withdrawal has been rejected.`;
+      await createNotification(row.employeeId, message);
+    } catch (err) {
+      console.error("Employee withdraw notification failed:", err);
+    }
+
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -1108,6 +1250,17 @@ export async function listResignationsWithClearances(req: AuthenticatedRequest, 
     res.status(500).json({ error: 'Failed to load resignation clearances' });
   }
 }
+async function getHRIds(): Promise<number[]> {
+  const hrs = await prisma.employee.findMany({
+    where: {
+      departmentId: 1,
+      employmentStatus: 'ACTIVE'
+    },
+    select: { id: true }
+  });
+
+  return hrs.map(h => h.id);
+}
 export const initNoticePeriodSchedular = () => {
   cron.schedule('0 2 * * *', async () => {
     console.log('⏰ [Cron] Checking employees whose notice period has ended...');
@@ -1156,4 +1309,6 @@ export const initNoticePeriodSchedular = () => {
       console.error('❌ [Cron] Error in notice period check:', error);
     }
   });
+
+
 }

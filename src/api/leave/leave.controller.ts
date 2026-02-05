@@ -12,7 +12,7 @@ const LEAVE_STATUS_TEMPLATE_ID = "909803";
 // Create Leave Request
 export const createLeaveRequest = async (req: Request, res: Response) => {
   try {
-    const { employeeId, leaveTypeId, startDate, endDate, reason } = req.body;
+    const { employeeId, leaveTypeId, startDate, endDate, reason, isHalfDay, halfDaySession } = req.body;
 
     if (!employeeId || !leaveTypeId || !startDate || !endDate || !reason) {
       return res.status(400).json({ error: "All fields are required" });
@@ -20,7 +20,7 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
 
     const start = new Date(startDate);
     const leaveYear = start.getFullYear();
-    const daysRequested = daysInclusive(start, new Date(endDate));
+    // const daysRequested = daysInclusive(start, new Date(endDate));
     // Fetch balance for that year & leave type
     const balance = await prisma.employeeLeaveBalance.findFirst({
       where: {
@@ -36,14 +36,26 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
         error: `Leave balance not configured for ${leaveYear}`
       });
     }
+    let requestedUnits = 0;
 
-    const remaining = balance.totalAllowed - balance.used;
-
-    if (daysRequested > remaining) {
-      return res.status(400).json({
-        error: `Insufficient balance. You have only ${remaining} days available for this leave type.`
-      });
+    if (isHalfDay) {
+      requestedUnits = 0.5;
+    } else {
+      requestedUnits = daysInclusive(start, new Date(endDate));
     }
+
+    const usedFull = balance.used;
+    const usedHalf = (balance.halfDayUsed ?? 0) * 0.5;;
+    const totalUsed = usedFull + usedHalf;
+
+    const remaining = balance.totalAllowed - totalUsed;
+    // const remaining = balance.totalAllowed - balance.used;
+
+    // if (daysRequested > remaining) {
+    //   return res.status(400).json({
+    //     error: `Insufficient balance. You have only ${remaining} days available for this leave type.`
+    //   });
+    // }
 
     const leaveRequest = await prisma.leaveRequest.create({
       data: {
@@ -52,6 +64,8 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
         startDate: new Date(startDate),
         endDate: new Date(endDate),
         reason,
+        isHalfDay,
+        halfDaySession
       },
       include: {
         leaveType: true,
@@ -188,6 +202,8 @@ export const getLeaveRequests = async (_req: Request, res: Response) => {
         hrDecision: true,
         inChargeDecision: true,
         createdAt: true,
+        isHalfDay: true,
+        halfDaySession: true,
 
         leaveType: {
           select: {
@@ -580,21 +596,51 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
       include: { employee: true, leaveType: true }
     });
 
+    console.log("Updated Leave:", updatedLeave);
+
     // If fully approved → deduct leave balance
     if (updatedLeave.status === "APPROVED") {
-      const year = updatedLeave.startDate.getFullYear();
-      const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
+      // const year = updatedLeave.startDate.getFullYear();
+      // const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
 
-      await prisma.employeeLeaveBalance.updateMany({
-        where: {
-          employeeId: updatedLeave.employeeId,
-          leaveTypeId: updatedLeave.leaveTypeId,
-          year
-        },
-        data: {
-          used: { increment: days }
-        }
-      });
+      // await prisma.employeeLeaveBalance.updateMany({
+      //   where: {
+      //     employeeId: updatedLeave.employeeId,
+      //     leaveTypeId: updatedLeave.leaveTypeId,
+      //     year
+      //   },
+      //   data: {
+      //     used: { increment: days }
+      //   }
+      // });
+      const year = updatedLeave.startDate.getFullYear();
+
+      if (updatedLeave.isHalfDay) {
+        await prisma.employeeLeaveBalance.updateMany({
+          where: {
+            employeeId: updatedLeave.employeeId,
+            leaveTypeId: updatedLeave.leaveTypeId,
+            year
+          },
+          data: {
+            halfDayUsed: { increment: 1 }
+          }
+        });
+      } else {
+        const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
+
+        await prisma.employeeLeaveBalance.updateMany({
+          where: {
+            employeeId: updatedLeave.employeeId,
+            leaveTypeId: updatedLeave.leaveTypeId,
+            year
+          },
+          data: {
+            used: { increment: days }
+          }
+        });
+      }
+
     }
 
     // Notifications (optional)
@@ -759,7 +805,8 @@ export const createLeaveBalances = async (req: Request, res: Response) => {
         },
         update: {
           totalAllowed: l.totalAllowed,
-          used: l.used ?? 0
+          used: l.used ?? 0,
+          halfDayUsed: l.halfDayUsed ?? 0
         },
         create: {
           employeeId,
@@ -768,7 +815,8 @@ export const createLeaveBalances = async (req: Request, res: Response) => {
           category: "LEAVE",
           year,
           totalAllowed: l.totalAllowed,
-          used: l.used ?? 0
+          used: l.used ?? 0,
+          halfDayUsed: l.halfDayUsed ?? 0
         }
       });
     }
@@ -1112,13 +1160,29 @@ export const getLeaveBalance = async (req: Request, res: Response) => {
     // 4️⃣ Merge master + balance
     const result = leaveTypes.map(lt => {
       const b = balanceMap.get(lt.id);
+      const usedFull = b?.used ?? 0;
+      const usedHalfCount = b?.halfDayUsed ?? 0;
+      const usedHalfDays = usedHalfCount * 0.5;
+      const totalUsed = usedFull + usedHalfDays;
 
+
+
+      // return {
+      //   leaveTypeId: lt.id,
+      //   leaveType: lt.name,
+      //   totalAllowed: b?.totalAllowed ?? 0,
+      //   used: totalUsed ?? 0,
+      //   remaining: (b?.totalAllowed ?? 0) - totalUsed,
+      //   year
+      // };
       return {
         leaveTypeId: lt.id,
         leaveType: lt.name,
         totalAllowed: b?.totalAllowed ?? 0,
-        used: b?.used ?? 0,
-        remaining: (b?.totalAllowed ?? 0) - (b?.used ?? 0),
+        used:usedFull,
+        usedHalf: usedHalfCount,
+        totalUsed,
+        remaining: (b?.totalAllowed ?? 0) - totalUsed,
         year
       };
     });
@@ -1162,10 +1226,18 @@ export const initLeaveEndSchedular = () => {
       // Last day check
       if (isSameDate(today, end)) {
         const emp = leave.employee;
+        const message = `Hello ${emp.firstName}, today is the *last day of your approved leave*. Please be prepared to report tomorrow.`;
+        try {
+          await createNotification(
+            emp.id,
+            message
+          );
+        } catch (err) {
+          console.error("Error creating notification:", err);
+        }
 
         if (!emp.phone) continue;
 
-        const message = `Hello ${emp.firstName}, today is the *last day of your approved leave*. Please be prepared to report tomorrow.`;
 
         console.log(`Leave End Reminder to ${emp.firstName} (${emp.phone}): ${message}`);
 

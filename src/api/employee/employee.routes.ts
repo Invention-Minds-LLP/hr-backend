@@ -22,7 +22,11 @@ import {
   getInchargeEmployees,
   deleteEmployeeDocument,
   updateEmployeeProfile,
-  getEmployeeProfile
+  getEmployeeProfile,
+  terminateFromSabbatical,
+  endSabbatical,
+  extendSabbatical,
+  startSabbatical
 } from "./employee.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -49,7 +53,12 @@ router.put("/:id",authenticateToken, updateEmployee);
 router.delete("/:id",authenticateToken, deleteEmployee);
 router.post('/:employeeId/vaccinations/:vaccineIndex/proof',authenticateToken, uploadVaccineProof);
 router.post('/:employeeId/disability',authenticateToken, uploadEmployeeDisabilityProof);
-router.delete('/documents/:documentId', authenticateToken, deleteEmployeeDocument)
+router.delete('/documents/:documentId', authenticateToken, deleteEmployeeDocument);
+router.post("/employees/:employeeId/sabbatical", startSabbatical);
+router.put("/sabbaticals/:id/extend", extendSabbatical);
+router.put("/sabbaticals/:id/end", endSabbatical);
+router.put("/sabbaticals/:id/terminate", terminateFromSabbatical);
+
 
 
 

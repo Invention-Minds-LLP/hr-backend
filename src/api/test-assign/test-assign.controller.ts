@@ -285,3 +285,14 @@ function timeDiffSec(start?: Date | null, end?: Date | null): number | null {
   if (!start || !end) return null;
   return Math.max(0, Math.floor((new Date(end).getTime() - new Date(start).getTime()) / 1000));
 }
+async function getHRIds(): Promise<number[]> {
+  const hrs = await prisma.employee.findMany({
+    where: {
+      departmentId: 1,
+      employmentStatus: 'ACTIVE'
+    },
+    select: { id: true }
+  });
+
+  return hrs.map(h => h.id);
+}

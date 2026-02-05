@@ -282,7 +282,7 @@ export const saveManagerReview = async (req: Request, res: Response) => {
       finalDecision,
       finalComments
     } = req.body;
-    
+
     await prisma.managerAppraisal.upsert({
       where: { appraisalFormId: appraisalId },
       update: {
@@ -311,7 +311,7 @@ export const saveManagerReview = async (req: Request, res: Response) => {
         overallScore, comments, recommendations
       }
     });
-    
+
 
     // Update final decision in AppraisalForm
     await prisma.appraisalForm.update({
@@ -323,6 +323,46 @@ export const saveManagerReview = async (req: Request, res: Response) => {
         status: 'Reviewed'
       }
     });
+
+    // 3️⃣ Fetch employee + manager details
+    const appraisal = await prisma.appraisalForm.findUnique({
+      where: { id: appraisalId },
+      include: {
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            employeeCode: true,
+            reportingManager: true
+          }
+        }
+      }
+    });
+
+    if (appraisal?.employee?.reportingManager) {
+      const manager = await prisma.employee.findUnique({
+        where: { id: appraisal.employee.reportingManager },
+        select: { firstName: true, lastName: true }
+      });
+
+      const empName = `${appraisal.employee.firstName} ${appraisal.employee.lastName}`;
+      const empCode = appraisal.employee.employeeCode;
+      const managerName = manager
+        ? `${manager.firstName} ${manager.lastName}`
+        : 'Manager';
+
+      const message = `${managerName} submitted appraisal for ${empName} (${empCode}).`;
+
+      // 4️⃣ Send notification to all HRs
+      const hrEmployees = await prisma.employee.findMany({
+        where: { departmentId: 1 },
+        select: { id: true },
+      });
+
+      for (const hr of hrEmployees) {
+        await createNotification(hr.id, message);
+      }
+    }
 
     res.json({ message: 'Manager review saved successfully' });
   } catch (error) {
@@ -374,6 +414,9 @@ export const sendAppraisalCountReminders = async (cycles?: string[]) => {
   await Promise.all(
     Array.from(buckets.values()).map(async b => {
       const phone = phoneById.get(b.managerId);
+      const message = `You have ${b.count} pending appraisal(s) for the ${b.cycle} cycle. Please review them.`;
+      console.log("Appraisal reminder:", message, managerIds);
+      await createNotification(b.managerId, message);
       if (!phone) return;
       try {
         await sendWhatsAppTemplate({

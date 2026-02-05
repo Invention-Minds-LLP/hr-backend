@@ -1,7 +1,7 @@
 import { initSurveyScheduler } from "../api/survey/survery.controller";
 import { initNoticePeriodSchedular } from "../api/resignation/resignation.controller";
 import { initLeaveEndSchedular } from "../api/leave/leave.controller";
-import { initQuarterlyAppraisalScheduler } from "../api/appraisal/appraisal.controller";
+import { initQuarterlyAppraisalScheduler, sendAppraisalCountReminders } from "../api/appraisal/appraisal.controller";
 import { startShiftCron } from "../api/shift/shift.controller";
 import cron from 'node-cron';
 import { runBiometricSync } from "../api/biometric/biometric.controller";
@@ -12,7 +12,8 @@ export async function startSchedulers() {
   initLeaveEndSchedular();
   initQuarterlyAppraisalScheduler();
   startShiftCron();
-  // startAttendanceScheduler();
+  // sendAppraisalCountReminders();
+  startAttendanceScheduler();
   // await runBiometricBackfill();
 }
 const schedules = [

@@ -6,6 +6,7 @@ import path from 'path';
 import { Client } from 'basic-ftp';
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
+import { createNotification } from '../notifications/notifications.controller';
 
 const FTP_CONFIG = {
   host: "srv680.main-hosting.eu",  // Your FTP hostname
@@ -78,7 +79,39 @@ export async function submitAttempt(req: Request, res: Response) {
         data: { status: 'Completed', completedAt: new Date() },
       }),
     ]);
+// 2️⃣ Fetch employee + test details
+    const assigned = await prisma.assignedTest.findUnique({
+      where: { id: Number(assignedTestId) },
+      include: {
+        employee: {
+          select: { id: true, firstName: true, lastName: true }
+        },
+        test: {
+          select: { name: true }
+        }
+      }
+    });
 
+    if (assigned?.employee) {
+      const emp = assigned.employee;
+      const employeeName = `${emp.firstName} ${emp.lastName}`;
+      const testName = assigned.test?.name || "Test";
+
+      // 🔔 Notify employee
+      await createNotification(
+        emp.id,
+        `You have successfully completed the ${testName}.`
+      );
+
+      // 🔔 Notify HR
+      const hrIds = await getHRIds();
+      const message = `${employeeName} has completed the ${testName}.`;
+
+      for (const hrId of hrIds) {
+        await createNotification(hrId, message);
+      }
+    }
+    
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -447,3 +480,14 @@ export const evaluateAttempt = async (req: Request, res: Response) => {
   }
 };
 
+async function getHRIds(): Promise<number[]> {
+  const hrs = await prisma.employee.findMany({
+    where: {
+      departmentId: 1,
+      employmentStatus: 'ACTIVE'
+    },
+    select: { id: true }
+  });
+
+  return hrs.map(h => h.id);
+}

@@ -3,6 +3,7 @@ import { Request, Response } from "express";
 
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
+import { createNotification } from "../notifications/notifications.controller";
 
 export const createRequisition = async (req: Request, res: Response) => {
   try {
@@ -92,6 +93,26 @@ export const createRequisition = async (req: Request, res: Response) => {
       },
       include: { job: true },
     });
+    const deptManager = await prisma.employee.findFirst({
+      where: {
+        departmentId: departmentId,
+        role: { id: 3 } // adjust role name if needed
+      },
+      select: { id: true }
+    });
+
+    if (deptManager?.id && deptManager.id !== raisedBy) {
+      // await prisma.notification.create({
+      //   data: {
+      //     employeeId: creator.reportingManager,
+      //     message: `New manpower requisition created for ${title || designation || "a position"}.`,
+      //     channel: "PUSH"
+      //   }
+      // });
+      console.log(`Notification would be sent to manager ID ${deptManager.id} about new requisition.`);
+      await createNotification(deptManager.id, `New manpower requisition created for ${title || designation || "a position"}. Kindly look into it.`);
+    }
+
 
     return res.status(201).json(requisition);
   } catch (error) {
@@ -99,6 +120,35 @@ export const createRequisition = async (req: Request, res: Response) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
+function buildJobTitle(item: any, fallbackTitle?: string) {
+  const designation = item.designation || fallbackTitle || "Untitled";
+
+  let expPart = "";
+
+  // 🔹 Fresher case
+  if (item.minExperience === 0 && item.maxExperience === 0) {
+    expPart = " (Fresher)";
+  }
+  // 🔹 Range case
+  else if (item.minExperience && item.maxExperience) {
+    expPart = ` (${item.minExperience}-${item.maxExperience} yrs)`;
+  }
+  // 🔹 Only minimum provided
+  else if (item.minExperience) {
+    expPart = ` (${item.minExperience}+ yrs)`;
+  }
+
+  const typeMap: Record<string, string> = {
+    NEW_OPENING: "New Opening",
+    REPLACEMENT: "Replacement",
+    PLANNED_ADDITION: "Planned Addition"
+  };
+
+  const typeLabel = typeMap[item.type] || item.type || "";
+
+  return `${designation}${expPart}${typeLabel ? " – " + typeLabel : ""}`;
+}
+
 export const updateRequisitionStatus = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -230,9 +280,10 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
           } else {
             // ✅ Create multiple jobs from breakdown
             for (const item of breakdown) {
+              const jobTitle = buildJobTitle(item, requisition.title ?? undefined);
               await prisma.job.create({
                 data: {
-                  title: item.designation || requisition.title || "Untitled",
+                  title: jobTitle,
                   departmentId: requisition.departmentId ?? 0,
                   location: location || "Not Specified",
                   headcount: item.count || 1,
@@ -272,6 +323,54 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
       where: { id: Number(id) },
       data: updateData,
     });
+
+    // ----------------- NOTIFICATIONS -----------------
+    try {
+      // fetch requisition creator if not passed
+      const requisition = await prisma.manpowerRequisition.findUnique({
+        where: { id: Number(id) },
+        select: {
+          departmentId: true,
+          raisedBy: true
+        }
+      });
+
+      // HOD approved → notify COO
+      if (step === "HOD" && !reject) {
+        const coo = await prisma.employee.findFirst({
+          where: { role: { id: 4 } },
+          select: { id: true }
+        });
+        if (coo) {
+          await createNotification(coo.id, "A requisition has been approved by HOD and needs your approval.");
+        }
+      }
+
+      // COO approved → notify HR
+      if (step === "COO" && !reject) {
+        const hrs = await prisma.employee.findMany({
+          where: { role: { id: 1 } },
+          select: { id: true }
+        });
+
+        for (const hr of hrs) {
+          await createNotification(hr.id, "A requisition has been approved by COO and is ready for HR processing.");
+        }
+      }
+
+      // Rejected at any step → notify creator
+      if (reject && createdBy) {
+        await createNotification(createdBy, "Your manpower requisition has been rejected.");
+      }
+
+      // HR processed → notify creator
+      if (step === "HR" && !reject && createdBy) {
+        await createNotification(createdBy, "Your manpower requisition has been processed by HR.");
+      }
+
+    } catch (notifyErr) {
+      console.error("Notification error:", notifyErr);
+    }
 
     return res.status(200).json(updated);
   } catch (error) {

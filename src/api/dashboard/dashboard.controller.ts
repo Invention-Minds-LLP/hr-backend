@@ -2,6 +2,8 @@ import { Request, Response, NextFunction } from 'express';
 import { PrismaClient, Announcement, ClearanceType, Prisma, ApplicationStatus } from '@prisma/client';
 import { differenceInCalendarDays } from 'date-fns';
 import { startOfMonth, endOfMonth } from 'date-fns';
+import { createNotification } from '../notifications/notifications.controller';
+import { create } from 'qrcode';
 
 const prisma = new PrismaClient();
 const IST = 'Asia/Kolkata';
@@ -1146,7 +1148,8 @@ export class DashboardController {
                 title: `Pending Acknowledgements — ${ann.title}` + (departmentId ? ` (Dept ${departmentId})` : ''),
                 cols: ['Employee', 'EMP ID', 'Department', 'Email', 'Phone', 'Manager'],
                 rows,
-                actions: ['Remind all', 'Export'],
+                // actions: ['Remind all', 'Export'],
+                actions:[],
                 selectable: true
             });
         }
@@ -1268,7 +1271,8 @@ export class DashboardController {
                     'Last Reminder Year',
                 ],
                 rows,
-                actions: ['Send reminder', 'Mark completed'],
+                // actions: ['Send reminder', 'Mark completed'],
+                actions:[],
                 selectable: true,
             });
         }
@@ -1309,7 +1313,8 @@ export class DashboardController {
                 title: 'Interviews Scheduled Today',
                 cols: ['Candidate', 'Job Title', 'Stage', 'Start', 'End', 'Result'],
                 rows,
-                actions: ['Message', 'Reschedule'],
+                // actions: ['Message', 'Reschedule'],
+                actions:[],
             });
         }
 
@@ -1339,7 +1344,10 @@ export class DashboardController {
                 fmtDate(x.startDate) + ' → ' + fmtDate(x.endDate),
                 'Approved',
             ]);
-            return res.json({ title: 'Leaves Today', cols: ['Employee', 'Type', 'EMP ID', 'Dept', 'Dates', 'Status'], rows, actions: ['Message'] });
+            return res.json({ title: 'Leaves Today', cols: ['Employee', 'Type', 'EMP ID', 'Dept', 'Dates', 'Status'], rows,
+                //  actions: ['Message'] 
+                actions:[],
+                });
         }
 
         // WFH (approved & overlapping today)
@@ -1362,7 +1370,10 @@ export class DashboardController {
                 fmtDate(x.startDate) + ' → ' + fmtDate(x.endDate),
                 'Approved',
             ]);
-            return res.json({ title: 'WFH Today', cols: ['Employee', 'EMP ID', 'Dept', 'Window', 'Status'], rows, actions: ['Message'] });
+            return res.json({ title: 'WFH Today', cols: ['Employee', 'EMP ID', 'Dept', 'Window', 'Status'], rows,
+                //  actions: ['Message']
+                actions:[],
+                 });
         }
 
         // Permissions (approved & today overlap)
@@ -1386,7 +1397,10 @@ export class DashboardController {
                 x.startTime || x.endTime ? `${fmtTime(x.startTime)}–${fmtTime(x.endTime)}` : fmtDate(x.day),
                 'Approved',
             ]);
-            return res.json({ title: 'Permissions Today', cols: ['Employee', 'EMP ID', 'Dept', 'Timing', 'Window/Day', 'Status'], rows, actions: ['Message'] });
+            return res.json({ title: 'Permissions Today', cols: ['Employee', 'EMP ID', 'Dept', 'Timing', 'Window/Day', 'Status'], rows,
+                //  actions: ['Message'] 
+                actions:[],
+                });
         }
 
         // Late Arrivals (today) — matches your "rotational can use any shift" rule
@@ -1560,7 +1574,8 @@ export class DashboardController {
                 title: 'Late Arrivals',
                 cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Scheduled In', 'Actual In', 'Late (mins)'],
                 rows,
-                actions: ['Notify all'],
+                // actions: ['Notify all'],
+                actions:[],
             });
         }
 
@@ -1723,7 +1738,8 @@ export class DashboardController {
                 title: 'OT Yesterday',
                 cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Sched End', 'Check-out', 'OT Duration'],
                 rows,
-                actions: ['Export'],
+                // actions: ['Export'],
+                actions:[],
                 selectable: true,
             });
         }
@@ -1763,7 +1779,11 @@ export class DashboardController {
             const titles: Record<string, string> = {
                 joiners: 'New Joiners Today', birthdays: 'Birthdays Today', anniversaries: 'Anniversaries Today',
             };
-            return res.json({ title: titles[key], cols: ['Employee', 'EMP ID', 'Dept', 'Date'], rows, actions: ['Congratulate'] });
+            return res.json({ title: titles[key], cols: ['Employee', 'EMP ID', 'Dept', 'Date'], rows,
+                //  actions: ['Congratulate
+                // '] 
+                actions:[],
+                });
         }
         // add a new key
         if (key === 'offersPendingSignature') {
@@ -2752,7 +2772,8 @@ export class DashboardController {
                         `${x.delayMins} min`
                     ]
                 })),
-                actions: ['Notify all', 'Mark exception'],
+                // actions: ['Notify all'],
+                actions:[],
                 selectable: true
             },
 
@@ -2770,7 +2791,8 @@ export class DashboardController {
                         `${x.delayMins} min`
                     ]
                 })),
-                actions: ['Notify all', 'Mark exception'],
+                // actions: ['Notify all'],
+                actions:[],
                 selectable: true
             },
 
@@ -2965,8 +2987,11 @@ export const messageUnmarked = async (req: Request, res: Response) => {
         const { employeeIds, message } = req.body;
         // TODO: integrate with notification/email service
         // console.log("Message to unmarked employees:", employeeIds, message);
-
-        return res.json({ success: true, notified: employeeIds.length });
+        for (const empId of employeeIds) {
+            createNotification(empId,message)
+        }
+         res.json({ success: true, notified: employeeIds.length });
+         return;
     } catch (err) {
         console.error("Message Unmarked Error:", err);
         return res.status(500).json({ error: "Failed to send messages" });
@@ -3198,18 +3223,122 @@ export const createRenewalTickets = async (req: Request, res: Response) => {
 // ----------------------
 // 5. Missing interview feedback
 // ----------------------
+// export const nudgePanel = async (req: Request, res: Response) => {
+//     try {
+//         const { interviewIds } = req.body;
+//         // TODO: integrate with notifications
+//         console.log("Nudge panel for interviews:", interviewIds);
+//         if (!interviewIds || !interviewIds.length) {
+//             return res.status(400).json({ error: "interviewIds required" });
+//         }
+
+//         // 1️⃣ Fetch interviews with panel members
+//         const interviews = await prisma.interview.findMany({
+//             where: { id: { in: interviewIds } },
+//             select: {
+//                 id: true,
+//                 panelMembers: {       // adjust field name if different
+//                     select: { id: true }
+//                 }
+//             }
+//         });
+
+//         // 2️⃣ Collect all panel member IDs
+//         const panelIds = new Set<number>();
+
+//         interviews.forEach(i => {
+//             i.panelMembers.forEach(p => {
+//                 panelIds.add(p.id);
+//             });
+//         });
+
+//         const ids = Array.from(panelIds);
+
+//         if (ids.length === 0) {
+//             return res.json({ success: true, nudged: 0 });
+//         }
+
+//         // 3️⃣ Send notifications
+//         await prisma.notification.createMany({
+//             data: ids.map(id => ({
+//                 employeeId: id,
+//                 message: "Please submit interview feedback.",
+//                 channel: "IN_APP"
+//             }))
+//         });
+
+//         return res.json({ success: true, nudged: interviewIds.length });
+//     } catch (err) {
+//         console.error("Nudge Panel Error:", err);
+//         return res.status(500).json({ error: "Failed to nudge panel" });
+//     }
+// };
+
 export const nudgePanel = async (req: Request, res: Response) => {
     try {
         const { interviewIds } = req.body;
-        // TODO: integrate with notifications
-        console.log("Nudge panel for interviews:", interviewIds);
 
-        return res.json({ success: true, nudged: interviewIds.length });
+        if (!interviewIds || !interviewIds.length) {
+            return res.status(400).json({ error: "interviewIds required" });
+        }
+
+        // 1️⃣ Fetch interviews
+        const interviews = await prisma.interview.findMany({
+            where: { id: { in: interviewIds } },
+            select: {
+                id: true,
+                panelUserIds: true
+            }
+        });
+
+        // 2️⃣ Collect panel IDs
+        const panelIds = new Set<number>();
+
+        interviews.forEach(interview => {
+            if (!interview.panelUserIds) return;
+
+            try {
+                // assume stored as JSON string like "[1,2,3]"
+                const ids = JSON.parse(interview.panelUserIds);
+
+                ids.forEach((id: number) => panelIds.add(id));
+            } catch {
+                // fallback: comma-separated "1,2,3"
+                interview.panelUserIds
+                    .split(",")
+                    .map(id => Number(id.trim()))
+                    .filter(id => !isNaN(id))
+                    .forEach(id => panelIds.add(id));
+            }
+        });
+
+        const ids = Array.from(panelIds);
+
+        if (ids.length === 0) {
+            return res.json({ success: true, nudged: 0 });
+        }
+
+        // 3️⃣ Send notifications
+        // await prisma.notification.createMany({
+        //   data: ids.map(id => ({
+        //     employeeId: id,
+        //     message: "Please submit interview feedback.",
+        //     channel: "PUSH" // or EMAIL/SMS depending on your system
+        //   }))
+        // });
+        for (const id of ids) {
+            await createNotification(id, "Please submit interview feedback.");
+        }
+
+
+        return res.json({ success: true, nudged: ids.length });
+
     } catch (err) {
         console.error("Nudge Panel Error:", err);
         return res.status(500).json({ error: "Failed to nudge panel" });
     }
 };
+
 
 export const reassignReviewer = async (req: Request, res: Response) => {
     try {

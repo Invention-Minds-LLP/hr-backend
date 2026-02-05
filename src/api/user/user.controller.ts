@@ -93,7 +93,8 @@ export const loginUser = async (req: Request, res: Response) => {
         departmentId: true,
         photoUrl: true,
         designation: true,
-        roleId: true
+        roleId: true,
+        gender: true
       }
     })
 
@@ -141,6 +142,7 @@ export const loginUser = async (req: Request, res: Response) => {
       designation: employee?.designation?.name || '',
       photoUrl: employee.photoUrl || null,
       roleId: employee.roleId,
+      gender: employee.gender
     });
   } catch (error) {
     console.error(error);

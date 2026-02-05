@@ -29,6 +29,7 @@ import {
   requestMonthlyShift,
   getMonthlyShiftStatus,
   getEmployeeDailyShiftsForRange,
+  getApprovedWeekOffs,
 } from "./shift.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -40,6 +41,8 @@ router.get("/templates", authenticateToken, getShiftTemplates);
 router.get("/templates/:id", authenticateToken, getShiftTemplateById);
 router.put("/templates/:id", authenticateToken, updateShiftTemplate);
 router.delete("/templates/:id", authenticateToken, deleteShiftTemplate);
+
+router.get("/weekoffs", getApprovedWeekOffs);
 
 router.get("/employee-shifts", authenticateToken, listEmployeeShifts);
 router.put("/employee-shifts/:assignmentId", authenticateToken, updateEmployeeShift);

@@ -55,7 +55,7 @@ export const createTraining = async (req: AuthenticatedRequest, res: Response) =
             deadlineDate: t.deadlineDate ? new Date(t.deadlineDate) : null,
           })),
         },
-        
+
       },
       include: {
         trainingTests: { include: { test: true } },
@@ -269,9 +269,21 @@ export const submitTrainingFeedback = async (req: Request, res: Response) => {
       },
     });
 
+    const emp = await prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { firstName: true, lastName: true }
+    });
+
+    const training = await prisma.training.findUnique({
+      where: { id: trainingId },
+      select: { title: true }
+    });
+
+    const employeeName = `${emp?.firstName || ""} ${emp?.lastName || ""}`.trim();
+
     await createNotification(
       assignment.assignedBy,
-      `📋 New feedback received for training ID ${trainingId} from employee ${employeeId}`
+      `📋 ${employeeName} has submitted feedback for the training: ${training?.title || "Training"}.`
     );
 
     res.status(201).json(feedbackRecord);
@@ -285,223 +297,240 @@ export const submitTrainingFeedback = async (req: Request, res: Response) => {
  * Get summarized feedback for a training
  */
 export const getTrainingFeedbackSummary = async (req: Request, res: Response) => {
-    try {
-      const { trainingId } = req.params;
-  
-      const feedbacks = await prisma.trainingFeedback.findMany({
-        where: { trainingId: Number(trainingId) },
-        include: { employee: true },
-      });
-  
-      if (feedbacks.length === 0)
-        return res.json({ message: "No feedback received yet" });
-  
-      // Helper: safely calculate average of numeric fields
-      const getAverage = (field: keyof typeof feedbacks[0]) => {
-        const nums = feedbacks
-          .map((f) => Number(f[field]))
-          .filter((v) => !isNaN(v)); // keep only valid numbers
-        return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0;
-      };
-  
-      const summary = {
-        totalFeedbacks: feedbacks.length,
-        averageRating: getAverage("rating").toFixed(2),
-        averageTrainerRating: getAverage("trainerRating").toFixed(2),
-        averageContentQuality: getAverage("contentQuality").toFixed(2),
-        averageRelevance: getAverage("relevance").toFixed(2),
-        feedbacks,
-      };
-  
-      res.json(summary);
-    } catch (error) {
-      console.error("❌ Failed to fetch training feedback summary:", error);
-      res.status(500).json({ error: "Failed to fetch feedback summary" });
+  try {
+    const { trainingId } = req.params;
+
+    const feedbacks = await prisma.trainingFeedback.findMany({
+      where: { trainingId: Number(trainingId) },
+      include: { employee: true },
+    });
+
+    if (feedbacks.length === 0)
+      return res.json({ message: "No feedback received yet" });
+
+    // Helper: safely calculate average of numeric fields
+    const getAverage = (field: keyof typeof feedbacks[0]) => {
+      const nums = feedbacks
+        .map((f) => Number(f[field]))
+        .filter((v) => !isNaN(v)); // keep only valid numbers
+      return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0;
+    };
+
+    const summary = {
+      totalFeedbacks: feedbacks.length,
+      averageRating: getAverage("rating").toFixed(2),
+      averageTrainerRating: getAverage("trainerRating").toFixed(2),
+      averageContentQuality: getAverage("contentQuality").toFixed(2),
+      averageRelevance: getAverage("relevance").toFixed(2),
+      feedbacks,
+    };
+
+    res.json(summary);
+  } catch (error) {
+    console.error("❌ Failed to fetch training feedback summary:", error);
+    res.status(500).json({ error: "Failed to fetch feedback summary" });
+  }
+};
+
+export const updateTraining = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const {
+      title,
+      description,
+      objectives,
+      mode,
+      location,
+      startDate,
+      endDate,
+      departmentId,
+      trainers,
+      trainingTests, // array of { testId, isMandatory, orderNo }
+    } = req.body;
+
+    const existing = await prisma.training.findUnique({
+      where: { id: Number(id) },
+      include: { trainingTests: true },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: "Training not found" });
     }
-  };
-  
-  export const updateTraining = async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { id } = req.params;
-      const {
+
+    // 🧩 Step 1: Update main training fields
+    const updatedTraining = await prisma.training.update({
+      where: { id: Number(id) },
+      data: {
         title,
         description,
         objectives,
         mode,
         location,
-        startDate,
-        endDate,
+        startDate: startDate ? new Date(startDate) : null,
+        endDate: endDate ? new Date(endDate) : null,
         departmentId,
-        trainers,
-        trainingTests, // array of { testId, isMandatory, orderNo }
-      } = req.body;
-  
-      const existing = await prisma.training.findUnique({
-        where: { id: Number(id) },
-        include: { trainingTests: true },
+        trainers, // store updated JSON
+        updatedAt: new Date(),
+      },
+    });
+
+    // 🧩 Step 2: Replace linked tests
+    // First, delete old trainingTests
+    await prisma.trainingTest.deleteMany({
+      where: { trainingId: Number(id) },
+    });
+
+    // Then recreate based on new list
+    if (Array.isArray(trainingTests) && trainingTests.length > 0) {
+      await prisma.trainingTest.createMany({
+        data: trainingTests.map((t: any, index: number) => ({
+          trainingId: Number(id),
+          testId: t.testId,
+          isMandatory: t.isMandatory ?? true,
+          orderNo: t.orderNo ?? index + 1,
+        })),
       });
-  
-      if (!existing) {
-        return res.status(404).json({ error: "Training not found" });
-      }
-  
-      // 🧩 Step 1: Update main training fields
-      const updatedTraining = await prisma.training.update({
-        where: { id: Number(id) },
-        data: {
-          title,
-          description,
-          objectives,
-          mode,
-          location,
-          startDate: startDate ? new Date(startDate) : null,
-          endDate: endDate ? new Date(endDate) : null,
-          departmentId,
-          trainers, // store updated JSON
-          updatedAt: new Date(),
-        },
-      });
-  
-      // 🧩 Step 2: Replace linked tests
-      // First, delete old trainingTests
-      await prisma.trainingTest.deleteMany({
-        where: { trainingId: Number(id) },
-      });
-  
-      // Then recreate based on new list
-      if (Array.isArray(trainingTests) && trainingTests.length > 0) {
-        await prisma.trainingTest.createMany({
-          data: trainingTests.map((t: any, index: number) => ({
-            trainingId: Number(id),
-            testId: t.testId,
-            isMandatory: t.isMandatory ?? true,
-            orderNo: t.orderNo ?? index + 1,
-          })),
-        });
-      }
-  
-      // 🧩 Step 3: Return the updated training with its tests
-      const result = await prisma.training.findUnique({
-        where: { id: Number(id) },
-        include: { trainingTests: { include: { test: true } } },
-      });
-  
-      res.json({ message: "Training updated successfully", training: result });
-    } catch (error) {
-      console.error("❌ Failed to update training:", error);
-      res.status(500).json({ error: "Failed to update training" });
     }
-  };
-  export const markTrainingAttendance = async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { trainingId } = req.params;
-      const { employeeId, status } = req.body;
-      const markedBy = req.user.userId;
-  
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-  
-      // 1️⃣ Check if an attendance already exists
-      const existing = await prisma.trainingAttendance.findFirst({
-        where: {
+
+    // 🧩 Step 3: Return the updated training with its tests
+    const result = await prisma.training.findUnique({
+      where: { id: Number(id) },
+      include: { trainingTests: { include: { test: true } } },
+    });
+
+    res.json({ message: "Training updated successfully", training: result });
+  } catch (error) {
+    console.error("❌ Failed to update training:", error);
+    res.status(500).json({ error: "Failed to update training" });
+  }
+};
+export const markTrainingAttendance = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { trainingId } = req.params;
+    const { employeeId, status } = req.body;
+    const markedBy = req.user.userId;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // 1️⃣ Check if an attendance already exists
+    const existing = await prisma.trainingAttendance.findFirst({
+      where: {
+        trainingId: Number(trainingId),
+        employeeId: Number(employeeId),
+        date: today,
+      }
+    });
+
+    let record;
+
+    if (existing) {
+      // 2️⃣ Update it
+      record = await prisma.trainingAttendance.update({
+        where: { id: existing.id },
+        data: {
+          status,
+          markedAt: new Date(),
+          markedBy,
+        }
+      });
+    } else {
+      // 3️⃣ Create new attendance
+      record = await prisma.trainingAttendance.create({
+        data: {
           trainingId: Number(trainingId),
           employeeId: Number(employeeId),
           date: today,
+          status,
+          markedAt: new Date(),
+          markedBy,
         }
       });
-  
-      let record;
-  
-      if (existing) {
-        // 2️⃣ Update it
-        record = await prisma.trainingAttendance.update({
-          where: { id: existing.id },
-          data: {
-            status,
-            markedAt: new Date(),
-            markedBy,
-          }
-        });
-      } else {
-        // 3️⃣ Create new attendance
-        record = await prisma.trainingAttendance.create({
-          data: {
-            trainingId: Number(trainingId),
-            employeeId: Number(employeeId),
-            date: today,
-            status,
-            markedAt: new Date(),
-            markedBy,
-          }
-        });
+    }
+    const training = await prisma.training.findUnique({
+      where: { id: Number(trainingId) },
+      select: { title: true }
+    });
+
+    await createNotification(
+      employeeId,
+      `Your attendance for the training "${training?.title || 'Training'}" has been marked as: ${status}.`
+    );
+    res.json({
+      message: "Attendance marked successfully",
+      data: record,
+    });
+
+  } catch (err) {
+    console.error("Error marking attendance:", err);
+    res.status(500).json({ error: "Failed to mark attendance" });
+  }
+};
+export const getTrainingAttendance = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { trainingId } = req.params;
+
+    const attendance = await prisma.trainingAttendance.findMany({
+      where: { trainingId: Number(trainingId) },
+      include: {
+        employee: true,
       }
-  
-      res.json({
-        message: "Attendance marked successfully",
-        data: record,
-      });
-  
-    } catch (err) {
-      console.error("Error marking attendance:", err);
-      res.status(500).json({ error: "Failed to mark attendance" });
-    }
-  };
-  export const getTrainingAttendance = async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { trainingId } = req.params;
-  
-      const attendance = await prisma.trainingAttendance.findMany({
-        where: { trainingId: Number(trainingId) },
-        include: {
-          employee: true,
-        }
-      });
-  
-      res.json(attendance);
-    } catch (err) {
-      res.status(500).json({ error: "Failed to fetch attendance" });
-    }
-  };
-  export const bulkMarkTrainingAttendance = async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const { trainingId } = req.params;
-      const { attendanceList } = req.body; // [{employeeId, status}, ...]
-  
-      const markedBy = req.user.userId;
-  
-      const today = new Date();
-      today.setHours(0,0,0,0);
-  
-      for (const entry of attendanceList) {
-        await prisma.trainingAttendance.upsert({
-          where: {
-            trainingId_employeeId_date: {
-              trainingId: Number(trainingId),
-              employeeId: entry.employeeId,
-              date: today,
-            }
-          },
-          update: {
-            status: entry.status,
-            markedAt: new Date(),
-            markedBy,
-          },
-          create: {
+    });
+
+    res.json(attendance);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch attendance" });
+  }
+};
+export const bulkMarkTrainingAttendance = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { trainingId } = req.params;
+    const { attendanceList } = req.body; // [{employeeId, status}, ...]
+
+    const markedBy = req.user.userId;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    for (const entry of attendanceList) {
+      await prisma.trainingAttendance.upsert({
+        where: {
+          trainingId_employeeId_date: {
             trainingId: Number(trainingId),
             employeeId: entry.employeeId,
             date: today,
-            status: entry.status,
-            markedAt: new Date(),
-            markedBy,
           }
-        });
-      }
-  
-      res.json({ message: "Bulk attendance updated" });
-  
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "Failed to update bulk attendance" });
+        },
+        update: {
+          status: entry.status,
+          markedAt: new Date(),
+          markedBy,
+        },
+        create: {
+          trainingId: Number(trainingId),
+          employeeId: entry.employeeId,
+          date: today,
+          status: entry.status,
+          markedAt: new Date(),
+          markedBy,
+        }
+      });
+      const training = await prisma.training.findUnique({
+        where: { id: Number(trainingId) },
+        select: { title: true }
+      });
+
+      await createNotification(
+        entry.employeeId,
+        `Your attendance for the training "${training?.title || 'Training'}" has been marked as: ${entry.status}.`
+      );
+
     }
-  };
-    
+
+    res.json({ message: "Bulk attendance updated" });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update bulk attendance" });
+  }
+};
