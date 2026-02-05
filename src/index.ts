@@ -91,7 +91,8 @@ const allowedOrigins = [
   'https://hrmindsjmrh.imapps.in',
   'http://localhost:4200',
   'https://rashtrotthanahospital.com',
-  'http://192.168.8.189:4300'
+  'http://192.168.8.189:4300',
+  'https://www.rashtrotthanahospital.com'
 ];
 
 app.use(cors({
