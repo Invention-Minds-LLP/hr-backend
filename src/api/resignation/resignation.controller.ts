@@ -1301,6 +1301,8 @@ export async function listResignationsWithClearances(req: AuthenticatedRequest, 
             lastName: true,
             departmentId: true,
             employeeCode: true,
+            gender:true,
+            photoUrl: true,
             Department: { select: { name: true } }
           }
         },

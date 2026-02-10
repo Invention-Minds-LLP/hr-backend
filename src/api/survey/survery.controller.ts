@@ -177,6 +177,8 @@ export async function getAllSurveys(_req: Request, res: Response) {
             firstName: true,
             lastName: true,
             employeeCode: true,
+            gender: true,
+            photoUrl: true,
             Department: {   // ✅ use the relation name from schema
               select: { name: true }
             }
