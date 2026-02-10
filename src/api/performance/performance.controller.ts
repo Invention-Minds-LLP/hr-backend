@@ -175,33 +175,33 @@ export const submitFullForm = async (req: Request, res: Response) => {
       });
     }
 
-          if (!data.finalReview) {
-        // get employee info
-        const employee = await prisma.employee.findUnique({
-          where: { id: data.employeeId },
-          select: { firstName: true, lastName: true, employeeCode: true }
-        });
+    if (!data.finalReview) {
+      // get employee info
+      const employee = await prisma.employee.findUnique({
+        where: { id: data.employeeId },
+        select: { firstName: true, lastName: true, employeeCode: true }
+      });
 
-        const employeeName = employee
-          ? `${employee.firstName} ${employee.lastName}`
-          : `Employee #${data.employeeCode}`;
+      const employeeName = employee
+        ? `${employee.firstName} ${employee.lastName}`
+        : `Employee #${data.employeeCode}`;
 
-        // get HR employees (departmentId = 1 OR roleId = HR)
-        const hrUsers = await prisma.employee.findMany({
-          where: {
-            departmentId: 1, // adjust if your HR dept id is different
-            employmentStatus: 'ACTIVE'
-          },
-          select: { id: true }
-        });
+      // get HR employees (departmentId = 1 OR roleId = HR)
+      const hrUsers = await prisma.employee.findMany({
+        where: {
+          departmentId: 1, // adjust if your HR dept id is different
+          employmentStatus: 'ACTIVE'
+        },
+        select: { id: true }
+      });
 
-        const hrIds = hrUsers.map(u => u.id);
+      const hrIds = hrUsers.map(u => u.id);
 
-        const messages = `HOD has submitted appraisal for ${employeeName} for ${data.cycle} – ${data.summaries[0].period}. Please review`;
+      const messages = `HOD has submitted appraisal for ${employeeName} for ${data.cycle} – ${data.summaries[0].period}. Please review`;
 
-        if (hrIds.length) {
-          for (const hrId of hrIds) {
-            await createNotification(hrId, messages)
+      if (hrIds.length) {
+        for (const hrId of hrIds) {
+          await createNotification(hrId, messages)
         }
       }
     }
@@ -280,7 +280,9 @@ export const getAllSummaries = async (req: Request, res: Response) => {
             lastName: true,
             email: true,
             dateOfJoining: true,
-            reportingManager: true
+            reportingManager: true,
+            gender: true,
+            photoUrl: true,
           }
         },
         department: {

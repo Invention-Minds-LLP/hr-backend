@@ -728,6 +728,8 @@ export const listEmployeeShifts = async (req: Request, res: Response) => {
           employeeCode: true,
           phone: true,
           employmentType: true,
+          gender: true,
+          photoUrl: true,
 
           Department: {
             select: {
@@ -1466,6 +1468,7 @@ export const listApprovalsInbox = async (req: AuthenticatedRequest, res: Respons
         employee: {
           select: {
             id: true, firstName: true, lastName: true, employeeCode: true,
+            gender:true, photoUrl: true,
             inchargeId: true, reportingManager: true,
             Department: { select: { name: true } },
             designation: { select: { name: true } }

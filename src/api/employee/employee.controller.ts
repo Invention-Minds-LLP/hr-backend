@@ -468,6 +468,7 @@ export const getEmployees = async (req: Request, res: Response) => {
           departmentId: true,
           roleId: true,
           photoUrl: true,
+          gender: true,
           Department: { select: { id: true, name: true } },
           Branch: { select: { id: true, name: true } },
           shifts: {
@@ -2084,6 +2085,8 @@ export const getUnreportedAbsentees = async (req: Request, res: Response) => {
             lastName: true,
             designation: true,
             Department: true,
+            gender: true,
+            photoUrl:true,
           },
         },
       },

@@ -1591,6 +1591,7 @@ export const listEmployeeInterviews = asyncHandler(async (req, res) => {
               phone: true,
               experience: true,
               qualification: true,
+              resumeUrl:true
             },
           },
           job: {

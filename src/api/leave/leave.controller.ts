@@ -222,6 +222,8 @@ export const getLeaveRequests = async (_req: Request, res: Response) => {
             reportingManager: true,
             inchargeId: true,
             roleId: true,
+            gender:true,
+            photoUrl: true,
 
             designation: {
               select: {

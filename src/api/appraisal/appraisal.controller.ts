@@ -229,6 +229,8 @@ export const getAllAppraisalsWithManagerReview = async (req: Request, res: Respo
             email: true,
             dateOfJoining: true,
             reportingManager: true,
+            gender: true,
+            photoUrl: true
           }
         },
         managerReview: true // include ONLY ManagerAppraisal

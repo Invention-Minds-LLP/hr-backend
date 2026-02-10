@@ -115,7 +115,9 @@ export async function listResignations(req: Request, res: Response) {
       where,
       orderBy: { createdAt: 'desc' },
       include: {
-        employee: { select: { id: true, firstName: true, lastName: true, departmentId: true, designation: true, reportingManager: true } },
+        employee: { select: { id: true, firstName: true, lastName: true, departmentId: true, designation: true, reportingManager: true, gender: true, photoUrl: true
+
+         } },
         handoverTasks: true,
         clearances: true,
         exitInterview: true,
@@ -699,7 +701,7 @@ export async function listExitInterviews(_req: Request, res: Response) {
         if (interview.interviewerId) {
           const interviewer = await prisma.employee.findUnique({
             where: { id: interview.interviewerId },
-            select: { firstName: true, lastName: true },
+            select: { firstName: true, lastName: true, gender: true, photoUrl: true },
           });
           if (interviewer) {
             interviewerName = `${interviewer.firstName} ${interviewer.lastName}`;
