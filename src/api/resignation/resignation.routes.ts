@@ -23,7 +23,8 @@ import {
   requestWithdraw,
   hrApproveWithdraw,  
   hrRejectWithdraw,
-  listResignationsWithClearances
+  listResignationsWithClearances,
+  setApplicableDepartments
 } from './resignation.controller'
 import { authenticateToken } from '../../middleware/authMiddleware';
 import { listPendingClearances } from '../dashboard/dashboard.controller';
@@ -56,6 +57,7 @@ router.put('/:id/hr-hold',authenticateToken, hrHold);
 router.post('/:id/handover-tasks',authenticateToken, addHandoverTasks);
 router.patch('/:id/handover-tasks/:taskId',authenticateToken, updateTask);
 router.post('/:id/clearance',authenticateToken, upsertClearance);
+router.post('/:id/applicable-departments', authenticateToken, setApplicableDepartments)
 router.post('/:id/exit-interview',authenticateToken, scheduleExitInterview);
 router.post("/exit-interview",authenticateToken, createExitInterview);   // submit responses
 router.get("/exit-interview/:id",authenticateToken, getExitInterview);                // get one

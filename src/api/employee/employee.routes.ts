@@ -26,7 +26,9 @@ import {
   terminateFromSabbatical,
   endSabbatical,
   extendSabbatical,
-  startSabbatical
+  startSabbatical,
+  getEmployeesByRole,
+  getEmployeesByManager
 } from "./employee.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -36,6 +38,8 @@ router.post("/", authenticateToken,createEmployee);
 router.get("/", authenticateToken,getEmployees);
 router.get("/by-departments", authenticateToken, getEmployeesByDepartments);
 router.get("/absent-without-leave", getUnreportedAbsentees);
+router.get("/by-manager/:managerId", getEmployeesByManager);
+router.get('/by-role', getEmployeesByRole);
 router.get('/incharge', authenticateToken, getInchargeEmployees);
 router.get('/:id/profile', getEmployeeProfile);
 router.put('/:id/profile',updateEmployeeProfile);

@@ -114,7 +114,9 @@ model Employee {
   TrainingFeedback         TrainingFeedback[]
   User                     User?
   WFHRequest               WFHRequest[]
-  sabbaticals Sabbatical[]
+  sabbaticals              Sabbatical[]
+  compOffCredits CompOffCredit[]
+
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -201,6 +203,7 @@ model Department {
   PerformanceResponse     PerformanceResponse[]
   PerformanceSummary      PerformanceSummary[]
   Training                Training[]
+  resignationClearances   ResignationClearance[]
 }
 
 model Branch {
@@ -739,11 +742,13 @@ model ResignationHandoverTask {
 model ResignationClearance {
   id            Int                @id @default(autoincrement())
   resignationId Int
-  type          ClearanceType
+  type          String
   decision      ApprovalDecision   @default(PENDING)
   verifierId    Int?
   note          String?
   decidedAt     DateTime?
+  departmentId  Int?
+  department    Department?        @relation(fields: [departmentId], references: [id])
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @default(now()) @updatedAt
   resignation   ResignationRequest @relation(fields: [resignationId], references: [id])
@@ -1463,7 +1468,7 @@ model EmployeeLeaveBalance {
   year           Int
   totalAllowed   Int             @default(0)
   used           Int             @default(0)
-  halfDayUsed    Int?             @default(0)
+  halfDayUsed    Int?            @default(0)
   leaveType      LeaveType?      @relation(fields: [leaveTypeId], references: [id])
 
   @@unique([employeeId, leaveTypeId, year])
@@ -1596,7 +1601,6 @@ model Holiday {
   @@index([date])
 }
 
-
 model ShiftApproval {
   id                  Int                   @id @default(autoincrement())
   employeeId          Int
@@ -1631,26 +1635,42 @@ model ShiftApproval {
 }
 
 model Sabbatical {
-  id          Int              @id @default(autoincrement())
-  employeeId  Int
-  startDate   DateTime
-  endDate     DateTime
-  reason      String?
-  status      SabbaticalStatus @default(ACTIVE)
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
+  id         Int              @id @default(autoincrement())
+  employeeId Int
+  startDate  DateTime
+  endDate    DateTime
+  reason     String?
+  status     SabbaticalStatus @default(ACTIVE)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
 
-  employee    Employee         @relation(fields: [employeeId], references: [id])
+  employee Employee @relation(fields: [employeeId], references: [id])
 
   @@index([employeeId])
 }
+
+model CompOffCredit {
+  id          Int      @id @default(autoincrement())
+  employeeId  Int
+  workDate    DateTime
+  expiryDate  DateTime
+  used        Boolean  @default(false)
+  usedOn      DateTime?
+  leaveId     Int?
+  createdAt   DateTime @default(now())
+
+  employee    Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId])
+  @@index([expiryDate])
+}
+
 
 enum SabbaticalStatus {
   ACTIVE
   COMPLETED
   CANCELLED
 }
-
 
 enum Gender {
   MALE

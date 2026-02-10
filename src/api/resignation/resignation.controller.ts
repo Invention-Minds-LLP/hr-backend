@@ -10,7 +10,7 @@ import axios from 'axios';
 import QRCode from 'qrcode';
 import { Client } from 'basic-ftp';
 import { AuthenticatedRequest } from '../../middleware/authMiddleware';
-import { ClearanceType } from '@prisma/client';
+// import { ClearanceType } from '@prisma/client';
 const prisma = new PrismaClient();
 import cron from 'node-cron';
 import { sendHealthCheckReminders } from '../employee/employee.controller';
@@ -168,6 +168,9 @@ export async function getResignationById(req: Request, res: Response) {
             decision: true,
             note: true,
             verifierId: true,
+            department: {
+              select: { name: true }
+            },
             verifier: {
               select: {
                 firstName: true,
@@ -237,7 +240,7 @@ export async function managerApprove(req: Request, res: Response) {
     };
     if (overrideLastWorkingDay) data.proposedLastWorkingDay = new Date(overrideLastWorkingDay);
 
-   const upd = await prisma.resignationRequest.update({
+    const upd = await prisma.resignationRequest.update({
       where: { id },
       data,
       include: {
@@ -288,7 +291,7 @@ export async function managerReject(req: Request, res: Response) {
             lastName: true,
             employeeCode: true
           }
-        } 
+        }
       }
     });
     // 🔔 Notify HR after manager decision
@@ -474,18 +477,59 @@ export async function updateTask(req: Request, res: Response) {
 }
 
 /** Clearances (upsert per type) */
+// export async function upsertClearance(req: Request, res: Response) {
+//   try {
+//     const id = Number(req.params.id);
+//     const { type, decision, note, verifierId } = req.body as {
+//       type: $Enums.ClearanceType;
+//       decision: $Enums.ApprovalDecision;
+//       note?: string;
+//       verifierId?: number;
+//     };
+
+//     const existing = await prisma.resignationClearance.findUnique({
+//       where: { resignationId_type: { resignationId: id, type } }
+//     });
+
+//     const row = existing
+//       ? await prisma.resignationClearance.update({
+//         where: { id: existing.id },
+//         data: { decision, note, verifierId: verifierId ?? null, decidedAt: new Date() }
+//       })
+//       : await prisma.resignationClearance.create({
+//         data: { resignationId: id, type, decision, note, verifierId: verifierId ?? null, decidedAt: new Date() }
+//       });
+
+//     res.json(row);
+//   } catch (e) {
+//     console.error(e);
+//     res.status(500).json({ error: 'Clearance update failed' });
+//   }
+// }
 export async function upsertClearance(req: Request, res: Response) {
   try {
     const id = Number(req.params.id);
-    const { type, decision, note, verifierId } = req.body as {
-      type: $Enums.ClearanceType;
+    const { departmentId, decision, note, verifierId } = req.body as {
+      departmentId: number;
       decision: $Enums.ApprovalDecision;
       note?: string;
       verifierId?: number;
     };
 
-    const existing = await prisma.resignationClearance.findUnique({
-      where: { resignationId_type: { resignationId: id, type } }
+    // get department name
+    const dept = await prisma.department.findUnique({
+      where: { id: departmentId },
+      select: { name: true }
+    });
+
+    if (!dept) {
+      return res.status(404).json({ error: 'Department not found' });
+    }
+
+    const type = dept.name;
+
+    const existing = await prisma.resignationClearance.findFirst({
+      where: { resignationId: id, departmentId }
     });
 
     const row = existing
@@ -494,7 +538,15 @@ export async function upsertClearance(req: Request, res: Response) {
         data: { decision, note, verifierId: verifierId ?? null, decidedAt: new Date() }
       })
       : await prisma.resignationClearance.create({
-        data: { resignationId: id, type, decision, note, verifierId: verifierId ?? null, decidedAt: new Date() }
+        data: {
+          resignationId: id,
+          departmentId,
+          type,
+          decision,
+          note,
+          verifierId: verifierId ?? null,
+          decidedAt: new Date()
+        }
       });
 
     res.json(row);
@@ -503,6 +555,7 @@ export async function upsertClearance(req: Request, res: Response) {
     res.status(500).json({ error: 'Clearance update failed' });
   }
 }
+
 
 /** Exit interview scheduling */
 export async function scheduleExitInterview(req: Request, res: Response) {
@@ -876,7 +929,11 @@ export const generateClearanceCertificate = async (req: Request, res: Response) 
     where: { id },
     include: {
       employee: { include: { Department: true, Branch: true } },
-      clearances: true,
+      clearances: {
+        include: {
+          department: { select: { name: true } }
+        }
+      },
       handoverTasks: true,
       finalSettlement: true,
     },
@@ -885,7 +942,12 @@ export const generateClearanceCertificate = async (req: Request, res: Response) 
 
 
   // 2) Eligibility checks
-  const allClearancesApproved = r.clearances.length > 0 && r.clearances.every(c => c.decision === 'APPROVED');
+  // const allClearancesApproved = r.clearances.length > 0 && r.clearances.every(c => c.decision === 'APPROVED');
+  const requiredClearances = r.clearances;
+  const allClearancesApproved =
+    requiredClearances.length > 0 &&
+    requiredClearances.every(c => c.decision === 'APPROVED');
+
   const allTasksDone = r.handoverTasks.every(t => t.status === 'DONE');
   const settlementPaid = r.finalSettlement?.status === 'PAID';
   const statusOk = ['APPROVED', 'COMPLETED'].includes(r.status);
@@ -913,7 +975,8 @@ export const generateClearanceCertificate = async (req: Request, res: Response) 
     dateOfJoining: r.employee.dateOfJoining,
     lastWorkingDay: r.actualLastWorkingDay ?? r.proposedLastWorkingDay,
     clearances: r.clearances.map(c => ({
-      type: String(c.type),
+      type: c.department?.name || c.type,
+
       decision: c.decision as any, // 'PENDING' | 'APPROVED' | 'REJECTED'
       decidedAt: c.decidedAt,
       note: c.note,
@@ -1208,10 +1271,12 @@ export async function listResignationsWithClearances(req: AuthenticatedRequest, 
 
     // ✅ Determine which clearance type this user manages
     const deptName = emp.Department?.name?.toUpperCase() ?? '';
-    const allowedClearanceType =
-      ['HR', 'FINANCE', 'IT', 'ADMIN', 'SECURITY'].includes(deptName)
-        ? deptName
-        : null;
+    // const allowedClearanceType =
+    //   ['HR', 'FINANCE', 'IT', 'ADMIN', 'SECURITY'].includes(deptName)
+    //     ? deptName
+    //     : null;
+    const allowedDepartmentId = emp.departmentId;
+
 
     const whereCondition = isHRManager
       ? {} // HR sees all
@@ -1237,9 +1302,13 @@ export async function listResignationsWithClearances(req: AuthenticatedRequest, 
             Department: { select: { name: true } }
           }
         },
-        clearances: allowedClearanceType
-          ? { where: { type: allowedClearanceType as ClearanceType } } // ✅ Cast it to the enum
+        // clearances: allowedClearanceType
+        //   ? { where: { type: allowedClearanceType as ClearanceType } } // ✅ Cast it to the enum
+        //   : false,
+        clearances: allowedDepartmentId
+          ? { where: { departmentId: allowedDepartmentId } }
           : false,
+
       },
       orderBy: { createdAt: 'desc' }
     });
@@ -1311,4 +1380,37 @@ export const initNoticePeriodSchedular = () => {
   });
 
 
+}
+
+export async function setApplicableDepartments(req: Request, res: Response) {
+  const id = Number(req.params.id);
+  const { departmentIds } = req.body;
+
+  await prisma.$transaction(async (tx) => {
+    // remove old
+    await tx.resignationClearance.deleteMany({
+      where: { resignationId: id }
+    });
+
+    // create new clearance rows
+    for (const deptId of departmentIds) {
+      const dept = await tx.department.findUnique({
+        where: { id: deptId },
+        select: { name: true }
+      });
+
+      if (dept) {
+        await tx.resignationClearance.create({
+          data: {
+            resignationId: id,
+            departmentId: deptId,
+            type: dept.name,
+            decision: 'PENDING'
+          }
+        });
+      }
+    }
+  });
+
+  res.json({ success: true });
 }

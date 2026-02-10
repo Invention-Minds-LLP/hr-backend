@@ -74,3 +74,19 @@ export const listIncidentsByEmployee = async (req: any, res: Response) => {
     res.status(500).json({ error: "Failed to load incidents" });
   }
 };
+export const listAllIncidents = async (req: Request, res: Response) => {
+  try {
+    const list = await prisma.incident.findMany({
+      include: {
+        employee: true,
+        reporter: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.json(list);
+  } catch (err) {
+    console.error("Error fetching all incidents:", err);
+    res.status(500).json({ error: "Failed to load incidents" });
+  }
+};

@@ -96,6 +96,11 @@ export async function createInternship(req: Request, res: Response) {
         });
 
         const mentorMap = await buildNameMap([created.mentorId]);
+               const message = `A intern ${created.candidateName} has been assigned to you. Please check the details and provide necessary guidance.`;
+               if(created.mentorId){
+                await createNotification(created.mentorId, message);
+               }
+        // await createNotification(created.mentorId, message);
         return res.status(201).json({
             ...created,
             employeeName: created.employee ? `${created.employee.firstName} ${created.employee.lastName}` : null,
@@ -568,6 +573,7 @@ export async function convertInternship(req: Request, res: Response) {
 }
 
 import { randomBytes } from 'crypto';
+import { createNotification } from '../notifications/notifications.controller';
 
 
 function genCertCode() {

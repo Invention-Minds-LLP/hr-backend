@@ -613,32 +613,76 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
       //     used: { increment: days }
       //   }
       // });
-      const year = updatedLeave.startDate.getFullYear();
+      if (updatedLeave.leaveType.name === "CO") {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
 
-      if (updatedLeave.isHalfDay) {
-        await prisma.employeeLeaveBalance.updateMany({
+        // Always full day for CO
+        const requiredDays = daysInclusive(
+          updatedLeave.startDate,
+          updatedLeave.endDate
+        );
+
+        // Fetch valid credits (earliest expiry first)
+        const credits = await prisma.compOffCredit.findMany({
           where: {
             employeeId: updatedLeave.employeeId,
-            leaveTypeId: updatedLeave.leaveTypeId,
-            year
+            used: false,
+            expiryDate: { gte: today }
           },
-          data: {
-            halfDayUsed: { increment: 1 }
+          orderBy: {
+            expiryDate: "asc"
           }
         });
-      } else {
-        const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
 
-        await prisma.employeeLeaveBalance.updateMany({
-          where: {
-            employeeId: updatedLeave.employeeId,
-            leaveTypeId: updatedLeave.leaveTypeId,
-            year
-          },
-          data: {
-            used: { increment: days }
-          }
-        });
+        if (credits.length < requiredDays) {
+          throw new Error("Not enough comp-off credits");
+        }
+
+        const toUse = credits.slice(0, requiredDays);
+
+        for (const credit of toUse) {
+          await prisma.compOffCredit.update({
+            where: { id: credit.id },
+            data: {
+              used: true,
+              usedOn: new Date(),
+              leaveId: updatedLeave.id
+            }
+          });
+        }
+      }
+
+
+
+      if (updatedLeave.leaveType.name !== "CO") {
+        const year = updatedLeave.startDate.getFullYear();
+
+        if (updatedLeave.isHalfDay) {
+          await prisma.employeeLeaveBalance.updateMany({
+            where: {
+              employeeId: updatedLeave.employeeId,
+              leaveTypeId: updatedLeave.leaveTypeId,
+              year
+            },
+            data: {
+              halfDayUsed: { increment: 1 }
+            }
+          });
+        } else {
+          const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
+
+          await prisma.employeeLeaveBalance.updateMany({
+            where: {
+              employeeId: updatedLeave.employeeId,
+              leaveTypeId: updatedLeave.leaveTypeId,
+              year
+            },
+            data: {
+              used: { increment: days }
+            }
+          });
+        }
       }
 
     }
@@ -1179,7 +1223,7 @@ export const getLeaveBalance = async (req: Request, res: Response) => {
         leaveTypeId: lt.id,
         leaveType: lt.name,
         totalAllowed: b?.totalAllowed ?? 0,
-        used:usedFull,
+        used: usedFull,
         usedHalf: usedHalfCount,
         totalUsed,
         remaining: (b?.totalAllowed ?? 0) - totalUsed,
@@ -1339,7 +1383,7 @@ export const getMonthlyCasualUsage = async (req: Request, res: Response) => {
   const month = Number(req.query.month);
 
   const leaveType = await prisma.leaveType.findFirst({
-    where: { name: 'Casual Leave' }
+    where: { name: 'CL' }
   });
 
   const used = await getUsedCasualLeaveDays(
@@ -1386,3 +1430,18 @@ async function getUsedCasualLeaveDays(
 
   return used;
 }
+export const getCompOffCredits = async (req: Request, res: Response) => {
+  const employeeId = Number(req.query.employeeId);
+  const today = new Date();
+
+  const credits = await prisma.compOffCredit.findMany({
+    where: {
+      employeeId,
+      used: false,
+      expiryDate: { gte: today }
+    },
+    orderBy: { workDate: "asc" }
+  });
+
+  res.json(credits);
+};

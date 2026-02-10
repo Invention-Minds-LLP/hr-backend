@@ -73,6 +73,63 @@ export const createTraining = async (req: AuthenticatedRequest, res: Response) =
 /**
  * Assign employees to training + auto-assign mandatory tests
  */
+// export const assignTraining = async (req: Request, res: Response) => {
+//   try {
+//     const { trainingId, employeeIds, assignedBy } = req.body;
+
+//     const training = await prisma.training.findUnique({
+//       where: { id: trainingId },
+//       include: { trainingTests: true },
+//     });
+
+//     if (!training) return res.status(404).json({ error: "Training not found" });
+
+//     const mandatoryTests = training.trainingTests.filter((t) => t.isMandatory);
+
+//     const assignments = [];
+
+//     for (const empId of employeeIds) {
+//       const assignment = await prisma.trainingAssignment.create({
+//         data: {
+//           trainingId,
+//           employeeId: empId,
+//           assignedBy,
+//           status: "NotStarted",
+//         },
+//       });
+
+//       for (const test of mandatoryTests) {
+//         await prisma.assignedTest.create({
+//           data: {
+//             testId: test.testId,
+//             employeeId: empId,
+//             assignedBy,
+//             status: "NotStarted",
+//             trainingAssignmentId: assignment.id,
+//             testDate: test.testDate ? new Date(test.testDate) : null,
+//             deadlineDate: test.deadlineDate ? new Date(test.deadlineDate) : null,
+
+//           },
+//         });
+//       }
+
+//       await createNotification(
+//         empId,
+//         `You have been assigned to the training: ${training.title}`
+//       );
+
+//       assignments.push(assignment);
+//     }
+
+//     res.status(201).json({
+//       message: "Training assigned successfully",
+//       assignments,
+//     });
+//   } catch (error) {
+//     console.error("❌ Failed to assign training:", error);
+//     res.status(500).json({ error: "Failed to assign training" });
+//   }
+// };
 export const assignTraining = async (req: Request, res: Response) => {
   try {
     const { trainingId, employeeIds, assignedBy } = req.body;
@@ -82,13 +139,30 @@ export const assignTraining = async (req: Request, res: Response) => {
       include: { trainingTests: true },
     });
 
-    if (!training) return res.status(404).json({ error: "Training not found" });
+    if (!training) {
+      return res.status(404).json({ error: "Training not found" });
+    }
 
     const mandatoryTests = training.trainingTests.filter((t) => t.isMandatory);
 
-    const assignments = [];
+    const assignedEmployees: number[] = [];
+    const alreadyAssignedEmployees: number[] = [];
 
     for (const empId of employeeIds) {
+      // 🔍 Check existing assignment
+      const existing = await prisma.trainingAssignment.findFirst({
+        where: {
+          trainingId,
+          employeeId: empId,
+        },
+      });
+
+      if (existing) {
+        alreadyAssignedEmployees.push(empId);
+        continue; // skip this employee
+      }
+
+      // ✅ Create assignment
       const assignment = await prisma.trainingAssignment.create({
         data: {
           trainingId,
@@ -98,6 +172,7 @@ export const assignTraining = async (req: Request, res: Response) => {
         },
       });
 
+      // Assign mandatory tests
       for (const test of mandatoryTests) {
         await prisma.assignedTest.create({
           data: {
@@ -108,7 +183,6 @@ export const assignTraining = async (req: Request, res: Response) => {
             trainingAssignmentId: assignment.id,
             testDate: test.testDate ? new Date(test.testDate) : null,
             deadlineDate: test.deadlineDate ? new Date(test.deadlineDate) : null,
-
           },
         });
       }
@@ -118,13 +192,15 @@ export const assignTraining = async (req: Request, res: Response) => {
         `You have been assigned to the training: ${training.title}`
       );
 
-      assignments.push(assignment);
+      assignedEmployees.push(empId);
     }
 
-    res.status(201).json({
-      message: "Training assigned successfully",
-      assignments,
+    return res.status(201).json({
+      message: "Training assignment completed",
+      assignedEmployees,
+      alreadyAssignedEmployees,
     });
+
   } catch (error) {
     console.error("❌ Failed to assign training:", error);
     res.status(500).json({ error: "Failed to assign training" });

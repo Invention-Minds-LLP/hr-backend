@@ -381,6 +381,38 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
 
 export const listRequisitions = async (req: Request, res: Response) => {
   try {
+       const roleId = Number(req.query.roleId);
+    const empId = Number(req.query.empId);
+
+    let whereCondition: any = {};
+
+    // Role 5 → Incharge → only their own requisitions
+    if (roleId === 5) {
+      whereCondition = {
+        raisedBy: String(empId) // assuming raisedBy stores employee id as string
+      };
+    }
+
+    // Role 3 → HOD / Reporting Manager → department requisitions
+    if (roleId === 3) {
+      const manager = await prisma.employee.findUnique({
+        where: { id: empId },
+        select: { departmentId: true }
+      });
+
+      if (manager?.departmentId) {
+        whereCondition = {
+          departmentId: manager.departmentId
+        };
+      }
+    }
+
+    // HR / Management → no filter (see all)
+    // const requisitions = await prisma.manpowerRequisition.findMany({
+    //   where: whereCondition,
+    //   include: { job: true },
+    //   orderBy: { requestDate: "desc" }
+    // });
     const requisitions = await prisma.manpowerRequisition.findMany({
       include: { job: true },
       orderBy: { requestDate: 'desc' }

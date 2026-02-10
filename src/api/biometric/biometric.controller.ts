@@ -2,6 +2,7 @@ import axios from 'axios';
 import { PrismaClient } from '@prisma/client';
 import { createNotification } from '../notifications/notifications.controller';
 import { ShiftType } from '@prisma/client';
+import { generateCompOffIfEligible } from '../../services/comOff.service';
 
 const prisma = new PrismaClient();
 
@@ -168,9 +169,9 @@ async function fetchAttendanceDaily(date: Date) {
    MAIN BIOMETRIC SYNC
 ---------------------------------- */
 
-export async function runBiometricSync( isFinalRun: boolean) {
+export async function runBiometricSync(isFinalRun: boolean) {
   const today = startOfDay(new Date());
-    const yesterday = startOfDay(new Date(Date.now() - 86400000));
+  const yesterday = startOfDay(new Date(Date.now() - 86400000));
   // const today = startOfDay(date);
   // const yesterday = startOfDay(
   //   new Date(date.getTime() - 86400000)
@@ -256,7 +257,22 @@ export async function runBiometricSync( isFinalRun: boolean) {
       }
     }
 
-    await prisma.attendance.upsert({
+    // await prisma.attendance.upsert({
+    //   where: { employeeId_date: { employeeId, date } },
+    //   create: {
+    //     employeeId,
+    //     date,
+    //     checkIn,
+    //     checkOut,
+    //     status: finalStatus,
+    //   },
+    //   update: {
+    //     checkIn,
+    //     checkOut,
+    //     status: finalStatus,
+    //   },
+    // });
+    const attendance = await prisma.attendance.upsert({
       where: { employeeId_date: { employeeId, date } },
       create: {
         employeeId,
@@ -271,6 +287,10 @@ export async function runBiometricSync( isFinalRun: boolean) {
         status: finalStatus,
       },
     });
+
+    // 🔑 Generate comp-off after attendance is finalized
+    await generateCompOffIfEligible(attendance);
+
 
 
   }

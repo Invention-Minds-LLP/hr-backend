@@ -510,6 +510,7 @@ export const getEmployeeById = async (req: Request, res: Response) => {
         EmployeeShiftSetting: true,
         Department: true,
         designation: true,
+         sabbaticals: true, 
         shifts: {
           orderBy: { date: 'desc' }, // Most recent first
           take: 1,                   // Only 1 record
@@ -1425,6 +1426,33 @@ export const getSpecificRoles = async (req: Request, res: Response) => {
   }
 };
 
+export const getEmployeesByRole = async (req: Request, res: Response) => {
+  try {
+    const roleId = Number(req.query.roleId);
+
+    if (!roleId) {
+      return res.status(400).json({ error: "roleId is required" });
+    }
+
+    const employees = await prisma.employee.findMany({
+      where: {
+        roleId: roleId
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        employeeCode: true,
+        roleId: true
+      }
+    });
+
+    return res.status(200).json(employees);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: "Failed to fetch employees" });
+  }
+};
 
 export const getActiveEmployees = async (req: Request, res: Response) => {
   try {
@@ -3221,4 +3249,23 @@ export const initSabbaticalReminderScheduler = () => {
       }
     }
   });
+};
+// GET /employees/by-manager/:managerId
+export const getEmployeesByManager = async (req: Request, res: Response) => {
+  try {
+    const managerId = Number(req.params.managerId);
+
+    const employees = await prisma.employee.findMany({
+      where: {
+        reportingManager: managerId,
+        employmentStatus: "ACTIVE"
+      },
+      orderBy: { firstName: "asc" }
+    });
+
+    res.json(employees);
+  } catch (err) {
+    console.error("❌ Failed to fetch employees by manager:", err);
+    res.status(500).json({ error: "Failed to fetch employees" });
+  }
 };
