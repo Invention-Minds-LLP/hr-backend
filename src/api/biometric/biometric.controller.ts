@@ -169,13 +169,13 @@ async function fetchAttendanceDaily(date: Date) {
    MAIN BIOMETRIC SYNC
 ---------------------------------- */
 
-export async function runBiometricSync(date: Date, isFinalRun: boolean) {
-  // const today = startOfDay(new Date());
-  // const yesterday = startOfDay(new Date(Date.now() - 86400000));
-  const today = startOfDay(date);
-  const yesterday = startOfDay(
-    new Date(date.getTime() - 86400000)
-  );
+export async function runBiometricSync(isFinalRun: boolean) {
+  const today = startOfDay(new Date());
+  const yesterday = startOfDay(new Date(Date.now() - 86400000));
+  // const today = startOfDay(date);
+  // const yesterday = startOfDay(
+  //   new Date(date.getTime() - 86400000)
+  // );
 
   console.log(`🔄 Starting biometric sync | Date: ${today.toDateString()} | Final: ${isFinalRun}`);
   console.log(`🔄 Yesterday date: ${yesterday.toDateString()}`);
