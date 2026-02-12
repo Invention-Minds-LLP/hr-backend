@@ -29,28 +29,110 @@ if (!fs.existsSync(TEMP_FOLDER)) {
 }
 
 
-async function generateEmployeeCode() {
-  const prefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+// async function generateEmployeeCode() {
+//   const prefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+//   const startNumber = process.env.EMPLOYEE_CODE_START || '001';
+//   const lastEmployee = await prisma.employee.findFirst({
+//     orderBy: { employeeCode: 'desc' },
+//     select: { employeeCode: true }
+//   });
+
+//   console.log(lastEmployee)
+
+//   let newCode = `${prefix}${startNumber}`;
+//   if (lastEmployee?.employeeCode) {
+
+//     const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
+//     console.log(lastNumber)
+//     newCode = `${prefix}${String(lastNumber + 1).padStart(3, '0')}`;
+//   }
+//   return newCode;
+// }
+const EMPLOYEE_PREFIX_MAP: Record<string, string> = {
+  PERMANENT: '',
+  CONTRACT: '',
+  INTERN: 'TR',
+  TRAINEE: 'TR',
+  PROBATION: '',
+  DOCTOR: 'DR'
+};
+
+
+// async function generateEmployeeCode(employmentType: string) {
+//   const prefix =
+//     EMPLOYEE_PREFIX_MAP[employmentType?.toUpperCase()] || 'EMP';
+
+//   const startNumber = process.env.EMPLOYEE_CODE_START || '001';
+
+//   // Get last employee with same prefix
+//   const lastEmployee = await prisma.employee.findFirst({
+//     where: {
+//       employeeCode: {
+//         startsWith: prefix
+//       }
+//     },
+//     orderBy: {
+//       employeeCode: 'desc'
+//     },
+//     select: {
+//       employeeCode: true
+//     }
+//   });
+
+//   let newCode = `${prefix}${startNumber}`;
+
+//   if (lastEmployee?.employeeCode) {
+//     const lastNumber = parseInt(
+//       lastEmployee.employeeCode.replace(/\D/g, ''),
+//       10
+//     );
+
+//     newCode = `${prefix}${String(lastNumber + 1).padStart(3, '0')}`;
+//   }
+
+//   return newCode;
+// }
+
+
+
+
+async function generateEmployeeCode(employmentType: string) {
+  const basePrefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+
+  const suffix =
+    EMPLOYEE_PREFIX_MAP[employmentType?.toUpperCase()] ?? '';
+
+  const prefix = `${basePrefix}${suffix}`;
+
   const startNumber = process.env.EMPLOYEE_CODE_START || '001';
+
   const lastEmployee = await prisma.employee.findFirst({
-    orderBy: { employeeCode: 'desc' },
-    select: { employeeCode: true }
+    where: {
+      employeeCode: {
+        startsWith: prefix
+      }
+    },
+    orderBy: {
+      employeeCode: 'desc'
+    },
+    select: {
+      employeeCode: true
+    }
   });
 
-  console.log(lastEmployee)
-
   let newCode = `${prefix}${startNumber}`;
-  if (lastEmployee?.employeeCode) {
 
-    const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
-    console.log(lastNumber)
+  if (lastEmployee?.employeeCode) {
+    const lastNumber = parseInt(
+      lastEmployee.employeeCode.replace(/\D/g, ''),
+      10
+    );
+
     newCode = `${prefix}${String(lastNumber + 1).padStart(3, '0')}`;
   }
+
   return newCode;
 }
-
-
-
 
 // CREATE Employee (with emergency contacts & qualifications)
 export const createEmployee = async (req: Request, res: Response) => {
@@ -97,7 +179,7 @@ export const createEmployee = async (req: Request, res: Response) => {
     console.log(finalCode)
 
     if (!finalCode) {
-      finalCode = await generateEmployeeCode();
+      finalCode = await generateEmployeeCode(employmentType);
       console.log("Generated employeeCode:", finalCode);
     }
 
@@ -216,7 +298,7 @@ export const createEmployee = async (req: Request, res: Response) => {
       if (err.code === 'P2002' && err.meta?.target?.includes('employeeCode')) {
         // Regenerate a fresh code and retry
 
-        finalCode = await generateEmployeeCode();
+        finalCode = await generateEmployeeCode(employmentType);
         console.log(finalCode)
         newEmployee = await prisma.employee.create({
           data: {

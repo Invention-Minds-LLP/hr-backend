@@ -1682,6 +1682,8 @@ enum EmploymentType {
   PERMANENT
   CONTRACT
   PROBATION
+  DOCTOR
+  TRAINEE
 }
 
 enum EmploymentStatus {

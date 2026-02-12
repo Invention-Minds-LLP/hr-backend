@@ -157,11 +157,20 @@ export const getAttendanceCalendar = async (req: Request, res: Response) => {
 
       let finalStatus = a.status;
 
-      if (flag) {
+      // if (flag) {
+      //   if (!a.attendanceApproval) finalStatus = 'PendingApproval';
+      //   else if (a.attendanceApproval === 'APPROVED') finalStatus = 'Present';
+      //   else if (a.attendanceApproval === 'REJECTED') finalStatus = 'Absent';
+      // }
+      if (a.attendanceApproval === 'FORCE_PRESENT') {
+        finalStatus = 'Present';
+      }
+      else if (flag) {
         if (!a.attendanceApproval) finalStatus = 'PendingApproval';
         else if (a.attendanceApproval === 'APPROVED') finalStatus = 'Present';
         else if (a.attendanceApproval === 'REJECTED') finalStatus = 'Absent';
       }
+
 
       result.push({
         title: `Worked ${hours}h`,
@@ -414,28 +423,92 @@ function combineDateAndTime(base: Date, t: Date) {
   dt.setHours(tt.getHours(), tt.getMinutes(), 0, 0);
   return dt;
 }
+// export const approveAttendance = async (req: Request, res: Response) => {
+//   try {
+//     const { attendanceId, decision, hrId, rejectReason } = req.body;
+
+//     if (!attendanceId || !decision || !hrId)
+//       return res.status(400).json({ message: "Missing required fields" });
+
+//     const updateData: any = {
+//       attendanceApproval: decision,
+//       approvedBy: hrId,
+//       approvedAt: new Date(),
+//     };
+
+//     // Only save reason if rejected
+//     if (decision === 'REJECTED') {
+//       updateData.reason = rejectReason || "No reason provided";
+//     }
+
+//     // Force present logic
+//     if (decision === 'FORCE_PRESENT') {
+//       updateData.status = 'Present';   // override status
+//     }
+
+
+//     const record = await prisma.attendance.update({
+//       where: { id: attendanceId },
+//       data: updateData
+//     });
+
+//     res.json({
+//       message: "Attendance updated successfully",
+//       updated: record
+//     });
+
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ message: "Server error", error: err });
+//   }
+// };
+
 export const approveAttendance = async (req: Request, res: Response) => {
   try {
-    const { attendanceId, decision, hrId, rejectReason } = req.body;
+    const { attendanceId, decision, hrId, rejectReason, date, employeeId } = req.body;
 
-    if (!attendanceId || !decision || !hrId)
+    if (!decision || !hrId)
       return res.status(400).json({ message: "Missing required fields" });
 
-    const updateData: any = {
-      attendanceApproval: decision,
-      approvedBy: hrId,
-      approvedAt: new Date(),
-    };
+    let record;
 
-    // Only save reason if rejected
-    if (decision === 'REJECTED') {
-      updateData.reason = rejectReason || "No reason provided";
+    // CASE 1: attendance exists → update
+    if (attendanceId) {
+      const updateData: any = {
+        attendanceApproval: decision,
+        approvedBy: hrId,
+        approvedAt: new Date(),
+      };
+
+      if (decision === 'REJECTED') {
+        updateData.reason = rejectReason || "No reason provided";
+      }
+
+      if (decision === 'FORCE_PRESENT') {
+        updateData.status = 'Present';
+      }
+
+      record = await prisma.attendance.update({
+        where: { id: attendanceId },
+        data: updateData
+      });
     }
 
-    const record = await prisma.attendance.update({
-      where: { id: attendanceId },
-      data: updateData
-    });
+    // CASE 2: no attendance → create new one
+    else if (decision === 'FORCE_PRESENT' && date && employeeId) {
+      record = await prisma.attendance.create({
+        data: {
+          employeeId,
+          date: new Date(date),
+          status: 'Present',
+          attendanceApproval: 'FORCE_PRESENT',
+          approvedBy: hrId,
+          approvedAt: new Date()
+        }
+      });
+    } else {
+      return res.status(400).json({ message: "Invalid request" });
+    }
 
     res.json({
       message: "Attendance updated successfully",
@@ -447,4 +520,3 @@ export const approveAttendance = async (req: Request, res: Response) => {
     res.status(500).json({ message: "Server error", error: err });
   }
 };
-
