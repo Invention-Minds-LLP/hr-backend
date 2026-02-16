@@ -172,7 +172,15 @@ export const createEmployee = async (req: Request, res: Response) => {
       fatherName,
       marital,
       totalYearsOfExperience,
-      experience
+      experience,
+      licenseRegDate,
+      licenseExpiryDate,
+      motherName,
+      alternatePhone,
+      uanNumber,
+      panNumber,
+      aadharNumber,
+      licenseNumber,
     } = req.body;
     const data = req.body;
     let finalCode = employeeCode;
@@ -239,6 +247,15 @@ export const createEmployee = async (req: Request, res: Response) => {
           preferredHospital: data.preferredHospital,
           primaryPhysician: data.primaryPhysician,
           emergencyNotes: data.emergencyNotes,
+
+          motherName,
+          alternatePhone,
+          uanNumber,
+          panNumber,
+          aadharNumber,
+          licenseNumber,
+          licenseRegDate: licenseRegDate ? new Date(licenseRegDate) : null,
+          licenseExpiryDate: licenseExpiryDate ? new Date(licenseExpiryDate) : null,
 
           healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined,
           vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined,
@@ -326,6 +343,16 @@ export const createEmployee = async (req: Request, res: Response) => {
             marital,
             totalYearsOfExperience,
             experience,
+
+            motherName,
+            alternatePhone,
+            uanNumber,
+            panNumber,
+            aadharNumber,
+            licenseNumber,
+            licenseRegDate: data.licenseRegDate ? new Date(data.licenseRegDate) : null,
+            licenseExpiryDate: data.licenseExpiryDate ? new Date(data.licenseExpiryDate) : null,
+
             // Connect relations
             Department: { connect: { id: departmentId } },
             Branch: { connect: { id: branchId } },
@@ -593,7 +620,7 @@ export const getEmployeeById = async (req: Request, res: Response) => {
         EmployeeShiftSetting: true,
         Department: true,
         designation: true,
-         sabbaticals: true, 
+        sabbaticals: true,
         shifts: {
           orderBy: { date: 'desc' }, // Most recent first
           take: 1,                   // Only 1 record
@@ -698,6 +725,18 @@ export const updateEmployee = async (req: Request, res: Response) => {
         preferredHospital: data.preferredHospital,
         primaryPhysician: data.primaryPhysician,
         emergencyNotes: data.emergencyNotes,
+
+        motherName: data.motherName,
+        alternatePhone: data.alternatePhone,
+        uanNumber: data.uanNumber,
+        panNumber: data.panNumber,
+        aadharNumber: data.aadharNumber,
+        licenseNumber: data.licenseNumber,
+        licenseRegDate: toDate(data.licenseRegDate),
+        licenseExpiryDate: toDate(data.licenseExpiryDate),
+        pastSurgeries: data.pastSurgeries,
+        exerciseFrequency: data.exerciseFrequency,
+
 
         healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined,
         vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined,
@@ -2168,7 +2207,7 @@ export const getUnreportedAbsentees = async (req: Request, res: Response) => {
             designation: true,
             Department: true,
             gender: true,
-            photoUrl:true,
+            photoUrl: true,
           },
         },
       },
@@ -3352,5 +3391,374 @@ export const getEmployeesByManager = async (req: Request, res: Response) => {
   } catch (err) {
     console.error("❌ Failed to fetch employees by manager:", err);
     res.status(500).json({ error: "Failed to fetch employees" });
+  }
+};
+export const bulkUpdateEmployeeExtras = async (req: Request, res: Response) => {
+  try {
+    const form = formidable({ multiples: false, keepExtensions: true });
+
+    form.parse(req, async (err, fields, files) => {
+      if (err) {
+        return res.status(500).json({ error: "File parsing error" });
+      }
+
+      const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
+      if (!fileObj) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      const workbook = XLSX.readFile(fileObj.filepath);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet);
+
+      const logs: string[] = [];
+      const errorRows: any[] = [];
+
+      for (let i = 0; i < rows.length; i++) {
+        const row: any = rows[i];
+        const code = normalizeCode(row.employeeCode);
+
+        try {
+          if (!code) throw new Error("employeeCode missing");
+
+          const employee = await prisma.employee.findUnique({
+            where: { employeeCode: code },
+          });
+
+          if (!employee) {
+            throw new Error(`Employee not found: ${code}`);
+          }
+
+          /** Helper date parser */
+          const parseOptionalDate = (value: any): Date | null => {
+            if (!value) return null;
+            const d = new Date(value);
+            return isNaN(d.getTime()) ? null : d;
+          };
+
+          /** 1️⃣ Update employee fields */
+          await prisma.employee.update({
+            where: { employeeCode: code },
+            data: {
+              marital: row.maritalStatus || null,
+              fatherName: row.fatherName || null,
+              motherName: row.motherName || null,
+              alternatePhone: row.alternatePhone
+                ? String(row.alternatePhone)
+                : null,
+              bloodGroup: row.bloodGroup || null,
+              uanNumber: row.uanNumber
+                ? String(row.uanNumber)
+                : null,
+
+              panNumber: row.panNumber
+                ? String(row.panNumber)
+                : null,
+
+              aadharNumber: row.aadharNumber
+                ? String(row.aadharNumber)
+                : null,
+              licenseNumber: row.licenseNumber
+                ? String(row.licenseNumber)
+                : null,
+              licenseRegDate: parseOptionalDate(row.licenseRegDate),
+              licenseExpiryDate: parseOptionalDate(row.licenseExpiryDate),
+              probationEndDate: parseOptionalDate(row.probationEndDate),
+            },
+          });
+
+          /** 2️⃣ Permanent Address */
+          if (row.permanentLine1) {
+            const existingPermanent = await prisma.address.findFirst({
+              where: {
+                employeeId: employee.id,
+                type: "PERMANENT",
+              },
+            });
+
+            if (existingPermanent) {
+              await prisma.address.update({
+                where: { id: existingPermanent.id },
+                data: {
+                  line1: row.permanentLine1,
+                  line2: row.permanentLine2 || null,
+                  city: row.permanentCity || "",
+                  state: row.permanentState || "",
+                  zipCode: row.permanentZip
+                    ? String(row.permanentZip)
+                    : "",
+
+                  country: row.permanentCountry || "",
+                },
+              });
+            } else {
+              await prisma.address.create({
+                data: {
+                  employeeId: employee.id,
+                  type: "PERMANENT",
+                  line1: row.permanentLine1,
+                  line2: row.permanentLine2 || null,
+                  city: row.permanentCity || "",
+                  state: row.permanentState || "",
+                  zipCode: row.permanentZip
+                    ? String(row.permanentZip)
+                    : "",
+                  country: row.permanentCountry || "",
+                },
+              });
+            }
+          }
+
+          /** 3️⃣ Temporary Address */
+          if (row.temporaryLine1) {
+            const existingTemporary = await prisma.address.findFirst({
+              where: {
+                employeeId: employee.id,
+                type: "TEMPORARY",
+              },
+            });
+
+            if (existingTemporary) {
+              await prisma.address.update({
+                where: { id: existingTemporary.id },
+                data: {
+                  line1: row.temporaryLine1,
+                  line2: row.temporaryLine2 || null,
+                  city: row.temporaryCity || "",
+                  state: row.temporaryState || "",
+                  zipCode: row.temporaryZip
+                    ? String(row.temporaryZip)
+                    : "",
+                  country: row.temporaryCountry || "",
+                },
+              });
+            } else {
+              await prisma.address.create({
+                data: {
+                  employeeId: employee.id,
+                  type: "TEMPORARY",
+                  line1: row.temporaryLine1,
+                  line2: row.temporaryLine2 || null,
+                  city: row.temporaryCity || "",
+                  state: row.temporaryState || "",
+                  zipCode: row.temporaryZip
+                    ? String(row.temporaryZip)
+                    : "",
+                  country: row.temporaryCountry || "",
+                },
+              });
+            }
+          }
+
+          logs.push(`Row ${i + 1}: SUCCESS (${code})`);
+        } catch (error: any) {
+          errorRows.push({
+            rowNumber: i + 1,
+            employeeCode: code,
+            error: error.message,
+            ...row,
+          });
+
+          logs.push(`Row ${i + 1}: FAILED → ${error.message}`);
+        }
+      }
+
+      return res.json({
+        totalRows: rows.length,
+        successCount: rows.length - errorRows.length,
+        failedCount: errorRows.length,
+        logs,
+      });
+    });
+  } catch (e: any) {
+    console.error(e);
+    return res.status(500).json({ error: "Bulk update failed" });
+  }
+};
+export const bulkUploadLeaveBalance = async (req: Request, res: Response) => {
+  try {
+    const form = formidable({ multiples: false, keepExtensions: true });
+
+    form.parse(req, async (err, fields, files) => {
+      if (err) {
+        return res.status(500).json({ error: "File parsing error" });
+      }
+
+      const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
+      if (!fileObj) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      const workbook = XLSX.readFile(fileObj.filepath);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet);
+
+      const logs: string[] = [];
+      const errorRows: any[] = [];
+
+      for (let i = 0; i < rows.length; i++) {
+        const row: any = rows[i];
+
+        try {
+          const code = String(row.employeeCode).trim();
+          if (!code) throw new Error("employeeCode missing");
+
+          const employee = await prisma.employee.findUnique({
+            where: { employeeCode: code },
+          });
+
+          if (!employee) throw new Error("Employee not found");
+
+          const year = Number(row.year);
+          const category = row.category;
+
+          let leaveTypeId: number | null = null;
+          let permissionType: any = null;
+
+          if (category === "LEAVE") {
+            if (!row.leaveType) {
+              throw new Error("leaveType required for LEAVE");
+            }
+
+            const leaveType = await prisma.leaveType.findUnique({
+              where: { name: row.leaveType },
+            });
+
+            if (!leaveType) {
+              throw new Error(`Invalid leaveType: ${row.leaveType}`);
+            }
+
+            leaveTypeId = leaveType.id;
+
+            if (!leaveTypeId) {
+              throw new Error("leaveTypeId missing for LEAVE");
+            }
+          }
+
+          if (category === "PERMISSION") {
+            if (!row.permissionType) {
+              throw new Error("permissionType required for PERMISSION");
+            }
+
+            permissionType = row.permissionType;
+          }
+
+          const totalAllowed = Number(row.totalAllowed || 0);
+          const used = Number(row.used || 0);
+          const halfDayUsed = Number(row.halfDayUsed || 0);
+
+          // Upsert logic
+          // await prisma.employeeLeaveBalance.upsert({
+          //   where:
+          //     category === "LEAVE"
+          //       ? {
+          //         employeeId_leaveTypeId_year: {
+          //           employeeId: employee.id,
+          //           leaveTypeId: leaveTypeId,
+          //           year,
+          //         },
+          //       }
+          //       : {
+          //         employeeId_permissionType_year: {
+          //           employeeId: employee.id,
+          //           permissionType,
+          //           year,
+          //         },
+          //       },
+          //   update: {
+          //     totalAllowed,
+          //     used,
+          //     halfDayUsed,
+          //   },
+          //   create: {
+          //     employeeId: employee.id,
+          //     leaveTypeId: leaveTypeId,
+          //     permissionType,
+          //     category,
+          //     year,
+          //     totalAllowed,
+          //     used,
+          //     halfDayUsed,
+          //   },
+          // });
+          if (category === "LEAVE") {
+            if (!leaveTypeId) {
+              throw new Error("leaveTypeId missing for LEAVE");
+            }
+
+            await prisma.employeeLeaveBalance.upsert({
+              where: {
+                employeeId_leaveTypeId_year: {
+                  employeeId: employee.id,
+                  leaveTypeId: leaveTypeId, // must be number
+                  year,
+                },
+              },
+              update: {
+                totalAllowed,
+                used,
+                halfDayUsed,
+              },
+              create: {
+                employeeId: employee.id,
+                leaveTypeId: leaveTypeId,
+                permissionType: null,
+                category,
+                year,
+                totalAllowed,
+                used,
+                halfDayUsed,
+              },
+            });
+          }
+
+          else if (category === "PERMISSION") {
+            if (!permissionType) {
+              throw new Error("permissionType missing for PERMISSION");
+            }
+
+            await prisma.employeeLeaveBalance.upsert({
+              where: {
+                employeeId_permissionType_year: {
+                  employeeId: employee.id,
+                  permissionType: permissionType,
+                  year,
+                },
+              },
+              update: {
+                totalAllowed,
+                used,
+                halfDayUsed,
+              },
+              create: {
+                employeeId: employee.id,
+                leaveTypeId: null,
+                permissionType: permissionType,
+                category,
+                year,
+                totalAllowed,
+                used,
+                halfDayUsed,
+              },
+            });
+          }
+
+
+          logs.push(`Row ${i + 1}: SUCCESS (${code})`);
+        } catch (e: any) {
+          logs.push(`Row ${i + 1}: FAILED → ${e.message}`);
+          errorRows.push({ row: i + 1, error: e.message, ...row });
+        }
+      }
+
+      return res.json({
+        totalRows: rows.length,
+        failed: errorRows.length,
+        logs,
+      });
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Upload failed" });
   }
 };

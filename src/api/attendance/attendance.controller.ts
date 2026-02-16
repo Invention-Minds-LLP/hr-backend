@@ -366,8 +366,18 @@ export const getWeeklyAttendance = async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Missing parameters" });
     }
 
-    const startDate = new Date(start as string);
-    const endDate = new Date(end as string);
+    // const startDate = new Date(start as string);
+    // const endDate = new Date(end as string);
+    function toUtcStart(dateStr: string) {
+      const d = new Date(dateStr);
+      d.setUTCHours(0, 0, 0, 0);
+      d.setMinutes(d.getMinutes() - 330); // IST offset
+      return d;
+    }
+
+    const startDate = toUtcStart(start as string);
+    const endDate = toUtcStart(end as string);
+    endDate.setUTCDate(endDate.getUTCDate() + 1);
 
     const attendance = await prisma.attendance.findMany({
       where: {
@@ -478,10 +488,12 @@ export const approveAttendance = async (req: Request, res: Response) => {
         attendanceApproval: decision,
         approvedBy: hrId,
         approvedAt: new Date(),
+        status: 'Present'
       };
 
       if (decision === 'REJECTED') {
         updateData.reason = rejectReason || "No reason provided";
+        updateData.status = 'Absent'
       }
 
       if (decision === 'FORCE_PRESENT') {
@@ -518,5 +530,418 @@ export const approveAttendance = async (req: Request, res: Response) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error", error: err });
+  }
+};
+
+// export const getTodayAttendanceList = async (req: Request, res: Response) => {
+//   try {
+//     const today = new Date();
+//     today.setHours(0, 0, 0, 0);
+
+//     const tomorrow = new Date(today);
+//     tomorrow.setDate(tomorrow.getDate() + 1);
+
+//     // Get all active employees
+//     const employees = await prisma.employee.findMany({
+//       where: {
+//         employmentStatus: {
+//           in: ['ACTIVE', 'NOTICE_PERIOD'],
+//         },
+//       },
+//       include: {
+//         Department: true,
+//         designation: true,
+//       },
+//     });
+
+//     // Get today's attendance
+//     const attendanceRecords = await prisma.attendance.findMany({
+//       where: {
+//         date: {
+//           gte: today,
+//           lt: tomorrow,
+//         },
+//       },
+//     });
+
+//     // Map attendance by employeeId
+//     const attendanceMap = new Map<number, any>();
+//     attendanceRecords.forEach(a => {
+//       attendanceMap.set(a.employeeId, a);
+//     });
+
+//     // Build table data
+//     const result = employees.map(emp => {
+//       const att = attendanceMap.get(emp.id);
+
+//       let status = 'Absent';
+
+//       if (att) {
+//         status = att.attendanceApproval === 'FORCE_PRESENT'
+//           ? 'FORCE_PRESENT'
+//           : att.status;
+//       }
+
+//       return {
+//         attendanceId: att?.id || null,
+//         employeeId: emp.id,
+//         date: today,
+
+//         empId: emp.employeeCode,
+//         empName: `${emp.firstName} ${emp.lastName}`,
+//         phoneNumber: emp.phone || '',
+//         department: emp.Department?.name || '',
+//         departmentId:emp.Department?.id || 0,
+//         jobTitle: emp.designation?.name || '',
+//         empType: emp.employmentType || '',
+//         email: emp.email || '',
+//         photoUrl: emp.photoUrl || null,
+//         gender: emp.gender || null,
+
+//         status,
+//       };
+//     });
+
+//     res.json(result);
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ message: 'Server error' });
+//   }
+// };
+export const getTodayAttendanceList = async (req: Request, res: Response) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    // 1️⃣ Get employees
+    const employees = await prisma.employee.findMany({
+      where: {
+        employmentStatus: {
+          in: ['ACTIVE', 'NOTICE_PERIOD'],
+        },
+      },
+      include: {
+        Department: true,
+        designation: true,
+      }
+    });
+
+    // 2️⃣ Get shift settings for all employees
+    const shiftSettings = await prisma.employeeShiftSetting.findMany({
+      where: {
+        employeeId: {
+          in: employees.map(e => e.id)
+        }
+      },
+      include: {
+        fixedShift: true,
+        rotationPattern: {
+          include: {
+            items: { include: { shift: true } }
+          }
+        }
+      }
+    });
+
+    const shiftMap = buildShiftMap(shiftSettings, today);
+
+    // 3️⃣ Get today's attendance
+    const attendanceRecords = await prisma.attendance.findMany({
+      where: {
+        date: {
+          gte: today,
+          lt: tomorrow,
+        },
+      },
+    });
+
+    const attendanceMap = new Map<number, any>();
+    attendanceRecords.forEach(a => {
+      attendanceMap.set(a.employeeId, a);
+    });
+
+    // 4️⃣ Build result
+    const result = employees.map(emp => {
+      const att = attendanceMap.get(emp.id);
+
+      const checkIn = att?.checkIn ? new Date(att.checkIn) : null;
+      const checkOut = att?.checkOut ? new Date(att.checkOut) : null;
+
+      const shift = shiftMap.get(emp.id);
+      const shiftStart = shift?.start || null;
+      const shiftEnd = shift?.end || null;
+
+      // Working hours
+      let hours = 0;
+      if (checkIn && checkOut) {
+        hours = Math.round(
+          (checkOut.getTime() - checkIn.getTime()) / 3600000
+        );
+      }
+
+      // Login/logout flags
+      let loginFlag = null;
+      let logoutFlag = null;
+
+      if (checkIn && shiftStart) {
+        loginFlag =
+          checkIn > shiftStart ? 'Late Login' : 'Early Login';
+      }
+
+      if (checkOut && shiftEnd) {
+        logoutFlag =
+          checkOut < shiftEnd ? 'Early Logout' : 'Late Logout';
+      }
+
+      // Final status
+      let status = 'Absent';
+      if (att) {
+        status =
+          att.attendanceApproval === 'FORCE_PRESENT'
+            ? 'FORCE_PRESENT'
+            : att.status;
+      }
+
+      return {
+        attendanceId: att?.id || null,
+        employeeId: emp.id,
+        date: today,
+
+        empId: emp.employeeCode,
+        empName: `${emp.firstName} ${emp.lastName}`,
+        phoneNumber: emp.phone || '',
+        department: emp.Department?.name || '',
+        departmentId: emp.Department?.id || 0,
+        jobTitle: emp.designation?.name || '',
+        empType: emp.employmentType || '',
+        email: emp.email || '',
+        photoUrl: emp.photoUrl || null,
+        gender: emp.gender || null,
+
+        status,
+        checkIn,
+        checkOut,
+        workingHours: hours,
+        loginFlag,
+        logoutFlag
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+export const getAttendanceHistory = async (req: Request, res: Response) => {
+  try {
+    const dateParam = req.query.date as string;
+
+    if (!dateParam) {
+      return res.status(400).json({ message: "date is required" });
+    }
+
+    const selectedDate = new Date(dateParam);
+    selectedDate.setHours(0, 0, 0, 0);
+
+    const nextDay = new Date(selectedDate);
+    nextDay.setDate(nextDay.getDate() + 1);
+
+    // 1️⃣ Get employees
+    const employees = await prisma.employee.findMany({
+      where: {
+        employmentStatus: {
+          in: ['ACTIVE', 'NOTICE_PERIOD'],
+        },
+      },
+      include: {
+        Department: true,
+        designation: true,
+      }
+    });
+
+    // 2️⃣ Get shift settings
+    const shiftSettings = await prisma.employeeShiftSetting.findMany({
+      where: {
+        employeeId: {
+          in: employees.map(e => e.id)
+        }
+      },
+      include: {
+        fixedShift: true,
+        rotationPattern: {
+          include: {
+            items: { include: { shift: true } }
+          }
+        }
+      }
+    });
+
+    const shiftMap = buildShiftMap(shiftSettings, selectedDate);
+
+    // 3️⃣ Get attendance for selected day
+    const attendanceRecords = await prisma.attendance.findMany({
+      where: {
+        date: {
+          gte: selectedDate,
+          lt: nextDay,
+        },
+      },
+    });
+
+    const attendanceMap = new Map<number, any>();
+    attendanceRecords.forEach(a => {
+      attendanceMap.set(a.employeeId, a);
+    });
+
+    // 4️⃣ Build result
+    const result = employees.map(emp => {
+      const att = attendanceMap.get(emp.id);
+
+      const checkIn = att?.checkIn ? new Date(att.checkIn) : null;
+      const checkOut = att?.checkOut ? new Date(att.checkOut) : null;
+
+      const shift = shiftMap.get(emp.id);
+      const shiftStart = shift?.start || null;
+      const shiftEnd = shift?.end || null;
+
+      // Working hours
+      let hours = 0;
+      if (checkIn && checkOut) {
+        hours = Math.round(
+          (checkOut.getTime() - checkIn.getTime()) / 3600000
+        );
+      }
+
+      // Login/logout flags
+      let loginFlag = null;
+      let logoutFlag = null;
+
+      if (checkIn && shiftStart) {
+        loginFlag =
+          checkIn > shiftStart ? 'Late Login' : 'Early Login';
+      }
+
+      if (checkOut && shiftEnd) {
+        logoutFlag =
+          checkOut < shiftEnd ? 'Early Logout' : 'Late Logout';
+      }
+
+      // Status
+      let status = 'Absent';
+      if (att) {
+        status =
+          att.attendanceApproval === 'FORCE_PRESENT'
+            ? 'FORCE_PRESENT'
+            : att.status;
+      }
+
+      return {
+        employeeId: emp.id,
+        date: selectedDate,
+
+        empId: emp.employeeCode,
+        empName: `${emp.firstName} ${emp.lastName}`,
+        phoneNumber: emp.phone || '',
+        department: emp.Department?.name || '',
+        departmentId: emp.Department?.id || 0,
+        jobTitle: emp.designation?.name || '',
+        empType: emp.employmentType || '',
+        email: emp.email || '',
+        photoUrl: emp.photoUrl || null,
+        gender: emp.gender || null,
+
+        status,
+        checkIn,
+        checkOut,
+        workingHours: hours,
+        loginFlag,
+        logoutFlag
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+export const getMonthlyAttendanceRegister = async (req: Request, res: Response) => {
+  try {
+    const month = req.query.month as string; // YYYY-MM
+    if (!month) {
+      return res.status(400).json({ message: "month required" });
+    }
+
+    const start = new Date(`${month}-01T00:00:00`);
+    const end = new Date(start);
+    end.setMonth(end.getMonth() + 1);
+
+    const employees = await prisma.employee.findMany({
+      where: {
+        employmentStatus: { in: ['ACTIVE', 'NOTICE_PERIOD'] }
+      }
+    });
+
+    const attendance = await prisma.attendance.findMany({
+      where: {
+        date: { gte: start, lt: end }
+      }
+    });
+
+    const map = new Map<string, any>();
+    attendance.forEach(a => {
+      const key =
+        a.employeeId +
+        '_' +
+        new Date(a.date).toISOString().slice(0, 10);
+      map.set(key, a);
+    });
+
+    const daysInMonth = new Date(
+      start.getFullYear(),
+      start.getMonth() + 1,
+      0
+    ).getDate();
+
+    const result = employees.map(emp => {
+      const row: any = {
+        "Employee Name": `${emp.firstName} ${emp.lastName}`,
+        "Emp ID": emp.employeeCode
+      };
+
+      for (let d = 1; d <= daysInMonth; d++) {
+        const date = new Date(start);
+        date.setDate(d);
+
+        const iso = date.toISOString().slice(0, 10);
+        const key = emp.id + '_' + iso;
+
+        const att = map.get(key);
+
+        const label = iso.slice(8, 10) + '/' + iso.slice(5, 7);
+
+        row[`${label} In`] = att?.checkIn
+          ? new Date(att.checkIn).toTimeString().slice(0, 5)
+          : '';
+
+        row[`${label} Out`] = att?.checkOut
+          ? new Date(att.checkOut).toTimeString().slice(0, 5)
+          : '';
+      }
+
+      return row;
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
   }
 };

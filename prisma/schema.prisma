@@ -8,66 +8,75 @@ datasource db {
 }
 
 model Employee {
-  id                       Int                        @id @default(autoincrement())
-  employeeCode             String                     @unique
-  referenceCode            String?
-  firstName                String
-  lastName                 String
-  gender                   Gender
-  dob                      DateTime
-  photoUrl                 String?
-  phone                    String
-  email                    String
-  departmentId             Int
-  branchId                 Int
-  dateOfJoining            DateTime
-  employmentType           EmploymentType
-  probationEndDate         DateTime?
-  employmentStatus         EmploymentStatus
-  roleId                   Int
-  createdAt                DateTime                   @default(now())
-  updatedAt                DateTime                   @default(now()) @updatedAt
-  shiftId                  Int?
-  sameAsPermanent          Boolean?
-  age                      Int?
-  bloodGroup               String?
-  reportingManager         Int?
-  employeeType             String?
-  alcohol                  Boolean?
-  allergies                String?
-  bloodPressure            String?
-  bloodSugar               String?
-  bmi                      Float?
-  cholesterol              String?
-  chronicConditions        String?
-  emergencyNotes           String?
-  exerciseFrequency        String?
-  healthIssues             Json?
-  height                   Float?
-  preEmploymentCheckDate   DateTime?
-  preferredHospital        String?
-  primaryPhysician         String?
-  smoking                  Boolean?
-  vaccinations             Json?
-  weight                   Float?
-  pastSurgeries            String?
-  usesGlasses              Boolean?
-  visionRemarks            String?
-  visionType               String?
-  disabilityDescription    String?
-  disabilityProofFile      String?
-  disabilityProofFileName  String?
-  disabilityProofUrl       String?
-  disabilityType           String?
-  hasDisability            Boolean?
-  healthCheckReminderSent  Boolean?                   @default(false)
-  healthCheckReminderYear  Int?
-  designationId            Int?
-  inchargeId               Int?
-  experience               Int?
-  fatherName               String?
-  marital                  String?
-  totalYearsOfExperience   Int?
+  id                      Int              @id @default(autoincrement())
+  employeeCode            String           @unique
+  referenceCode           String?
+  firstName               String
+  lastName                String
+  gender                  Gender
+  dob                     DateTime
+  photoUrl                String?
+  phone                   String
+  email                   String
+  departmentId            Int
+  branchId                Int
+  dateOfJoining           DateTime
+  employmentType          EmploymentType
+  probationEndDate        DateTime?
+  employmentStatus        EmploymentStatus
+  roleId                  Int
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @default(now()) @updatedAt
+  shiftId                 Int?
+  sameAsPermanent         Boolean?
+  age                     Int?
+  bloodGroup              String?
+  reportingManager        Int?
+  employeeType            String?
+  alcohol                 Boolean?
+  allergies               String?
+  bloodPressure           String?
+  bloodSugar              String?
+  bmi                     Float?
+  cholesterol             String?
+  chronicConditions       String?
+  emergencyNotes          String?
+  exerciseFrequency       String?
+  healthIssues            Json?
+  height                  Float?
+  preEmploymentCheckDate  DateTime?
+  preferredHospital       String?
+  primaryPhysician        String?
+  smoking                 Boolean?
+  vaccinations            Json?
+  weight                  Float?
+  pastSurgeries           String?
+  usesGlasses             Boolean?
+  visionRemarks           String?
+  visionType              String?
+  disabilityDescription   String?
+  disabilityProofFile     String?
+  disabilityProofFileName String?
+  disabilityProofUrl      String?
+  disabilityType          String?
+  hasDisability           Boolean?
+  healthCheckReminderSent Boolean?         @default(false)
+  healthCheckReminderYear Int?
+  designationId           Int?
+  inchargeId              Int?
+  experience              Int?
+  fatherName              String?
+  marital                 String?
+  totalYearsOfExperience  Int?
+  motherName              String?
+  alternatePhone          String?
+  uanNumber               String?
+  panNumber               String?
+  aadharNumber            String?
+  licenseNumber           String?
+  licenseRegDate          DateTime?
+  licenseExpiryDate       DateTime?
+
   Address                  Address[]
   AnnouncementAck          AnnouncementAck[]
   appraisals               AppraisalForm[]
@@ -115,8 +124,8 @@ model Employee {
   User                     User?
   WFHRequest               WFHRequest[]
   sabbaticals              Sabbatical[]
-  compOffCredits CompOffCredit[]
-
+  compOffCredits           CompOffCredit[]
+  verifiedItems            ResignationClearanceItem[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -195,6 +204,7 @@ model Department {
   name                    String                    @unique
   createdAt               DateTime                  @default(now())
   updatedAt               DateTime                  @default(now()) @updatedAt
+  isDefaultClearance      Boolean? @default(false)
   employees               Employee[]
   Internship              Internship[]
   Job                     Job[]
@@ -204,6 +214,7 @@ model Department {
   PerformanceSummary      PerformanceSummary[]
   Training                Training[]
   resignationClearances   ResignationClearance[]
+  clearanceTemplateItems  ClearanceTemplateItem[]
 }
 
 model Branch {
@@ -753,6 +764,8 @@ model ResignationClearance {
   updatedAt     DateTime           @default(now()) @updatedAt
   resignation   ResignationRequest @relation(fields: [resignationId], references: [id])
   verifier      Employee?          @relation(fields: [verifierId], references: [id])
+
+  items ResignationClearanceItem[]
 
   @@unique([resignationId, type])
   @@index([resignationId])
@@ -1650,21 +1663,54 @@ model Sabbatical {
 }
 
 model CompOffCredit {
-  id          Int      @id @default(autoincrement())
-  employeeId  Int
-  workDate    DateTime
-  expiryDate  DateTime
-  used        Boolean  @default(false)
-  usedOn      DateTime?
-  leaveId     Int?
-  createdAt   DateTime @default(now())
+  id         Int       @id @default(autoincrement())
+  employeeId Int
+  workDate   DateTime
+  expiryDate DateTime
+  used       Boolean   @default(false)
+  usedOn     DateTime?
+  leaveId    Int?
+  createdAt  DateTime  @default(now())
 
-  employee    Employee @relation(fields: [employeeId], references: [id])
+  employee Employee @relation(fields: [employeeId], references: [id])
 
   @@index([employeeId])
   @@index([expiryDate])
 }
 
+model ClearanceTemplateItem {
+  id           Int    @id @default(autoincrement())
+  departmentId Int
+  label        String
+  orderNo      Int?
+
+  department Department @relation(fields: [departmentId], references: [id])
+
+  @@index([departmentId])
+}
+
+model ResignationClearanceItem {
+  id             Int                 @id @default(autoincrement())
+  clearanceId    Int
+  templateItemId Int?
+  label          String
+  status         ClearanceItemStatus @default(PENDING)
+  note           String?
+  decidedAt      DateTime?
+  verifierId     Int?
+
+  clearance ResignationClearance @relation(fields: [clearanceId], references: [id])
+  verifier  Employee?            @relation(fields: [verifierId], references: [id])
+
+  @@index([clearanceId])
+}
+
+enum ClearanceItemStatus {
+  PENDING
+  CLEARED
+  DUE
+  NA
+}
 
 enum SabbaticalStatus {
   ACTIVE

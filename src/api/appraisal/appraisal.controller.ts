@@ -108,19 +108,35 @@ export const createAppraisalsForEmployees = async (
   return created;
 };
 
+// function getEmployeeCycle(doj: Date, now: Date) {
+//   const diffMonths = monthsDiff(doj, now);
+
+//   if (diffMonths < 3) return null; // not eligible yet
+
+//   const cycleIndex = Math.floor(diffMonths / 3) + 1; // 1,2,3,4...
+//   const year = now.getFullYear();
+
+//   return {
+//     cycleIndex,
+//     cycleName: `Cycle ${cycleIndex} ${year}`
+//   };
+// }
+
 function getEmployeeCycle(doj: Date, now: Date) {
   const diffMonths = monthsDiff(doj, now);
 
-  if (diffMonths < 3) return null; // not eligible yet
+  if (diffMonths < 3) return null;
 
-  const cycleIndex = Math.floor(diffMonths / 3) + 1; // 1,2,3,4...
-  const year = now.getFullYear();
+  const yearIndex = Math.floor(diffMonths / 12) + 1;
+  const cycleInYear = Math.floor((diffMonths % 12) / 3) + 1;
 
   return {
-    cycleIndex,
-    cycleName: `Cycle ${cycleIndex} ${year}`
+    yearIndex,
+    cycleIndex: cycleInYear,
+    cycleName: `Year ${yearIndex} - Cycle ${cycleInYear}`
   };
 }
+
 function monthsDiff(from: Date, to: Date) {
   return (
     to.getFullYear() * 12 + to.getMonth()
@@ -186,7 +202,7 @@ export const initQuarterlyAppraisalScheduler = () => {
         const { cycleIndex, cycleName } = cycleInfo;
 
         // ❌ Only 4 cycles per year
-        if (cycleIndex > 4) continue;
+        // if (cycleIndex > 4) continue;
 
         // ❌ Skip if already exists
         const exists = await prisma.appraisalForm.findFirst({

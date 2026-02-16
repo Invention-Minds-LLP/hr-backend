@@ -24,7 +24,8 @@ import {
   hrApproveWithdraw,  
   hrRejectWithdraw,
   listResignationsWithClearances,
-  setApplicableDepartments
+  setApplicableDepartments,
+  bulkUpdateClearanceItems
 } from './resignation.controller'
 import { authenticateToken } from '../../middleware/authMiddleware';
 import { listPendingClearances } from '../dashboard/dashboard.controller';
@@ -68,5 +69,12 @@ router.post('/:id/final-settlement',authenticateToken, setFinalSettlement);
 
 router.post('/:id/complete',authenticateToken, markCompleted);
 router.post('/:id/clearance-certificate',authenticateToken, generateClearanceCertificate);
+
+router.patch(
+  "/:id/clearances/items",
+  authenticateToken,
+  bulkUpdateClearanceItems
+);
+
 
 export default router;

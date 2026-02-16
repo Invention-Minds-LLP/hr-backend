@@ -28,7 +28,9 @@ import {
   extendSabbatical,
   startSabbatical,
   getEmployeesByRole,
-  getEmployeesByManager
+  getEmployeesByManager,
+  bulkUpdateEmployeeExtras,
+  bulkUploadLeaveBalance
 } from "./employee.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -43,7 +45,8 @@ router.get('/by-role', getEmployeesByRole);
 router.get('/incharge', authenticateToken, getInchargeEmployees);
 router.get('/:id/profile', getEmployeeProfile);
 router.put('/:id/profile',updateEmployeeProfile);
-router.post('/bulk-upload',authenticateToken, bulkUploadEmployees);
+router.post('/bulk-upload',authenticateToken, bulkUpdateEmployeeExtras);
+// router.post("/bulk-update-extras", bulkUpdateEmployeeExtras);
 router.post('/:employeeId/documents/upload',authenticateToken, uploadEmployeeDocuments);
 router.post('/:employeeId/photo',authenticateToken, uploadEmployeePhoto)
 router.get("/specific-roles",authenticateToken, getSpecificRoles);
