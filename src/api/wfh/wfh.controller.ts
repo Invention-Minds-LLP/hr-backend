@@ -234,17 +234,17 @@ export const updateWFHStatus = async (req: Request, res: Response) => {
       updatedWFH.status === WFHStatus.APPROVED ? 'Approved' :
       updatedWFH.status === WFHStatus.REJECTED ? 'Declined' : 'Pending';
 
-    if (employeePhone && (data.hodDecision === 'REJECTED' || data.hrDecision)) {
-      try {
-        await sendWhatsAppTemplate({
-          to: employeePhone,
-          templateId: WFH_STATUS_TEMPLATE_ID,
-          placeholders: [employeeName, days, start, end, statusLabel],
-        });
-      } catch (e: any) {
-        console.error('WFH status WA send failed:', e?.message || e);
-      }
-    }
+    // if (employeePhone && (data.hodDecision === 'REJECTED' || data.hrDecision)) {
+    //   try {
+    //     await sendWhatsAppTemplate({
+    //       to: employeePhone,
+    //       templateId: WFH_STATUS_TEMPLATE_ID,
+    //       placeholders: [employeeName, days, start, end, statusLabel],
+    //     });
+    //   } catch (e: any) {
+    //     console.error('WFH status WA send failed:', e?.message || e);
+    //   }
+    // }
 
     res.json(updatedWFH);
   } catch (error) {

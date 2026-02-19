@@ -111,9 +111,9 @@ export async function submitSurvey(req: Request, res: Response) {
         const empName = `${emp.firstName} ${emp.lastName}`;
         const message = `Survey submitted by ${empName} (${emp.employeeCode}).`;
 
-        for (const hrId of hrIds) {
-          await createNotification(hrId, message);
-        }
+        // for (const hrId of hrIds) {
+        //   await createNotification(hrId, message);
+        // }
       }
     } catch (err) {
       console.error("Survey notification failed:", err);
@@ -248,7 +248,7 @@ export const initSurveyScheduler = () => {
             const empName = `${emp.firstName} ${emp.lastName}`;
             const message = `${empName}, your 6-month employee survey is now available. Please complete it at your earliest convenience.`;
 
-            await createNotification(emp.id, message);
+            // await createNotification(emp.id, message);
           } catch (err) {
             console.error(`Notification failed for employee ${emp.id}:`, err);
           }

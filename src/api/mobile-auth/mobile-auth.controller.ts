@@ -76,7 +76,7 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
             roleId: employee.roleId
         });
     }
-    
+
 
     const employee = await prisma.employee.findFirst({ where: { phone } });
     if (!employee) {
@@ -317,10 +317,19 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
         return res.status(401).json({ message: 'Invalid refresh token' });
     }
 
+    const employee = await prisma.employee.findFirst({
+        where: { employeeCode: stored.user.employeeCode }
+    });
+
+    if (!employee) {
+        return res.status(404).json({ message: 'Employee not found' });
+    }
+
     const accessToken = jwt.sign(
         {
             userId: stored.user.id,
-            role: stored.user.role
+            role: stored.user.role,
+            empId: employee.id,
         },
         process.env.JWT_SECRET!,
         { expiresIn: '12h' }

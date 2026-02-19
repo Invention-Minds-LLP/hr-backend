@@ -187,10 +187,10 @@ export const assignTraining = async (req: Request, res: Response) => {
         });
       }
 
-      await createNotification(
-        empId,
-        `You have been assigned to the training: ${training.title}`
-      );
+      // await createNotification(
+      //   empId,
+      //   `You have been assigned to the training: ${training.title}`
+      // );
 
       assignedEmployees.push(empId);
     }
@@ -274,10 +274,10 @@ export const markTrainingCompleted = async (req: Request, res: Response) => {
       },
     });
 
-    await createNotification(
-      employeeId,
-      `🎉 You have successfully completed the training!`
-    );
+    // await createNotification(
+    //   employeeId,
+    //   `🎉 You have successfully completed the training!`
+    // );
 
     res.json(assignment);
   } catch (error) {
@@ -357,10 +357,10 @@ export const submitTrainingFeedback = async (req: Request, res: Response) => {
 
     const employeeName = `${emp?.firstName || ""} ${emp?.lastName || ""}`.trim();
 
-    await createNotification(
-      assignment.assignedBy,
-      `📋 ${employeeName} has submitted feedback for the training: ${training?.title || "Training"}.`
-    );
+    // await createNotification(
+    //   assignment.assignedBy,
+    //   `📋 ${employeeName} has submitted feedback for the training: ${training?.title || "Training"}.`
+    // );
 
     res.status(201).json(feedbackRecord);
   } catch (error) {
@@ -528,10 +528,10 @@ export const markTrainingAttendance = async (req: AuthenticatedRequest, res: Res
       select: { title: true }
     });
 
-    await createNotification(
-      employeeId,
-      `Your attendance for the training "${training?.title || 'Training'}" has been marked as: ${status}.`
-    );
+    // await createNotification(
+    //   employeeId,
+    //   `Your attendance for the training "${training?.title || 'Training'}" has been marked as: ${status}.`
+    // );
     res.json({
       message: "Attendance marked successfully",
       data: record,
@@ -596,10 +596,10 @@ export const bulkMarkTrainingAttendance = async (req: AuthenticatedRequest, res:
         select: { title: true }
       });
 
-      await createNotification(
-        entry.employeeId,
-        `Your attendance for the training "${training?.title || 'Training'}" has been marked as: ${entry.status}.`
-      );
+      // await createNotification(
+      //   entry.employeeId,
+      //   `Your attendance for the training "${training?.title || 'Training'}" has been marked as: ${entry.status}.`
+      // );
 
     }
 

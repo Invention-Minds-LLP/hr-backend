@@ -86,22 +86,22 @@ export const createAppraisalsForEmployees = async (
 
       const employeeName = [emp.firstName, emp.lastName].filter(Boolean).join(" ");
 
-      try {
-        await sendWhatsAppTemplate({
-          to: mgrPhone,
-          templateId: APPRAISAL_CREATED_TEMPLATE_ID,
-          placeholders: [employeeName] // add cycle if your template expects it
-        });
-      } catch (e) {
-        console.error("Appraisal create WA (manager) failed:", e);
-      }
+      // try {
+      //   await sendWhatsAppTemplate({
+      //     to: mgrPhone,
+      //     templateId: APPRAISAL_CREATED_TEMPLATE_ID,
+      //     placeholders: [employeeName] // add cycle if your template expects it
+      //   });
+      // } catch (e) {
+      //   console.error("Appraisal create WA (manager) failed:", e);
+      // }
       const message = `A new appraisal has been created for ${employeeName} and assigned to you for review.\nKindly acknowledge and take appropriate action.`;
 
-      try {
-        await createNotification(mgr.id, message); // ✅ send SSE + DB notification
-      } catch (e) {
-        console.error("Appraisal in-app notification failed:", e);
-      }
+      // try {
+      //   await createNotification(mgr.id, message); // ✅ send SSE + DB notification
+      // } catch (e) {
+      //   console.error("Appraisal in-app notification failed:", e);
+      // }
     })
   );
 
@@ -377,9 +377,9 @@ export const saveManagerReview = async (req: Request, res: Response) => {
         select: { id: true },
       });
 
-      for (const hr of hrEmployees) {
-        await createNotification(hr.id, message);
-      }
+      // for (const hr of hrEmployees) {
+      //   await createNotification(hr.id, message);
+      // }
     }
 
     res.json({ message: 'Manager review saved successfully' });

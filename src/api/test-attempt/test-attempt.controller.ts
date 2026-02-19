@@ -98,18 +98,18 @@ export async function submitAttempt(req: Request, res: Response) {
       const testName = assigned.test?.name || "Test";
 
       // 🔔 Notify employee
-      await createNotification(
-        emp.id,
-        `You have successfully completed the ${testName}.`
-      );
+      // await createNotification(
+      //   emp.id,
+      //   `You have successfully completed the ${testName}.`
+      // );
 
       // 🔔 Notify HR
       const hrIds = await getHRIds();
       const message = `${employeeName} has completed the ${testName}.`;
 
-      for (const hrId of hrIds) {
-        await createNotification(hrId, message);
-      }
+      // for (const hrId of hrIds) {
+      //   await createNotification(hrId, message);
+      // }
     }
     
     res.json({ ok: true });

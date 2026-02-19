@@ -137,26 +137,26 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
       const message = `${employeeName} has requested ${permissionType} permission on ${dayLabel}${timeRange ? ` (${timeRange})` : ""
         }. Kindly review and take appropriate action.`;
 
-      await createNotification(notifyTo, message);
+      // await createNotification(notifyTo, message);
 
-      if (approver?.phone) {
-        try {
-          await sendWhatsAppTemplate({
-            to: formatPhoneNumber(approver.phone),
-            templateId: PERMISSION_APPLY_TEMPLATE_ID,
-            placeholders: [
-              employeeName,
-              permissionType,
-              timing,
-              dayLabel,
-              startLabel,
-              endLabel
-            ]
-          });
-        } catch (e) {
-          console.error("Permission notify failed:", e);
-        }
-      }
+      // if (approver?.phone) {
+      //   try {
+      //     await sendWhatsAppTemplate({
+      //       to: formatPhoneNumber(approver.phone),
+      //       templateId: PERMISSION_APPLY_TEMPLATE_ID,
+      //       placeholders: [
+      //         employeeName,
+      //         permissionType,
+      //         timing,
+      //         dayLabel,
+      //         startLabel,
+      //         endLabel
+      //       ]
+      //     });
+      //   } catch (e) {
+      //     console.error("Permission notify failed:", e);
+      //   }
+      // }
     }
 
     res.status(201).json(request);
@@ -633,20 +633,20 @@ export const updatePermissionStatus = async (req: Request, res: Response) => {
     const end = updated.endTime ? fmtTime(updated.endTime) : '';
     const type = updated.permissionType ?? '';
 
-    await createNotification(
-      updated.employeeId,
-      `Your ${type} permission on ${day} (${start}-${end}) has been ${updated.status}.`
-    );
+    // await createNotification(
+    //   updated.employeeId,
+    //   `Your ${type} permission on ${day} (${start}-${end}) has been ${updated.status}.`
+    // );
 
-    try {
-      await sendWhatsAppTemplate({
-        to: phone,
-        templateId: PERMISSION_STATUS_TEMPLATE_ID,
-        placeholders: [name, type, day, start, end, updated.status]
-      });
-    } catch (err) {
-      console.error("WhatsApp send failed:", err);
-    }
+    // try {
+    //   await sendWhatsAppTemplate({
+    //     to: phone,
+    //     templateId: PERMISSION_STATUS_TEMPLATE_ID,
+    //     placeholders: [name, type, day, start, end, updated.status]
+    //   });
+    // } catch (err) {
+    //   console.error("WhatsApp send failed:", err);
+    // }
 
     res.json(updated);
 

@@ -151,9 +151,9 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       leaveRequest.startDate
     )} to ${fmtDate(leaveRequest.endDate)}. Please review and take action.`;
 
-    for (const id of recipients) {
-      await createNotification(id, message);
-    }
+    // for (const id of recipients) {
+    //   await createNotification(id, message);
+    // }
 
     if (notifyTo) {
       const approver = await prisma.employee.findUnique({
@@ -170,13 +170,13 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
 
       // await createNotification(notifyTo, message);
 
-      if (approver?.phone) {
-        await sendWhatsAppTemplate({
-          to: formatPhoneNumber(approver.phone),
-          templateId: LEAVE_APPLY_TEMPLATE_ID,
-          placeholders,
-        });
-      }
+      // if (approver?.phone) {
+      //   await sendWhatsAppTemplate({
+      //     to: formatPhoneNumber(approver.phone),
+      //     templateId: LEAVE_APPLY_TEMPLATE_ID,
+      //     placeholders,
+      //   });
+      // }
     }
 
 
@@ -697,10 +697,10 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
     const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
     const statusLabel = updatedLeave.status;
 
-    await createNotification(
-      updatedLeave.employeeId,
-      `Your leave request from ${start} to ${end} (${days} days) has been ${statusLabel}.`
-    );
+    // await createNotification(
+    //   updatedLeave.employeeId,
+    //   `Your leave request from ${start} to ${end} (${days} days) has been ${statusLabel}.`
+    // );
 
     res.json(updatedLeave);
 
@@ -1274,10 +1274,10 @@ export const initLeaveEndSchedular = () => {
         const emp = leave.employee;
         const message = `Hello ${emp.firstName}, today is the *last day of your approved leave*. Please be prepared to report tomorrow.`;
         try {
-          await createNotification(
-            emp.id,
-            message
-          );
+          // await createNotification(
+          //   emp.id,
+          //   message
+          // );
         } catch (err) {
           console.error("Error creating notification:", err);
         }
@@ -1365,7 +1365,7 @@ export const updateLeaveType = async (req: Request, res: Response) => {
     // In-app notification
     const message = `Your leave type for the leave from ${start} to ${end} has been changed to "${newLeaveType.name}".`;
 
-    await createNotification(employee.id, message);
+    // await createNotification(employee.id, message);
 
 
     res.json({

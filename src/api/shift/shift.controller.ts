@@ -841,12 +841,12 @@ export const updateEmployeeShift = async (req: Request, res: Response) => {
   // 3. Notify reporting manager
   const managerId = existing.employee.reportingManager;
 
-  if (managerId) {
-    await createNotification(
-      managerId,
-      `Shift updated for ${existing.employee.firstName} ${existing.employee.lastName}: ${existing.shift.name} → ${updated.shift.name} on ${fmtDate(existing.date)}.`
-    );
-  }
+  // if (managerId) {
+  //   await createNotification(
+  //     managerId,
+  //     `Shift updated for ${existing.employee.firstName} ${existing.employee.lastName}: ${existing.shift.name} → ${updated.shift.name} on ${fmtDate(existing.date)}.`
+  //   );
+  // }
 
   res.json(updated);
 };
@@ -1193,16 +1193,16 @@ export const requestShiftChange = async (
     // Reporting Manager raised → notify ALL HR
     const hrIds = await getHRManagerId();
 
-    await Promise.all(
-      hrIds.map(id =>
-        createNotification(
-          id,
-          `${requesterName} has requested a shift change for ${employeeName} effective from ${fmtDate(
-            approval.startDate
-          )}.`
-        )
-      )
-    );
+    // await Promise.all(
+    //   hrIds.map(id =>
+    //     createNotification(
+    //       id,
+    //       `${requesterName} has requested a shift change for ${employeeName} effective from ${fmtDate(
+    //         approval.startDate
+    //       )}.`
+    //     )
+    //   )
+    // );
   }
 
   const requester = await prisma.employee.findUnique({
@@ -1216,14 +1216,14 @@ export const requestShiftChange = async (
 
   const employeeName = `${employee.firstName} ${employee.lastName}`;
 
-  if (notifyTo) {
-    await createNotification(
-      notifyTo,
-      `${requesterName} has requested a shift change for ${employeeName} effective from ${fmtDate(
-        approval.startDate
-      )}.`
-    );
-  }
+  // if (notifyTo) {
+  //   await createNotification(
+  //     notifyTo,
+  //     `${requesterName} has requested a shift change for ${employeeName} effective from ${fmtDate(
+  //       approval.startDate
+  //     )}.`
+  //   );
+  // }
 
   res.status(201).json(approval);
 };
@@ -1338,17 +1338,17 @@ export const approveShiftChange = async (
     // 1️⃣ Notify ALL HR users
     const hrIds = await getHRManagerId();
 
-    await notifyUsers(
-      hrIds,
-      `Shift change request for ${approval.employee.firstName} ${approval.employee.lastName} is awaiting HR approval.`
-    );
+    // await notifyUsers(
+    //   hrIds,
+    //   `Shift change request for ${approval.employee.firstName} ${approval.employee.lastName} is awaiting HR approval.`
+    // );
 
     // 2️⃣ Notify requester (Incharge or RM who raised it)
-    await createNotification(
-      updated.requestedBy,
-      `Your shift change request for ${approval.employee.firstName} ${approval.employee.lastName
-      } effective from ${fmtDate(updated.startDate)} has been approved by the Reporting Manager.`
-    );
+    // await createNotification(
+    //   updated.requestedBy,
+    //   `Your shift change request for ${approval.employee.firstName} ${approval.employee.lastName
+    //   } effective from ${fmtDate(updated.startDate)} has been approved by the Reporting Manager.`
+    // );
   }
 
   // ---------------- FINAL STATUS ----------------
@@ -1360,24 +1360,24 @@ export const approveShiftChange = async (
     } effective from ${fmtDate(updated.startDate)} has been ${updated.status}.`;
 
   if (role === 'HR' && decision === 'APPROVED') {
-    await notifyUsers(
-      [
-        approval.employee.id,          // Employee
-        approval.employee.reportingManager,
-        approval.employee.inchargeId
-      ],
-      msg
-    );
+    // await notifyUsers(
+    //   [
+    //     approval.employee.id,          // Employee
+    //     approval.employee.reportingManager,
+    //     approval.employee.inchargeId
+    //   ],
+    //   msg
+    // );
   }
   if (decision === 'REJECTED') {
-    await notifyUsers(
-      [
-        approval.employee.reportingManager,
-        approval.employee.inchargeId
-      ],
-      `Shift change request for ${approval.employee.firstName} ${approval.employee.lastName
-      } effective from ${fmtDate(updated.startDate)} was rejected.`
-    );
+    // await notifyUsers(
+    //   [
+    //     approval.employee.reportingManager,
+    //     approval.employee.inchargeId
+    //   ],
+    //   `Shift change request for ${approval.employee.firstName} ${approval.employee.lastName
+    //   } effective from ${fmtDate(updated.startDate)} was rejected.`
+    // );
   }
 
 
@@ -1385,12 +1385,12 @@ export const approveShiftChange = async (
 
   res.json(updated);
 };
-async function notifyUsers(userIds: (number | null | undefined)[], message: string) {
-  const uniqueIds = [...new Set(userIds.filter(Boolean))] as number[];
-  await Promise.all(
-    uniqueIds.map(id => createNotification(id, message))
-  );
-}
+// async function notifyUsers(userIds: (number | null | undefined)[], message: string) {
+//   const uniqueIds = [...new Set(userIds.filter(Boolean))] as number[];
+//   await Promise.all(
+//     uniqueIds.map(id => createNotification(id, message))
+//   );
+// }
 
 async function applyApprovedShift(approval: any) {
   await prisma.employeeShiftSetting.upsert({

@@ -21,12 +21,12 @@ export const createGrievance = asyncHandler(async (req: Request, res: Response) 
     });
     
   
-    for (const hr of hrEmployees) {
-      await createNotification(
-        hr.id,
-        'New grievance submitted — requires acknowledgment'
-      );
-    }
+    // for (const hr of hrEmployees) {
+    //   await createNotification(
+    //     hr.id,
+    //     'New grievance submitted — requires acknowledgment'
+    //   );
+    // }
   res.json(grievance);
 });
 

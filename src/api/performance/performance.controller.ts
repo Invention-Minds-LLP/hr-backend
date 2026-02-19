@@ -199,11 +199,11 @@ export const submitFullForm = async (req: Request, res: Response) => {
 
       const messages = `HOD has submitted appraisal for ${employeeName} for ${data.cycle} – ${data.summaries[0].period}. Please review`;
 
-      if (hrIds.length) {
-        for (const hrId of hrIds) {
-          await createNotification(hrId, messages)
-        }
-      }
+      // if (hrIds.length) {
+      //   for (const hrId of hrIds) {
+      //     await createNotification(hrId, messages)
+      //   }
+      // }
     }
 
     // 3) Save final review

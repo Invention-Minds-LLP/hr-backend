@@ -2987,9 +2987,9 @@ export const messageUnmarked = async (req: Request, res: Response) => {
         const { employeeIds, message } = req.body;
         // TODO: integrate with notification/email service
         // console.log("Message to unmarked employees:", employeeIds, message);
-        for (const empId of employeeIds) {
-            createNotification(empId,message)
-        }
+        // for (const empId of employeeIds) {
+        //     createNotification(empId,message)
+        // }
          res.json({ success: true, notified: employeeIds.length });
          return;
     } catch (err) {
@@ -3326,9 +3326,9 @@ export const nudgePanel = async (req: Request, res: Response) => {
         //     channel: "PUSH" // or EMAIL/SMS depending on your system
         //   }))
         // });
-        for (const id of ids) {
-            await createNotification(id, "Please submit interview feedback.");
-        }
+        // for (const id of ids) {
+        //     await createNotification(id, "Please submit interview feedback.");
+        // }
 
 
         return res.json({ success: true, nudged: ids.length });

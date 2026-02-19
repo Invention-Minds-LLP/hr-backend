@@ -4,6 +4,7 @@ import { Request, Response } from 'express';
 import { prisma } from "../../lib/prisma";
 import { sendWhatsAppTemplate } from '../leave/leave.controller';
 import { createNotification } from '../notifications/notifications.controller';
+import { AuthenticatedRequest } from '../../middleware/authMiddleware';
 
 const TEST_ASSIGNED_TEMPLATE_ID = '888289';
 
@@ -65,20 +66,20 @@ export const assignTestToEmployees = async (req: Request, res: Response) => {
         const message = `You have been assigned the ${testName} scheduled on ${dateLabel} at ${timeLabel}.\nKindly ensure to complete it as instructed.`;
 
         // --- In-App Notification
-        try {
-          await createNotification(emp.id, message); // creates + broadcasts
-        } catch (e) {
-          console.error("Test assign in-app notification failed:", e);
-        }
-        try {
-          await sendWhatsAppTemplate({
-            to,
-            templateId: TEST_ASSIGNED_TEMPLATE_ID,
-            placeholders: [employeeName, testName, dateLabel]
-          });
-        } catch (e) {
-          console.error("Test assignment WA send failed:", e);
-        }
+        // try {
+        //   await createNotification(emp.id, message); // creates + broadcasts
+        // } catch (e) {
+        //   console.error("Test assign in-app notification failed:", e);
+        // }
+        // try {
+        //   await sendWhatsAppTemplate({
+        //     to,
+        //     templateId: TEST_ASSIGNED_TEMPLATE_ID,
+        //     placeholders: [employeeName, testName, dateLabel]
+        //   });
+        // } catch (e) {
+        //   console.error("Test assignment WA send failed:", e);
+        // }
       })
     );
 
@@ -98,13 +99,31 @@ export const assignTestToEmployees = async (req: Request, res: Response) => {
 //     res.status(500).json({ error: 'Failed to fetch assignments' });
 //   }
 // };
-export const getAssignedTests = async (req: Request, res: Response) => {
+export const getAssignedTests = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    // 1) Assignments with employee & test (need passingPercent)
+
+    const roleId = req.user.roleId;
+    const empId = req.user.empId;
+
+    let whereCondition: any = {};
+
+    // Reporting Manager → only their employees
+    if (roleId === 3) {
+      whereCondition = {
+        employee: {
+          reportingManager: empId
+        }
+      };
+    }
+
+    // 1) Assignments with employee & test
     const assignments = await prisma.assignedTest.findMany({
+      where: whereCondition,
       include: { employee: true, test: true },
       orderBy: { assignedAt: 'desc' },
     });
+
+
 
     if (assignments.length === 0) return res.json([]);
 

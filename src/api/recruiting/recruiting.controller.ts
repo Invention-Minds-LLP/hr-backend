@@ -308,9 +308,9 @@ export class RecruitingController {
           if (hrIds.length) {
             const message = `New application received for ${app.job.title} from ${app.candidate.name}.`;
 
-            for (const id of hrIds) {
-              await createNotification(id, message);
-            }
+            // for (const id of hrIds) {
+            //   await createNotification(id, message);
+            // }
           }
         } catch (notifyErr) {
           console.error("HR notification failed:", notifyErr);
@@ -1329,12 +1329,12 @@ export const upsertFeedback = asyncHandler(async (req, res) => {
     const hrIds = hrUsers.map(u => u.id);
 
     if (hrIds.length) {
-      for (const hrId of hrIds) {
-        await createNotification(
-          hrId,
-          `${panelName} submitted interview feedback for ${candidateName}.`
-        );
-      }
+      // for (const hrId of hrIds) {
+      //   await createNotification(
+      //     hrId,
+      //     `${panelName} submitted interview feedback for ${candidateName}.`
+      //   );
+      // }
     }
   }
 

@@ -166,9 +166,9 @@ export async function createAnnouncement(req: Request, res: Response) {
     });
 
     // ---- notify all target employees ----
-    for (const emp of employees) {
-      await createNotification(emp.id, 'NEW_ANNOUNCEMENT');
-    }
+    // for (const emp of employees) {
+    //   await createNotification(emp.id, 'NEW_ANNOUNCEMENT');
+    // }
 
     return res.status(201).json(created);
   } catch (e) {

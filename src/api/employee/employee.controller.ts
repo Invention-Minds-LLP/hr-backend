@@ -120,6 +120,8 @@ async function generateEmployeeCode(employmentType: string) {
     }
   });
 
+  console.log(lastEmployee)
+
   let newCode = `${prefix}${startNumber}`;
 
   if (lastEmployee?.employeeCode) {
@@ -181,6 +183,7 @@ export const createEmployee = async (req: Request, res: Response) => {
       panNumber,
       aadharNumber,
       licenseNumber,
+      geoTrackingEnabled
     } = req.body;
     const data = req.body;
     let finalCode = employeeCode;
@@ -220,6 +223,7 @@ export const createEmployee = async (req: Request, res: Response) => {
           experience,
           employeeType,
           sameAsPermanent,
+          geoTrackingEnabled: geoTrackingEnabled ?? false,
           // Health & Wellness fields
           preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
           height: data.height ? parseFloat(data.height) : null,
@@ -343,7 +347,7 @@ export const createEmployee = async (req: Request, res: Response) => {
             marital,
             totalYearsOfExperience,
             experience,
-
+            geoTrackingEnabled,
             motherName,
             alternatePhone,
             uanNumber,
@@ -725,6 +729,9 @@ export const updateEmployee = async (req: Request, res: Response) => {
         preferredHospital: data.preferredHospital,
         primaryPhysician: data.primaryPhysician,
         emergencyNotes: data.emergencyNotes,
+
+        geoTrackingEnabled: data.geoTrackingEnabled,
+
 
         motherName: data.motherName,
         alternatePhone: data.alternatePhone,
@@ -3358,19 +3365,19 @@ export const initSabbaticalReminderScheduler = () => {
 
       const message = `Your sabbatical ends on ${sab.endDate.toDateString()}. Please contact HR.`;
 
-      await createNotification(emp.id, message);
+      // await createNotification(emp.id, message);
 
       const hrUsers = await prisma.employee.findMany({
         where: { roleId: 1, employmentStatus: "ACTIVE" },
         select: { id: true }
       });
 
-      for (const hr of hrUsers) {
-        await createNotification(
-          hr.id,
-          `${emp.firstName}'s sabbatical ends on ${sab.endDate.toDateString()}`
-        );
-      }
+      // for (const hr of hrUsers) {
+      //   await createNotification(
+      //     hr.id,
+      //     `${emp.firstName}'s sabbatical ends on ${sab.endDate.toDateString()}`
+      //   );
+      // }
     }
   });
 };

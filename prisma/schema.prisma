@@ -76,6 +76,9 @@ model Employee {
   licenseNumber           String?
   licenseRegDate          DateTime?
   licenseExpiryDate       DateTime?
+  geoTrackingEnabled      Boolean?         @default(false)
+  geoTrackingConsent      Boolean?         @default(false)
+  geoTrackingConsentAt    DateTime?
 
   Address                  Address[]
   AnnouncementAck          AnnouncementAck[]
@@ -126,6 +129,7 @@ model Employee {
   sabbaticals              Sabbatical[]
   compOffCredits           CompOffCredit[]
   verifiedItems            ResignationClearanceItem[]
+  locationSessions         LocationSession[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -204,7 +208,7 @@ model Department {
   name                    String                    @unique
   createdAt               DateTime                  @default(now())
   updatedAt               DateTime                  @default(now()) @updatedAt
-  isDefaultClearance      Boolean? @default(false)
+  isDefaultClearance      Boolean?                  @default(false)
   employees               Employee[]
   Internship              Internship[]
   Job                     Job[]
@@ -1703,6 +1707,66 @@ model ResignationClearanceItem {
   verifier  Employee?            @relation(fields: [verifierId], references: [id])
 
   @@index([clearanceId])
+}
+
+model LocationSession {
+  id         Int           @id @default(autoincrement())
+  employeeId Int
+  name       String?
+  startedAt  DateTime?
+  endedAt    DateTime?
+  status     SessionStatus @default(ACTIVE)
+  createdAt  DateTime      @default(now())
+
+  // session summary
+  totalDistance Float? // meters
+  totalPoints   Int? // count
+
+  employee  Employee               @relation(fields: [employeeId], references: [id])
+  locations LocationPoint[]
+  photos    LocationSessionPhoto[]
+
+  @@index([employeeId])
+  @@index([startedAt])
+}
+
+model LocationPoint {
+  id         Int      @id @default(autoincrement())
+  sessionId  Int
+  latitude   Float
+  longitude  Float
+  accuracy   Float?
+  speed      Float?
+  recordedAt DateTime @default(now())
+
+  session LocationSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@index([recordedAt])
+  @@index([sessionId, recordedAt])
+}
+
+model LocationSessionPhoto {
+  id         Int       @id @default(autoincrement())
+  sessionId  Int
+  url        String
+  fileName   String
+  latitude   Float?
+  longitude  Float?
+  capturedAt DateTime?
+  capturedBy Int?
+  createdAt  DateTime  @default(now())
+
+  session LocationSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+}
+
+enum SessionStatus {
+  CREATED
+  ACTIVE
+  COMPLETED
+  CANCELLED
 }
 
 enum ClearanceItemStatus {

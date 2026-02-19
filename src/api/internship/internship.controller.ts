@@ -97,9 +97,9 @@ export async function createInternship(req: Request, res: Response) {
 
         const mentorMap = await buildNameMap([created.mentorId]);
                const message = `A intern ${created.candidateName} has been assigned to you. Please check the details and provide necessary guidance.`;
-               if(created.mentorId){
-                await createNotification(created.mentorId, message);
-               }
+            //    if(created.mentorId){
+            //     await createNotification(created.mentorId, message);
+            //    }
         // await createNotification(created.mentorId, message);
         return res.status(201).json({
             ...created,
