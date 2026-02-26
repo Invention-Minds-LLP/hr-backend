@@ -33,6 +33,7 @@ import {
   bulkUploadLeaveBalance
 } from "./employee.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
+import { bulkUploadLeaveBalancesExcel } from "../leave/leave.controller";
 
 const router = Router();
 
@@ -45,7 +46,7 @@ router.get('/by-role', getEmployeesByRole);
 router.get('/incharge', authenticateToken, getInchargeEmployees);
 router.get('/:id/profile', getEmployeeProfile);
 router.put('/:id/profile',updateEmployeeProfile);
-router.post('/bulk-upload',authenticateToken, bulkUpdateEmployeeExtras);
+router.post('/bulk-upload',authenticateToken, bulkUploadLeaveBalancesExcel);
 // router.post("/bulk-update-extras", bulkUpdateEmployeeExtras);
 router.post('/:employeeId/documents/upload',authenticateToken, uploadEmployeeDocuments);
 router.post('/:employeeId/photo',authenticateToken, uploadEmployeePhoto)

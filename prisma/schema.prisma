@@ -95,6 +95,7 @@ model Employee {
   incharge                 Employee?                  @relation("EmployeeIncharge", fields: [inchargeId], references: [id])
   subordinates             Employee[]                 @relation("EmployeeIncharge")
   role                     Role                       @relation(fields: [roleId], references: [id])
+    performedLedgers LeaveLedger[] @relation("LedgerPerformedBy")
   EmployeeShiftSetting     EmployeeShiftSetting?
   EmployeeSurvey           EmployeeSurvey[]
   evaluations              EvaluationAttempt[]
@@ -130,6 +131,8 @@ model Employee {
   compOffCredits           CompOffCredit[]
   verifiedItems            ResignationClearanceItem[]
   locationSessions         LocationSession[]
+  leaveAccruals            LeaveAccrual[]
+  leaveLedgers             LeaveLedger[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -280,6 +283,9 @@ model LeaveType {
   carryForward         Boolean                @default(false)
   EmployeeLeaveBalance EmployeeLeaveBalance[]
   LeaveRequest         LeaveRequest[]
+  policies             LeavePolicy[]
+  leaveAccruals        LeaveAccrual[]
+  leaveLedgers         LeaveLedger[]
 }
 
 enum HalfDaySession {
@@ -1483,9 +1489,10 @@ model EmployeeLeaveBalance {
   permissionType PermissionType?
   category       BalanceCategory
   year           Int
-  totalAllowed   Int             @default(0)
-  used           Int             @default(0)
-  halfDayUsed    Int?            @default(0)
+  isUnlimited    Boolean?         @default(false)
+  totalAllowed   Float           @default(0)
+  used           Float           @default(0)
+  halfDayUsed    Float?          @default(0)
   leaveType      LeaveType?      @relation(fields: [leaveTypeId], references: [id])
 
   @@unique([employeeId, leaveTypeId, year])
@@ -1760,6 +1767,195 @@ model LocationSessionPhoto {
   session LocationSession @relation(fields: [sessionId], references: [id])
 
   @@index([sessionId])
+}
+
+model LeaveAccrual {
+  id           Int         @id @default(autoincrement())
+  employeeId   Int
+  leaveTypeId  Int
+  year         Int
+  month        Int?
+  accrualType  AccrualType
+  daysCredited Float
+  createdAt    DateTime    @default(now())
+  remarks      String?
+
+  employee  Employee  @relation(fields: [employeeId], references: [id])
+  leaveType LeaveType @relation(fields: [leaveTypeId], references: [id])
+
+  @@unique([employeeId, leaveTypeId, year, month])
+  @@index([employeeId])
+  @@index([leaveTypeId])
+}
+
+model LeaveLedger {
+  id Int @id @default(autoincrement())
+
+  employeeId  Int
+  leaveTypeId Int
+
+  transactionDate DateTime @default(now())
+  year            Int
+  month           Int?
+
+  referenceType LedgerReferenceType
+  referenceId   Int?
+
+  credit       Float @default(0)
+  debit        Float @default(0)
+  balanceAfter Float
+
+  // AUDIT FIELDS
+  action      LedgerAction // WHAT happened
+  performedBy Int? // WHO did it
+  performedAt DateTime      @default(now()) // WHEN
+  source      LedgerSource? // FROM WHERE (API, CRON, IMPORT)
+
+  remarks  String?
+  metadata Json? // EXTRA DETAILS (optional)
+
+  createdAt DateTime @default(now())
+
+  employee  Employee  @relation(fields: [employeeId], references: [id])
+  leaveType LeaveType @relation(fields: [leaveTypeId], references: [id])
+  performedByUser Employee? @relation("LedgerPerformedBy", fields: [performedBy], references: [id])
+
+  @@index([employeeId])
+  @@index([leaveTypeId])
+  @@index([performedBy])
+  @@index([year])
+}
+
+model LeaveMonthlySummary {
+  id          Int @id @default(autoincrement())
+  employeeId  Int
+  leaveTypeId Int
+  year        Int
+  month       Int
+
+  opening  Float
+  credited Float
+  used     Float
+  lapsed   Float @default(0)
+  closing  Float
+
+  createdAt DateTime @default(now())
+
+  @@unique([employeeId, leaveTypeId, year, month])
+}
+
+model LeaveYearlySummary {
+  id          Int @id @default(autoincrement())
+  employeeId  Int
+  leaveTypeId Int
+  year        Int
+
+  opening  Float
+  credited Float
+  used     Float
+  lapsed   Float @default(0)
+  encashed Float @default(0)
+  closing  Float
+
+  createdAt DateTime @default(now())
+
+  @@unique([employeeId, leaveTypeId, year])
+}
+
+model LeavePolicy {
+  id Int @id @default(autoincrement())
+
+  leaveTypeId Int
+  name        String
+
+  // ACCRUAL
+  accrualType         AccrualType
+  accrualRate         Float?
+  accrualFrequency    String?
+  accrualBasedOn      String?
+  workingDaysRequired Int?
+
+  isActive            Boolean @default(true)
+  createdBy Int?
+  financialYearStart Int? // e.g. 2025
+
+  // LIMITS
+  maxBalance         Float?
+  minLeavePerRequest Float?
+  maxLeavePerRequest Float?
+
+  // CARRY FORWARD
+  carryForward           Boolean @default(false)
+  maxCarryForward        Float?
+  carryForwardExpiryDays Int?
+
+  // LAPSING
+  lapseAfterDays Int?
+
+  // NEGATIVE BALANCE
+  allowNegativeBalance Boolean @default(false)
+  maxNegativeBalance   Float?
+
+  // APPROVAL
+  requiresApproval Boolean @default(true)
+  approvalLevels   Int?
+
+  // ELIGIBILITY
+  applicableGender         Gender?
+  applicableEmploymentType EmploymentType?
+  applicableAfterDays      Int?
+  includeProbation         Boolean         @default(true)
+
+  // RULES
+  enableSandwichRule Boolean @default(false)
+  excludeWeekends    Boolean @default(true)
+  excludeHolidays    Boolean @default(true)
+
+  // DOCUMENTS
+  requiresDocument          Boolean @default(false)
+  documentRequiredAfterDays Float?
+
+  // ENCASHMENT
+  encashable Boolean @default(false)
+
+  // DATES
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+
+  createdAt DateTime @default(now())
+
+  leaveType LeaveType @relation(fields: [leaveTypeId], references: [id])
+}
+
+enum LedgerAction {
+  CREDIT // monthly credit, SL yearly
+  DEBIT // leave taken
+  LAPSE // year end expiry
+  ENCASHMENT // EL encash
+  ADJUSTMENT // manual correction
+  OPENING_BALANCE // excel import
+}
+
+enum LedgerSource {
+  SYSTEM // cron jobs
+  ADMIN // manual HR action
+  EMPLOYEE // leave request
+  IMPORT // excel upload
+}
+
+enum AccrualType {
+  MONTHLY
+  YEARLY
+  PRO_RATA
+  MANUAL
+}
+
+enum LedgerReferenceType {
+  ACCRUAL
+  LEAVE_REQUEST
+  LAPSE
+  ENCASHMENT
+  MANUAL
 }
 
 enum SessionStatus {

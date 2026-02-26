@@ -33,7 +33,7 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "All fields are required" });
     }
 
-    const year = new Date(day).getFullYear();
+    const year = getFinancialYear(new Date(day));
 
     // Each permission counts as 1 unit
     const unitsRequested = 1;
@@ -53,12 +53,14 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Permission balance not configured." });
     }
 
-    const remaining = balance.totalAllowed - balance.used;
+    if (!balance.isUnlimited) {
+      const remaining = balance.totalAllowed - balance.used;
 
-    if (remaining < unitsRequested) {
-      return res.status(400).json({
-        error: `You have only ${remaining} permission(s) remaining for ${permissionType}`
-      });
+      if (remaining < unitsRequested) {
+        return res.status(400).json({
+          error: `You have only ${remaining} permission(s) remaining for ${permissionType}`
+        });
+      }
     }
 
     const request = await prisma.permissionRequest.create({
@@ -681,7 +683,12 @@ const ALL_PERMISSION_TYPES = ['PERSONAL', 'OFFICIAL'];
 export const getPermissionBalance = async (req: Request, res: Response) => {
   try {
     const employeeId = Number(req.params.employeeId);
-    const year = Number(req.query.year) || new Date().getFullYear();
+    // const year = Number(req.query.year) || getFinancialYear(new Date());
+    const yearParam = Number(req.query.year);
+
+    const year = Number.isFinite(yearParam)
+      ? yearParam
+      : getFinancialYear(new Date());
 
     const balances = await prisma.employeeLeaveBalance.findMany({
       where: { employeeId, year, category: "PERMISSION" },
@@ -699,7 +706,9 @@ export const getPermissionBalance = async (req: Request, res: Response) => {
         permissionType: type,
         totalAllowed: b?.totalAllowed ?? 0,
         used: b?.used ?? 0,
-        remaining: (b?.totalAllowed ?? 0) - (b?.used ?? 0),
+        // remaining: (b?.totalAllowed ?? 0) - (b?.used ?? 0),
+        remaining: b?.isUnlimited ? null : (b?.totalAllowed ?? 0) - (b?.used ?? 0),
+        isUnlimited: b?.isUnlimited ?? false,
         year
       };
     });
@@ -728,6 +737,7 @@ export const getMonthlyPermissionUsage = async (req: Request, res: Response) => 
         status: {
           in: ['APPROVED', 'PENDING']
         },
+        permissionType: 'PERSONAL',
         day: {
           gte: monthStart,
           lte: monthEnd
@@ -753,6 +763,7 @@ export const getMonthlyPermissionUsage = async (req: Request, res: Response) => 
       if (diff > 0) usedHours += diff;
     }
 
+    console.log(permissions, usedHours)
     res.json({
       usedHours: Number(usedHours.toFixed(2)),
       maxHours: 2
@@ -763,3 +774,9 @@ export const getMonthlyPermissionUsage = async (req: Request, res: Response) => 
   }
 };
 
+function getFinancialYear(date: Date) {
+  const year = date.getFullYear();
+  const month = date.getMonth() + 1;
+
+  return month >= 4 ? year : year - 1;
+}

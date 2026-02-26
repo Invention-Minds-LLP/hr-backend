@@ -100,9 +100,9 @@ export const addLocationPoint = async (req: Request, res: Response) => {
             Date.now() - new Date(lastPoint.recordedAt).getTime();
 
         // skip noisy point
-        // if (distance < 20 && timeDiff < 300000) {
-        //   return res.json({ skipped: true });
-        // }
+        if (timeDiff < 300000) {
+          return res.json({ skipped: true });
+        }
     }
 
     await prisma.locationPoint.create({

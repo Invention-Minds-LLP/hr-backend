@@ -6,6 +6,13 @@ import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
 import cron from "node-cron";
 import { da } from "date-fns/locale";
+import { Prisma } from "@prisma/client";
+import formidable from "formidable";
+import * as XLSX from "xlsx";
+import pLimit from "p-limit";
+import { PermissionType } from "@prisma/client";
+
+type Tx = Prisma.TransactionClient;
 
 const LEAVE_APPLY_TEMPLATE_ID = "890321";
 const LEAVE_STATUS_TEMPLATE_ID = "909803";
@@ -19,43 +26,60 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     }
 
     const start = new Date(startDate);
-    const leaveYear = start.getFullYear();
+    const year = getFinancialYear(start);
+    // const leaveYear = getFinancialYear(start);
     // const daysRequested = daysInclusive(start, new Date(endDate));
+    const end = new Date(endDate);
+    if (end < start) return res.status(400).json({ error: "endDate cannot be before startDate" });
+
+    // validate leave type exists
+    const lt = await prisma.leaveType.findUnique({ where: { id: Number(leaveTypeId) } });
+    if (!lt) return res.status(400).json({ error: "Invalid leave type" });
+
+    if (lt.name === "CO" && isHalfDay) {
+      return res.status(400).json({ error: "Half-day not allowed for CO" });
+    }
+
+
     // Fetch balance for that year & leave type
     const balance = await prisma.employeeLeaveBalance.findFirst({
       where: {
         employeeId: employeeId,
         leaveTypeId: leaveTypeId,
-        year: leaveYear,
+        year: year,
       }
     });
 
 
     if (!balance) {
       return res.status(400).json({
-        error: `Leave balance not configured for ${leaveYear}`
+        error: `Leave balance not configured for ${year}`
       });
     }
-    let requestedUnits = 0;
 
-    if (isHalfDay) {
-      requestedUnits = 0.5;
-    } else {
-      requestedUnits = daysInclusive(start, new Date(endDate));
+
+    // const year = start.getFullYear();
+    const requestedUnits = isHalfDay ? 0.5 : daysInclusive(start, end);
+    if (isHalfDay && !isSameDate(new Date(startDate), new Date(endDate))) {
+      return res.status(400).json({ error: "Half-day must be a single date" });
+    }
+    if (isHalfDay && !halfDaySession) {
+      return res.status(400).json({ error: "halfDaySession is required for half-day" });
     }
 
-    const usedFull = balance.used;
-    const usedHalf = (balance.halfDayUsed ?? 0) * 0.5;;
-    const totalUsed = usedFull + usedHalf;
+    if (lt.name !== "CO") {
+      const bal = await getBalance(Number(employeeId), Number(leaveTypeId), year);
+      if (!bal) return res.status(400).json({ error: `Leave balance not configured for ${year}` });
 
-    const remaining = balance.totalAllowed - totalUsed;
-    // const remaining = balance.totalAllowed - balance.used;
+      const totalUsed = computeTotalUsed(bal);
+      const remaining = (bal.totalAllowed ?? 0) - totalUsed;
 
-    // if (daysRequested > remaining) {
-    //   return res.status(400).json({
-    //     error: `Insufficient balance. You have only ${remaining} days available for this leave type.`
-    //   });
-    // }
+      if (requestedUnits > remaining) {
+        return res.status(400).json({
+          error: `Insufficient balance. Available: ${remaining}, requested: ${requestedUnits}`
+        });
+      }
+    }
 
     const leaveRequest = await prisma.leaveRequest.create({
       data: {
@@ -222,7 +246,7 @@ export const getLeaveRequests = async (_req: Request, res: Response) => {
             reportingManager: true,
             inchargeId: true,
             roleId: true,
-            gender:true,
+            gender: true,
             photoUrl: true,
 
             designation: {
@@ -281,434 +305,310 @@ export const getLeaveTypes = async (_req: Request, res: Response) => {
 //   try {
 //     const { id } = req.params;
 //     const { role, status, userId } = req.body;
-//     // role = "MANAGER" or "HR"
-
-//     if (!['MANAGER', 'HR'].includes(role)) {
-//       return res.status(400).json({ error: 'Invalid role' });
-//     }
+//     // role = "REPORTING_MANAGER", "HR_MANAGER", "MANAGEMENT"
 
 //     if (!["Approved", "Declined"].includes(status)) {
-//       return res.status(400).json({ error: "Invalid status value" });
+//       return res.status(400).json({ error: "Invalid status" });
 //     }
 
-//     const leave = await prisma.leaveRequest.findUnique({ where: { id: Number(id) } });
-//     if (!leave) return res.status(404).json({ error: "Leave request not found" });
+//     // Fetch leave with employee and department
+//     const leave = await prisma.leaveRequest.findUnique({
+//       where: { id: Number(id) },
+//       include: {
+//         employee: {
+//           include: {
+//             Department: true
+//           }
+//         }
+//       }
+//     });
+
+//     if (!leave) return res.status(404).json({ error: "Leave not found" });
+
+//     const emp = leave.employee;
+
+//     const roleId = emp.roleId;               // 1=HR Manager, 2=Employee, 3=Reporting Manager, 4=Management
+//     const deptId = emp.departmentId;         // HR department = 1
+//     const isHRDept = deptId === 1;           // HR Employee or HR Manager
+//     const hasIncharge = !!emp.inchargeId;
+//     const approved = status === "Approved";
 
 //     const data: any = {};
 
-//     // --- Manager decision first ---
-//     if (role === "MANAGER") {
-//       if (leave.hodDecision !== "PENDING") {
-//         return res.status(400).json({ error: "Manager already decided" });
+
+//     /* ================================================================
+//   NEW INCHARGE LEVEL (ONLY IF EXISTS)
+// ================================================================ */
+//     if (hasIncharge && role === "INCHARGE") {
+//       data.inChargeDecision = approved ? "APPROVED" : "REJECTED";
+//       data.inChargeDecidedAt = new Date();
+
+//       if (!approved) {
+//         data.status = "REJECTED";
+//         data.declinedBy = userId;
+//         data.declinedDate = new Date();
+//         data.declineReason = req.body.declineReason || null;
 //       }
+
+//       const updated = await prisma.leaveRequest.update({
+//         where: { id: Number(id) },
+//         data
+//       });
+
+//       return res.json(updated);
+//     }
+
+//     /* ================================================================
+//         BLOCK OTHERS IF INCHARGE EXISTS & NOT APPROVED YET
+//     ================================================================ */
+//     if (hasIncharge && leave.inChargeDecision !== "APPROVED") {
+//       return res.status(400).json({
+//         error: "Incharge approval required first"
+//       });
+//     }
+
+//     // ================================================================
+//     //   HR EMPLOYEE (dept = 1, roleId ≠ HR Manager)
+//     // ================================================================
+//     if (isHRDept && roleId !== 1) {
+//       // Only HR Manager can approve at Level 1
+//       if (role !== "HR_MANAGER") {
+//         return res.status(400).json({ error: "Only HR Manager can approve HR employees" });
+//       }
+
 //       data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
 //       data.hodDecidedAt = new Date();
 
-//       if (data.hodDecision === "REJECTED") {
-//         data.status = LeaveStatus.REJECTED;
-//         data.declinedBy = userId;
-//         data.declinedDate = new Date();
-//       }
-//     }
-
-//     // --- HR decision second ---
-//     else if (role === "HR") {
-//       if (leave.hodDecision !== "APPROVED") {
-//         return res.status(400).json({ error: "Manager approval required first" });
-//       }
-//       if (leave.hrDecision !== "PENDING") {
-//         return res.status(400).json({ error: "HR already decided" });
-//       }
 
 //       data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
 //       data.hrDecidedAt = new Date();
+//       data.status = status === "Approved" ? "APPROVED" : "REJECTED";
 
-//       if (data.hrDecision === "APPROVED") {
-//         data.status = LeaveStatus.APPROVED;
-//         data.approvedBy = userId;
-//         data.approvedDate = new Date();
-//         const leaveYear = leave.startDate.getFullYear();
-//         const days = daysInclusive(leave.startDate, leave.endDate);
-
-//         await prisma.employeeLeaveBalance.updateMany({
-//           where: {
-//             employeeId: leave.employeeId,
-//             leaveTypeId: leave.leaveTypeId,
-//             year: leaveYear
-//           },
-//           data: {
-//             used: { increment: days }
-//           }
-//         });
-
-//       } else {
-//         data.status = LeaveStatus.REJECTED;
+//       if (status === "Declined") {
 //         data.declinedBy = userId;
 //         data.declinedDate = new Date();
+//         data.declineReason = req.body.declineReason || null;
 //       }
 //     }
 
+//     // ================================================================
+//     //   HR MANAGER (roleId = 1)
+//     // ================================================================
+//     else if (roleId === 1) {
+//       if (role !== "MANAGEMENT") {
+//         return res.status(400).json({ error: "Only Management can approve HR Manager leave" });
+//       }
+
+//       data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+//       data.hodDecidedAt = new Date();
+
+//       // No HR step for HR Manager
+
+//       data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+//       data.hrDecidedAt = new Date();
+//       data.status = status === "Approved" ? "APPROVED" : "REJECTED";
+
+//       if (status === "Declined") {
+//         data.declinedBy = userId;
+//         data.declinedDate = new Date();
+//         data.declineReason = req.body.declineReason || null;
+//       }
+//     }
+
+//     // ================================================================
+//     //   REPORTING MANAGERS (roleId = 3) AND HOD (same logic)
+//     //    Level 1 = Management
+//     //    Level 2 = HR Manager
+//     // ================================================================
+//     else if (roleId === 3 || roleId === 5 /* HOD role if exists */) {
+
+//       // Level 1: Management
+//       if (role === "MANAGEMENT") {
+//         data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+//         data.hodDecidedAt = new Date();
+
+//         if (status === "Declined") {
+//           data.status = "REJECTED";
+//           data.declinedBy = userId;
+//           data.declinedDate = new Date();
+//           data.declineReason = req.body.declineReason || null;
+//         }
+//       }
+
+//       // Level 2: HR Manager
+//       else if (role === "HR_MANAGER") {
+//         if (leave.hodDecision !== "APPROVED") {
+//           return res.status(400).json({ error: "Management approval required first" });
+//         }
+
+//         data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+//         data.hrDecidedAt = new Date();
+
+//         data.status = status === "Approved" ? "APPROVED" : "REJECTED";
+
+//         if (status === "Declined") {
+//           data.declinedBy = userId;
+//           data.declinedDate = new Date();
+//           data.declineReason = req.body.declineReason || null;
+//         }
+//       }
+
+//       else {
+//         return res.status(400).json({ error: "Invalid approver for Reporting Manager/HOD" });
+//       }
+//     }
+
+//     // ================================================================
+//     //   NORMAL EMPLOYEE (roleId = 2)
+//     //    Level 1 = Reporting Manager
+//     //    Level 2 = HR Manager
+//     // ================================================================
+//     else if (roleId === 2) {
+//       // Level 1: Reporting Manager
+//       if (role === "REPORTING_MANAGER") {
+//         data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+//         data.hodDecidedAt = new Date();
+
+//         if (status === "Declined") {
+//           data.status = "REJECTED";
+//           data.declinedBy = userId;
+//           data.declinedDate = new Date();
+//           data.declineReason = req.body.declineReason || null;
+//         }
+//       }
+
+//       // Level 2: HR Manager
+//       else if (role === "HR_MANAGER") {
+//         if (leave.hodDecision !== "APPROVED") {
+//           return res.status(400).json({ error: "Manager approval required first" });
+//         }
+
+//         data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
+//         data.hrDecidedAt = new Date();
+
+//         data.status = status === "Approved" ? "APPROVED" : "REJECTED";
+
+//         if (status === "Declined") {
+//           data.declinedBy = userId;
+//           data.declinedDate = new Date();
+//           data.declineReason = req.body.declineReason || null;
+//         }
+//       }
+
+//       else {
+//         return res.status(400).json({ error: "Unauthorized approver" });
+//       }
+//     }
+
+//     // ================================================================
+//     //  SAVE UPDATED LEAVE & UPDATE BALANCES
+//     // ================================================================
 //     const updatedLeave = await prisma.leaveRequest.update({
 //       where: { id: Number(id) },
 //       data,
-//       include: { employee: true, leaveType: true },
+//       include: { employee: true, leaveType: true }
 //     });
 
-//     // --- WhatsApp notify employee ---
-//     const employee = updatedLeave.employee;
-//     const employeePhone = formatPhoneNumber(employee?.phone || "");
-//     const employeeName = [employee?.firstName, employee?.lastName].filter(Boolean).join(" ");
-//     const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
+//     console.log("Updated Leave:", updatedLeave);
+
+//     // If fully approved → deduct leave balance
+//     if (updatedLeave.status === "APPROVED") {
+//       if (updatedLeave.leaveType.name === "CO") {
+//         const today = new Date();
+//         today.setHours(0, 0, 0, 0);
+
+//         // Always full day for CO
+//         const requiredDays = daysInclusive(
+//           updatedLeave.startDate,
+//           updatedLeave.endDate
+//         );
+
+//         // Fetch valid credits (earliest expiry first)
+//         const credits = await prisma.compOffCredit.findMany({
+//           where: {
+//             employeeId: updatedLeave.employeeId,
+//             used: false,
+//             expiryDate: { gte: today }
+//           },
+//           orderBy: {
+//             expiryDate: "asc"
+//           }
+//         });
+
+//         if (credits.length < requiredDays) {
+//           throw new Error("Not enough comp-off credits");
+//         }
+
+//         const toUse = credits.slice(0, requiredDays);
+
+//         for (const credit of toUse) {
+//           await prisma.compOffCredit.update({
+//             where: { id: credit.id },
+//             data: {
+//               used: true,
+//               usedOn: new Date(),
+//               leaveId: updatedLeave.id
+//             }
+//           });
+//         }
+//       }
+
+
+
+//       if (updatedLeave.leaveType.name !== "CO") {
+//         const year = updatedLeave.startDate.getFullYear();
+
+//         if (updatedLeave.isHalfDay) {
+//           await prisma.employeeLeaveBalance.updateMany({
+//             where: {
+//               employeeId: updatedLeave.employeeId,
+//               leaveTypeId: updatedLeave.leaveTypeId,
+//               year
+//             },
+//             data: {
+//               halfDayUsed: { increment: 1 }
+//             }
+//           });
+//         } else {
+//           const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
+
+//           await prisma.employeeLeaveBalance.updateMany({
+//             where: {
+//               employeeId: updatedLeave.employeeId,
+//               leaveTypeId: updatedLeave.leaveTypeId,
+//               year
+//             },
+//             data: {
+//               used: { increment: days }
+//             }
+//           });
+//         }
+//       }
+
+
+
+//     }
+
+//     // Notifications (optional)
+//     const employeePhone = formatPhoneNumber(updatedLeave.employee.phone);
+//     const employeeName = `${updatedLeave.employee.firstName} ${updatedLeave.employee.lastName}`;
 //     const start = fmtDate(updatedLeave.startDate);
 //     const end = fmtDate(updatedLeave.endDate);
-//     const statusLabel =
-//       updatedLeave.status === LeaveStatus.APPROVED ? "Approved" :
-//         updatedLeave.status === LeaveStatus.REJECTED ? "Declined" : "Pending";
+//     const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
+//     const statusLabel = updatedLeave.status;
 
-//     const message = `Your leave application for ${days} day(s), from ${start} to ${end}, has been ${statusLabel}. Please contact the concerned person for more details.`;
-
-//     if(statusLabel === "Approved" || statusLabel === "Declined") {
-//       await createNotification(updatedLeave.employeeId, message);
-//     }
-
-//     if (employeePhone && updatedLeave.status === "APPROVED" ||
-//       (updatedLeave.status === "REJECTED" && (role === "HR" || role === "MANAGER"))) {
-//       try {
-//         await sendWhatsAppTemplate({
-//           to: employeePhone,
-//           templateId: LEAVE_STATUS_TEMPLATE_ID,
-//           placeholders: [employeeName, days, start, end, statusLabel],
-//         });
-//       } catch (e: any) {
-//         console.error("Leave status WA send failed:", e?.message || e);
-//       }
-//     }
+//     // await createNotification(
+//     //   updatedLeave.employeeId,
+//     //   `Your leave request from ${start} to ${end} (${days} days) has been ${statusLabel}.`
+//     // );
 
 //     res.json(updatedLeave);
+
 //   } catch (error) {
-//     console.error("Error updating leave status:", error);
-//     res.status(500).json({ error: "Failed to update leave status" });
+//     console.error("Error updating leave:", error);
+//     res.status(500).json({ error: "Failed to update leave" });
 //   }
 // };
-export const updateLeaveStatus = async (req: Request, res: Response) => {
-  try {
-    const { id } = req.params;
-    const { role, status, userId } = req.body;
-    // role = "REPORTING_MANAGER", "HR_MANAGER", "MANAGEMENT"
-
-    if (!["Approved", "Declined"].includes(status)) {
-      return res.status(400).json({ error: "Invalid status" });
-    }
-
-    // Fetch leave with employee and department
-    const leave = await prisma.leaveRequest.findUnique({
-      where: { id: Number(id) },
-      include: {
-        employee: {
-          include: {
-            Department: true
-          }
-        }
-      }
-    });
-
-    if (!leave) return res.status(404).json({ error: "Leave not found" });
-
-    const emp = leave.employee;
-
-    const roleId = emp.roleId;               // 1=HR Manager, 2=Employee, 3=Reporting Manager, 4=Management
-    const deptId = emp.departmentId;         // HR department = 1
-    const isHRDept = deptId === 1;           // HR Employee or HR Manager
-    const hasIncharge = !!emp.inchargeId;
-    const approved = status === "Approved";
-
-    const data: any = {};
-
-
-    /* ================================================================
-   🔰 NEW 0️⃣ INCHARGE LEVEL (ONLY IF EXISTS)
-================================================================ */
-    if (hasIncharge && role === "INCHARGE") {
-      data.inChargeDecision = approved ? "APPROVED" : "REJECTED";
-      data.inChargeDecidedAt = new Date();
-
-      if (!approved) {
-        data.status = "REJECTED";
-        data.declinedBy = userId;
-        data.declinedDate = new Date();
-        data.declineReason = req.body.declineReason || null;
-      }
-
-      const updated = await prisma.leaveRequest.update({
-        where: { id: Number(id) },
-        data
-      });
-
-      return res.json(updated);
-    }
-
-    /* ================================================================
-       🔒 BLOCK OTHERS IF INCHARGE EXISTS & NOT APPROVED YET
-    ================================================================ */
-    if (hasIncharge && leave.inChargeDecision !== "APPROVED") {
-      return res.status(400).json({
-        error: "Incharge approval required first"
-      });
-    }
-
-    // ================================================================
-    //  1️⃣ HR EMPLOYEE (dept = 1, roleId ≠ HR Manager)
-    // ================================================================
-    if (isHRDept && roleId !== 1) {
-      // Only HR Manager can approve at Level 1
-      if (role !== "HR_MANAGER") {
-        return res.status(400).json({ error: "Only HR Manager can approve HR employees" });
-      }
-
-      data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
-      data.hodDecidedAt = new Date();
-
-
-      data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
-      data.hrDecidedAt = new Date();
-      data.status = status === "Approved" ? "APPROVED" : "REJECTED";
-
-      if (status === "Declined") {
-        data.declinedBy = userId;
-        data.declinedDate = new Date();
-        data.declineReason = req.body.declineReason || null;
-      }
-    }
-
-    // ================================================================
-    //  2️⃣ HR MANAGER (roleId = 1)
-    // ================================================================
-    else if (roleId === 1) {
-      if (role !== "MANAGEMENT") {
-        return res.status(400).json({ error: "Only Management can approve HR Manager leave" });
-      }
-
-      data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
-      data.hodDecidedAt = new Date();
-
-      // No HR step for HR Manager
-
-      data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
-      data.hrDecidedAt = new Date();
-      data.status = status === "Approved" ? "APPROVED" : "REJECTED";
-
-      if (status === "Declined") {
-        data.declinedBy = userId;
-        data.declinedDate = new Date();
-        data.declineReason = req.body.declineReason || null;
-      }
-    }
-
-    // ================================================================
-    //  3️⃣ REPORTING MANAGERS (roleId = 3) AND HOD (same logic)
-    //    Level 1 = Management
-    //    Level 2 = HR Manager
-    // ================================================================
-    else if (roleId === 3 || roleId === 5 /* HOD role if exists */) {
-
-      // Level 1: Management
-      if (role === "MANAGEMENT") {
-        data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
-        data.hodDecidedAt = new Date();
-
-        if (status === "Declined") {
-          data.status = "REJECTED";
-          data.declinedBy = userId;
-          data.declinedDate = new Date();
-          data.declineReason = req.body.declineReason || null;
-        }
-      }
-
-      // Level 2: HR Manager
-      else if (role === "HR_MANAGER") {
-        if (leave.hodDecision !== "APPROVED") {
-          return res.status(400).json({ error: "Management approval required first" });
-        }
-
-        data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
-        data.hrDecidedAt = new Date();
-
-        data.status = status === "Approved" ? "APPROVED" : "REJECTED";
-
-        if (status === "Declined") {
-          data.declinedBy = userId;
-          data.declinedDate = new Date();
-          data.declineReason = req.body.declineReason || null;
-        }
-      }
-
-      else {
-        return res.status(400).json({ error: "Invalid approver for Reporting Manager/HOD" });
-      }
-    }
-
-    // ================================================================
-    //  4️⃣ NORMAL EMPLOYEE (roleId = 2)
-    //    Level 1 = Reporting Manager
-    //    Level 2 = HR Manager
-    // ================================================================
-    else if (roleId === 2) {
-      // Level 1: Reporting Manager
-      if (role === "REPORTING_MANAGER") {
-        data.hodDecision = status === "Approved" ? "APPROVED" : "REJECTED";
-        data.hodDecidedAt = new Date();
-
-        if (status === "Declined") {
-          data.status = "REJECTED";
-          data.declinedBy = userId;
-          data.declinedDate = new Date();
-          data.declineReason = req.body.declineReason || null;
-        }
-      }
-
-      // Level 2: HR Manager
-      else if (role === "HR_MANAGER") {
-        if (leave.hodDecision !== "APPROVED") {
-          return res.status(400).json({ error: "Manager approval required first" });
-        }
-
-        data.hrDecision = status === "Approved" ? "APPROVED" : "REJECTED";
-        data.hrDecidedAt = new Date();
-
-        data.status = status === "Approved" ? "APPROVED" : "REJECTED";
-
-        if (status === "Declined") {
-          data.declinedBy = userId;
-          data.declinedDate = new Date();
-          data.declineReason = req.body.declineReason || null;
-        }
-      }
-
-      else {
-        return res.status(400).json({ error: "Unauthorized approver" });
-      }
-    }
-
-    // ================================================================
-    //  SAVE UPDATED LEAVE & UPDATE BALANCES
-    // ================================================================
-    const updatedLeave = await prisma.leaveRequest.update({
-      where: { id: Number(id) },
-      data,
-      include: { employee: true, leaveType: true }
-    });
-
-    console.log("Updated Leave:", updatedLeave);
-
-    // If fully approved → deduct leave balance
-    if (updatedLeave.status === "APPROVED") {
-      // const year = updatedLeave.startDate.getFullYear();
-      // const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
-
-      // await prisma.employeeLeaveBalance.updateMany({
-      //   where: {
-      //     employeeId: updatedLeave.employeeId,
-      //     leaveTypeId: updatedLeave.leaveTypeId,
-      //     year
-      //   },
-      //   data: {
-      //     used: { increment: days }
-      //   }
-      // });
-      if (updatedLeave.leaveType.name === "CO") {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        // Always full day for CO
-        const requiredDays = daysInclusive(
-          updatedLeave.startDate,
-          updatedLeave.endDate
-        );
-
-        // Fetch valid credits (earliest expiry first)
-        const credits = await prisma.compOffCredit.findMany({
-          where: {
-            employeeId: updatedLeave.employeeId,
-            used: false,
-            expiryDate: { gte: today }
-          },
-          orderBy: {
-            expiryDate: "asc"
-          }
-        });
-
-        if (credits.length < requiredDays) {
-          throw new Error("Not enough comp-off credits");
-        }
-
-        const toUse = credits.slice(0, requiredDays);
-
-        for (const credit of toUse) {
-          await prisma.compOffCredit.update({
-            where: { id: credit.id },
-            data: {
-              used: true,
-              usedOn: new Date(),
-              leaveId: updatedLeave.id
-            }
-          });
-        }
-      }
-
-
-
-      if (updatedLeave.leaveType.name !== "CO") {
-        const year = updatedLeave.startDate.getFullYear();
-
-        if (updatedLeave.isHalfDay) {
-          await prisma.employeeLeaveBalance.updateMany({
-            where: {
-              employeeId: updatedLeave.employeeId,
-              leaveTypeId: updatedLeave.leaveTypeId,
-              year
-            },
-            data: {
-              halfDayUsed: { increment: 1 }
-            }
-          });
-        } else {
-          const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
-
-          await prisma.employeeLeaveBalance.updateMany({
-            where: {
-              employeeId: updatedLeave.employeeId,
-              leaveTypeId: updatedLeave.leaveTypeId,
-              year
-            },
-            data: {
-              used: { increment: days }
-            }
-          });
-        }
-      }
-
-    }
-
-    // Notifications (optional)
-    const employeePhone = formatPhoneNumber(updatedLeave.employee.phone);
-    const employeeName = `${updatedLeave.employee.firstName} ${updatedLeave.employee.lastName}`;
-    const start = fmtDate(updatedLeave.startDate);
-    const end = fmtDate(updatedLeave.endDate);
-    const days = daysInclusive(updatedLeave.startDate, updatedLeave.endDate);
-    const statusLabel = updatedLeave.status;
-
-    // await createNotification(
-    //   updatedLeave.employeeId,
-    //   `Your leave request from ${start} to ${end} (${days} days) has been ${statusLabel}.`
-    // );
-
-    res.json(updatedLeave);
-
-  } catch (error) {
-    console.error("Error updating leave:", error);
-    res.status(500).json({ error: "Failed to update leave" });
-  }
-};
 
 
 // export const createLeaveBalances = async (req: Request, res: Response) => {
@@ -831,75 +731,1041 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
 //     res.status(500).json({ error: "Failed to create leave balances" });
 //   }
 // };
+// export const updateLeaveStatus = async (req: Request, res: Response) => {
+//   try {
+//     const leaveId = Number(req.params.id);
+//     const { role, status, userId } = req.body as {
+//       role: "INCHARGE" | "REPORTING_MANAGER" | "HR_MANAGER" | "MANAGEMENT";
+//       status: "Approved" | "Declined";
+//       userId?: number;
+//       declineReason?: string;
+//     };
+
+//     if (!leaveId || !role || !status) {
+//       return res.status(400).json({ error: "id, role, status are required" });
+//     }
+
+//     if (!["Approved", "Declined"].includes(status)) {
+//       return res.status(400).json({ error: "Invalid status" });
+//     }
+
+
+
+//     const approved = status === "Approved";
+
+//     const result = await prisma.$transaction(async (tx: Tx) => {
+//       const leave = await tx.leaveRequest.findUnique({
+//         where: { id: leaveId },
+//         include: {
+//           leaveType: true,
+//           employee: true,
+//         },
+//       });
+
+//       if (!leave) {
+//         return { kind: "ERR" as const, status: 404, body: { error: "Leave not found" } };
+//       }
+
+//       // Already final? (optional hard guard)
+//       if (leave.status === "APPROVED" || leave.status === "REJECTED") {
+//         return { kind: "ERR" as const, status: 400, body: { error: "Leave already finalized" } };
+//       }
+
+//       const emp = leave.employee;
+//       const roleId = emp.roleId; // your mapping
+//       const deptId = emp.departmentId;
+//       const isHRDept = deptId === 1;
+//       const hasIncharge = !!emp.inchargeId;
+
+//       const data: any = {};
+
+//       // --------------------------
+//       // INCHARGE LEVEL (if exists)
+//       // --------------------------
+//       if (hasIncharge && role === "INCHARGE") {
+//         data.inChargeDecision = approved ? "APPROVED" : "REJECTED";
+//         data.inChargeDecidedAt = new Date();
+
+//         if (!approved) {
+//           data.status = "REJECTED";
+//           data.declinedBy = userId ?? null;
+//           data.declinedDate = new Date();
+//           data.declineReason = req.body.declineReason || null;
+//         }
+
+//         const updated = await tx.leaveRequest.update({
+//           where: { id: leaveId },
+//           data,
+//           include: { leaveType: true, employee: true },
+//         });
+
+//         return { kind: "OK" as const, status: 200, body: updated };
+//       }
+
+//       // If incharge exists, block others until incharge approves
+//       if (hasIncharge && leave.inChargeDecision !== "APPROVED") {
+//         return {
+//           kind: "ERR" as const,
+//           status: 400,
+//           body: { error: "Incharge approval required first" },
+//         };
+//       }
+
+//       // ================================================================
+//       // HR EMPLOYEE (dept = 1, roleId ≠ HR Manager)
+//       // Level1: HR_MANAGER only. Direct final.
+//       // ================================================================
+//       if (isHRDept && roleId !== 1) {
+//         if (role !== "HR_MANAGER") {
+//           return {
+//             kind: "ERR" as const,
+//             status: 400,
+//             body: { error: "Only HR Manager can approve HR employees" },
+//           };
+//         }
+
+//         data.hodDecision = approved ? "APPROVED" : "REJECTED";
+//         data.hodDecidedAt = new Date();
+//         data.hrDecision = approved ? "APPROVED" : "REJECTED";
+//         data.hrDecidedAt = new Date();
+//         data.status = approved ? "APPROVED" : "REJECTED";
+
+//         if (!approved) {
+//           data.declinedBy = userId ?? null;
+//           data.declinedDate = new Date();
+//           data.declineReason = req.body.declineReason || null;
+//         }
+//       }
+
+//       // ================================================================
+//       // HR MANAGER (roleId = 1)
+//       // Level1: MANAGEMENT only. Direct final.
+//       // ================================================================
+//       else if (roleId === 1) {
+//         if (role !== "MANAGEMENT") {
+//           return {
+//             kind: "ERR" as const,
+//             status: 400,
+//             body: { error: "Only Management can approve HR Manager leave" },
+//           };
+//         }
+
+//         data.hodDecision = approved ? "APPROVED" : "REJECTED";
+//         data.hodDecidedAt = new Date();
+//         data.hrDecision = approved ? "APPROVED" : "REJECTED";
+//         data.hrDecidedAt = new Date();
+//         data.status = approved ? "APPROVED" : "REJECTED";
+
+//         if (!approved) {
+//           data.declinedBy = userId ?? null;
+//           data.declinedDate = new Date();
+//           data.declineReason = req.body.declineReason || null;
+//         }
+//       }
+
+//       // ================================================================
+//       // REPORTING MANAGER / HOD (roleId = 3 or 5)
+//       // Level1: MANAGEMENT
+//       // Level2: HR_MANAGER
+//       // ================================================================
+//       else if (roleId === 3 || roleId === 5) {
+//         if (role === "MANAGEMENT") {
+//           data.hodDecision = approved ? "APPROVED" : "REJECTED";
+//           data.hodDecidedAt = new Date();
+
+//           if (!approved) {
+//             data.status = "REJECTED";
+//             data.declinedBy = userId ?? null;
+//             data.declinedDate = new Date();
+//             data.declineReason = req.body.declineReason || null;
+//           }
+//         } else if (role === "HR_MANAGER") {
+//           if (leave.hodDecision !== "APPROVED") {
+//             return {
+//               kind: "ERR" as const,
+//               status: 400,
+//               body: { error: "Management approval required first" },
+//             };
+//           }
+
+//           data.hrDecision = approved ? "APPROVED" : "REJECTED";
+//           data.hrDecidedAt = new Date();
+//           data.status = approved ? "APPROVED" : "REJECTED";
+
+//           if (!approved) {
+//             data.declinedBy = userId ?? null;
+//             data.declinedDate = new Date();
+//             data.declineReason = req.body.declineReason || null;
+//           }
+//         } else {
+//           return {
+//             kind: "ERR" as const,
+//             status: 400,
+//             body: { error: "Invalid approver for Reporting Manager/HOD" },
+//           };
+//         }
+//       }
+
+//       // ================================================================
+//       // NORMAL EMPLOYEE (roleId = 2)
+//       // Level1: REPORTING_MANAGER
+//       // Level2: HR_MANAGER
+//       // ================================================================
+//       else if (roleId === 2) {
+//         if (role === "REPORTING_MANAGER") {
+//           data.hodDecision = approved ? "APPROVED" : "REJECTED";
+//           data.hodDecidedAt = new Date();
+
+//           if (!approved) {
+//             data.status = "REJECTED";
+//             data.declinedBy = userId ?? null;
+//             data.declinedDate = new Date();
+//             data.declineReason = req.body.declineReason || null;
+//           }
+//         } else if (role === "HR_MANAGER") {
+//           if (leave.hodDecision !== "APPROVED") {
+//             return {
+//               kind: "ERR" as const,
+//               status: 400,
+//               body: { error: "Manager approval required first" },
+//             };
+//           }
+
+//           data.hrDecision = approved ? "APPROVED" : "REJECTED";
+//           data.hrDecidedAt = new Date();
+//           data.status = approved ? "APPROVED" : "REJECTED";
+
+//           if (!approved) {
+//             data.declinedBy = userId ?? null;
+//             data.declinedDate = new Date();
+//             data.declineReason = req.body.declineReason || null;
+//           }
+//         } else {
+//           return {
+//             kind: "ERR" as const,
+//             status: 400,
+//             body: { error: "Unauthorized approver" },
+//           };
+//         }
+//       } else {
+//         return { kind: "ERR" as const, status: 400, body: { error: "Unsupported employee roleId" } };
+//       }
+
+//       // Save decisions
+//       const updatedLeave = await tx.leaveRequest.update({
+//         where: { id: leaveId },
+//         data,
+//         include: { employee: true, leaveType: true },
+//       });
+
+//       // If not finally approved, stop here
+//       if (updatedLeave.status !== "APPROVED") {
+//         return { kind: "OK" as const, status: 200, body: updatedLeave };
+//       }
+
+//       // ================================================================
+//       // FINAL APPROVAL: CONSUME CO OR DEBIT BALANCE + LEDGER + SUMMARIES
+//       // ================================================================
+//       const startDate = new Date(updatedLeave.startDate);
+//       const endDate = new Date(updatedLeave.endDate);
+//       // const year = startDate.getFullYear();
+//       const year = getFinancialYear(startDate);
+//       const month = startDate.getMonth() + 1;
+
+//       const requestedUnits = updatedLeave.isHalfDay ? 0.5 : daysInclusive(startDate, endDate);
+
+
+//       // ---- CO: consume credits only (leave balance table untouched)
+//       if (updatedLeave.leaveType.name === "CO") {
+//         const today = atStartOfDay(new Date());
+
+//         // CO always full day credits
+//         const requiredDays = Math.ceil(requestedUnits);
+
+//         const credits = await tx.compOffCredit.findMany({
+//           where: {
+//             employeeId: updatedLeave.employeeId,
+//             used: false,
+//             expiryDate: { gte: today },
+//           },
+//           orderBy: { expiryDate: "asc" },
+//         });
+
+//         if (credits.length < requiredDays) {
+//           return {
+//             kind: "ERR" as const,
+//             status: 400,
+//             body: { error: "Not enough comp-off credits" },
+//           };
+//         }
+
+//         const toUse = credits.slice(0, requiredDays);
+//         for (const c of toUse) {
+//           await tx.compOffCredit.update({
+//             where: { id: c.id },
+//             data: { used: true, usedOn: new Date(), leaveId: updatedLeave.id },
+//           });
+//         }
+
+//         // OPTIONAL: if you want a ledger trail for CO also, you can add a separate leaveType for CO balance.
+//         // For now, returning as-is (like your previous behavior).
+//         return { kind: "OK" as const, status: 200, body: { ...updatedLeave, requestedUnits } };
+//       }
+
+//       // ---- Other leaves: validate & debit EmployeeLeaveBalance + ledger + summaries
+//       const bal = await getBalance(updatedLeave.employeeId, updatedLeave.leaveTypeId, year);
+//       if (!bal) {
+//         return {
+//           kind: "ERR" as const,
+//           status: 400,
+//           body: { error: `Leave balance not configured for ${year}` },
+//         };
+//       }
+
+//       const totalUsedBefore = computeTotalUsed(bal);
+//       const remainingBefore = (bal.totalAllowed ?? 0) - totalUsedBefore;
+
+//       // extra guard (in case frontend bypasses)
+//       if (requestedUnits > remainingBefore) {
+//         return {
+//           kind: "ERR" as const,
+//           status: 400,
+//           body: { error: "Insufficient balance at approval time" },
+//         };
+//       }
+
+//       const ledgerBalance = await getLastLedgerBalanceTx(tx, updatedLeave.employeeId, updatedLeave.leaveTypeId, year);
+
+//       if (requestedUnits > ledgerBalance) {
+//         return {
+//           kind: "ERR" as const,
+//           status: 400,
+//           body: { error: "Insufficient balance (ledger)" }
+//         };
+//       }
+
+//       // 1) Update EmployeeLeaveBalance usage
+//       if (updatedLeave.isHalfDay) {
+//         await tx.employeeLeaveBalance.updateMany({
+//           where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year },
+//           data: { halfDayUsed: { increment: 1 } },
+//         });
+//       } else {
+//         await tx.employeeLeaveBalance.updateMany({
+//           where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year },
+//           data: { used: { increment: requestedUnits } },
+//         });
+//       }
+
+//       // 3) Rebuild monthly summaries for ALL touched months (important for cross-month leave)
+//       const touched = getTouchedMonths(startDate, endDate);
+
+//       // ensure previous month summary exists chain-wise:
+//       // rebuild in chronological order
+//       touched.sort((a, b) => (a.year - b.year) || (a.month - b.month));
+
+//       let runningBalance = await getLastLedgerBalanceTx(
+//         tx,
+//         updatedLeave.employeeId,
+//         updatedLeave.leaveTypeId,
+//         year
+//       );
+
+//       for (const m of touched) {
+//         const days = calculateDaysForMonth(startDate, endDate, m.year, m.month);
+
+//         if (days <= 0) continue;
+
+//         runningBalance = runningBalance - days;
+
+//         await insertLedgerTx(tx, {
+//           employeeId: updatedLeave.employeeId,
+//           leaveTypeId: updatedLeave.leaveTypeId,
+//           year: m.year,
+//           month: m.month,
+//           debit: days,
+//           credit: 0,
+//           balanceAfter: runningBalance,
+//           action: "DEBIT",
+//           referenceType: "LEAVE_REQUEST",
+//           referenceId: updatedLeave.id,
+//           performedBy: userId ?? null,
+//           source: "ADMIN",
+//           remarks: `Leave part for ${m.month}/${m.year}`
+//         });
+//       }
+
+//       for (const m of touched) {
+//         await rebuildMonthlySummaryTx(tx, updatedLeave.employeeId, updatedLeave.leaveTypeId, m.year, m.month);
+//       }
+
+//       // 4) Rebuild yearly summary
+//       // (if leave spans years, rebuild both)
+//       const yearsTouched = Array.from(new Set(touched.map((t) => t.year)));
+//       for (const y of yearsTouched) {
+//         await rebuildYearlySummaryTx(tx, updatedLeave.employeeId, updatedLeave.leaveTypeId, y);
+//       }
+
+//       return { kind: "OK" as const, status: 200, body: { ...updatedLeave, requestedUnits } };
+//     });
+
+//     if (result.kind === "ERR") {
+//       return res.status(result.status).json(result.body);
+//     }
+//     return res.status(result.status).json(result.body);
+//   } catch (error) {
+//     console.error("Error updating leave:", error);
+//     return res.status(500).json({ error: "Failed to update leave" });
+//   }
+// };
+export const updateLeaveStatus = async (req: Request, res: Response) => {
+  try {
+    const leaveId = Number(req.params.id);
+    const { role, status, userId, declineReason } = req.body as {
+      role: "INCHARGE" | "REPORTING_MANAGER" | "HR_MANAGER" | "MANAGEMENT";
+      status: "Approved" | "Declined";
+      userId?: number;
+      declineReason?: string;
+    };
+
+    if (!leaveId || !role || !status) {
+      return res.status(400).json({ error: "id, role, status are required" });
+    }
+    if (!["Approved", "Declined"].includes(status)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    const approved = status === "Approved";
+
+    // We will rebuild summaries OUTSIDE transaction to avoid P2028 timeouts.
+    let touchedMonths: Array<{ year: number; month: number }> = [];
+    let yearsTouched: number[] = [];
+    let rebuildEmployeeId: number | null = null;
+    let rebuildLeaveTypeId: number | null = null;
+
+    const result = await prisma.$transaction(
+      async (tx: Tx) => {
+        const leave = await tx.leaveRequest.findUnique({
+          where: { id: leaveId },
+          include: { leaveType: true, employee: true },
+        });
+
+        if (!leave) {
+          return { kind: "ERR" as const, status: 404, body: { error: "Leave not found" } };
+        }
+
+        if (leave.status === "APPROVED" || leave.status === "REJECTED") {
+          return { kind: "ERR" as const, status: 400, body: { error: "Leave already finalized" } };
+        }
+
+        const emp = leave.employee;
+        const roleId = emp.roleId;
+        const deptId = emp.departmentId;
+        const isHRDept = deptId === 1;
+        const hasIncharge = !!emp.inchargeId;
+
+        const data: any = {};
+
+        // --------------------------
+        // INCHARGE LEVEL (if exists)
+        // --------------------------
+        if (hasIncharge && role === "INCHARGE") {
+          data.inChargeDecision = approved ? "APPROVED" : "REJECTED";
+          data.inChargeDecidedAt = new Date();
+
+          if (!approved) {
+            data.status = "REJECTED";
+            data.declinedBy = userId ?? null;
+            data.declinedDate = new Date();
+            data.declineReason = declineReason || null;
+          }
+
+          const updated = await tx.leaveRequest.update({
+            where: { id: leaveId },
+            data,
+            include: { leaveType: true, employee: true },
+          });
+
+          return { kind: "OK" as const, status: 200, body: updated };
+        }
+
+        // Block others until incharge approves
+        if (hasIncharge && leave.inChargeDecision !== "APPROVED") {
+          return {
+            kind: "ERR" as const,
+            status: 400,
+            body: { error: "Incharge approval required first" },
+          };
+        }
+
+        // ================================================================
+        // HR EMPLOYEE (dept=1, roleId != 1) -> HR_MANAGER final
+        // ================================================================
+        if (isHRDept && roleId !== 1) {
+          if (role !== "HR_MANAGER") {
+            return {
+              kind: "ERR" as const,
+              status: 400,
+              body: { error: "Only HR Manager can approve HR employees" },
+            };
+          }
+
+          data.hodDecision = approved ? "APPROVED" : "REJECTED";
+          data.hodDecidedAt = new Date();
+          data.hrDecision = approved ? "APPROVED" : "REJECTED";
+          data.hrDecidedAt = new Date();
+          data.status = approved ? "APPROVED" : "REJECTED";
+
+          if (!approved) {
+            data.declinedBy = userId ?? null;
+            data.declinedDate = new Date();
+            data.declineReason = declineReason || null;
+          }
+        }
+
+        // ================================================================
+        // HR MANAGER (roleId=1) -> MANAGEMENT final
+        // ================================================================
+        else if (roleId === 1) {
+          if (role !== "MANAGEMENT") {
+            return {
+              kind: "ERR" as const,
+              status: 400,
+              body: { error: "Only Management can approve HR Manager leave" },
+            };
+          }
+
+          data.hodDecision = approved ? "APPROVED" : "REJECTED";
+          data.hodDecidedAt = new Date();
+          data.hrDecision = approved ? "APPROVED" : "REJECTED";
+          data.hrDecidedAt = new Date();
+          data.status = approved ? "APPROVED" : "REJECTED";
+
+          if (!approved) {
+            data.declinedBy = userId ?? null;
+            data.declinedDate = new Date();
+            data.declineReason = declineReason || null;
+          }
+        }
+
+        // ================================================================
+        // REPORTING MANAGER / HOD (roleId 3 or 5)
+        //   Level1: MANAGEMENT
+        //   Level2: HR_MANAGER
+        // ================================================================
+        else if (roleId === 3 || roleId === 5) {
+          if (role === "MANAGEMENT") {
+            data.hodDecision = approved ? "APPROVED" : "REJECTED";
+            data.hodDecidedAt = new Date();
+
+            if (!approved) {
+              data.status = "REJECTED";
+              data.declinedBy = userId ?? null;
+              data.declinedDate = new Date();
+              data.declineReason = declineReason || null;
+            }
+          } else if (role === "HR_MANAGER") {
+            if (leave.hodDecision !== "APPROVED") {
+              return {
+                kind: "ERR" as const,
+                status: 400,
+                body: { error: "Management approval required first" },
+              };
+            }
+
+            data.hrDecision = approved ? "APPROVED" : "REJECTED";
+            data.hrDecidedAt = new Date();
+            data.status = approved ? "APPROVED" : "REJECTED";
+
+            if (!approved) {
+              data.declinedBy = userId ?? null;
+              data.declinedDate = new Date();
+              data.declineReason = declineReason || null;
+            }
+          } else {
+            return {
+              kind: "ERR" as const,
+              status: 400,
+              body: { error: "Invalid approver for Reporting Manager/HOD" },
+            };
+          }
+        }
+
+        // ================================================================
+        // NORMAL EMPLOYEE (roleId=2)
+        //   Level1: REPORTING_MANAGER
+        //   Level2: HR_MANAGER
+        // ================================================================
+        else if (roleId === 2) {
+          if (role === "REPORTING_MANAGER") {
+            data.hodDecision = approved ? "APPROVED" : "REJECTED";
+            data.hodDecidedAt = new Date();
+
+            if (!approved) {
+              data.status = "REJECTED";
+              data.declinedBy = userId ?? null;
+              data.declinedDate = new Date();
+              data.declineReason = declineReason || null;
+            }
+          } else if (role === "HR_MANAGER") {
+            if (leave.hodDecision !== "APPROVED") {
+              return {
+                kind: "ERR" as const,
+                status: 400,
+                body: { error: "Manager approval required first" },
+              };
+            }
+
+            data.hrDecision = approved ? "APPROVED" : "REJECTED";
+            data.hrDecidedAt = new Date();
+            data.status = approved ? "APPROVED" : "REJECTED";
+
+            if (!approved) {
+              data.declinedBy = userId ?? null;
+              data.declinedDate = new Date();
+              data.declineReason = declineReason || null;
+            }
+          } else {
+            return {
+              kind: "ERR" as const,
+              status: 400,
+              body: { error: "Unauthorized approver" },
+            };
+          }
+        } else {
+          return {
+            kind: "ERR" as const,
+            status: 400,
+            body: { error: "Unsupported employee roleId" },
+          };
+        }
+
+        // Save decisions
+        const updatedLeave = await tx.leaveRequest.update({
+          where: { id: leaveId },
+          data,
+          include: { employee: true, leaveType: true },
+        });
+
+        // If not finally approved, stop here (NO ledger work)
+        if (updatedLeave.status !== "APPROVED") {
+          return { kind: "OK" as const, status: 200, body: updatedLeave };
+        }
+
+        // ================================================================
+        // FINAL APPROVAL: CONSUME CO OR DEBIT BALANCE + LEDGER
+        // ================================================================
+        const startDate = new Date(updatedLeave.startDate);
+        const endDate = new Date(updatedLeave.endDate);
+
+        const year = getFinancialYear(startDate);
+        const requestedUnits = updatedLeave.isHalfDay ? 0.5 : daysInclusive(startDate, endDate);
+
+        // ---- CO: consume credits only (leave balance untouched)
+        if (updatedLeave.leaveType.name === "CO") {
+          const today = atStartOfDay(new Date());
+          const requiredDays = Math.ceil(requestedUnits);
+
+          const credits = await tx.compOffCredit.findMany({
+            where: {
+              employeeId: updatedLeave.employeeId,
+              used: false,
+              expiryDate: { gte: today },
+            },
+            orderBy: { expiryDate: "asc" },
+          });
+
+          if (credits.length < requiredDays) {
+            return {
+              kind: "ERR" as const,
+              status: 400,
+              body: { error: "Not enough comp-off credits" },
+            };
+          }
+
+          for (const c of credits.slice(0, requiredDays)) {
+            await tx.compOffCredit.update({
+              where: { id: c.id },
+              data: { used: true, usedOn: new Date(), leaveId: updatedLeave.id },
+            });
+          }
+
+          return { kind: "OK" as const, status: 200, body: { ...updatedLeave, requestedUnits } };
+        }
+
+        // ---- Non-CO: validate balance
+        const bal = await tx.employeeLeaveBalance.findFirst({
+          where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year, category: "LEAVE" },
+        });
+
+        if (!bal) {
+          return {
+            kind: "ERR" as const,
+            status: 400,
+            body: { error: `Leave balance not configured for ${year}` },
+          };
+        }
+
+        const totalUsedBefore = computeTotalUsed(bal);
+        const remainingBefore = (bal.totalAllowed ?? 0) - totalUsedBefore;
+
+        if (requestedUnits > remainingBefore) {
+          return {
+            kind: "ERR" as const,
+            status: 400,
+            body: { error: "Insufficient balance at approval time" },
+          };
+        }
+
+        // ledger balance check
+        const ledgerBalance = await getLastLedgerBalanceTx(tx, updatedLeave.employeeId, updatedLeave.leaveTypeId, year);
+        if (requestedUnits > ledgerBalance) {
+          return { kind: "ERR" as const, status: 400, body: { error: "Insufficient balance (ledger)" } };
+        }
+
+        // Update EmployeeLeaveBalance usage
+        if (updatedLeave.isHalfDay) {
+          await tx.employeeLeaveBalance.updateMany({
+            where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year },
+            data: { halfDayUsed: { increment: 1 } },
+          });
+        } else {
+          await tx.employeeLeaveBalance.updateMany({
+            where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year },
+            data: { used: { increment: requestedUnits } },
+          });
+        }
+
+        // Create ledger DEBITs per touched month (FAST enough; summary rebuild moved out)
+        const touched = getTouchedMonths(startDate, endDate);
+        touched.sort((a, b) => a.year - b.year || a.month - b.month);
+
+        // IMPORTANT: start running balance from current ledger AFTER the debit inserts base
+        let runningBalance = ledgerBalance;
+
+        for (const m of touched) {
+          const days = calculateDaysForMonth(startDate, endDate, m.year, m.month);
+          if (days <= 0) continue;
+
+          runningBalance -= days;
+
+          await insertLedgerTx(tx, {
+            employeeId: updatedLeave.employeeId,
+            leaveTypeId: updatedLeave.leaveTypeId,
+            year: m.year,
+            month: m.month,
+            debit: days,
+            credit: 0,
+            balanceAfter: runningBalance,
+            action: "DEBIT",
+            referenceType: "LEAVE_REQUEST",
+            referenceId: updatedLeave.id,
+            performedBy: userId ?? null,
+            source: "ADMIN",
+            remarks: `Leave part for ${m.month}/${m.year}`,
+          });
+        }
+
+        // Pass rebuild info OUTSIDE the transaction
+        return {
+          kind: "OK" as const,
+          status: 200,
+          body: { ...updatedLeave, requestedUnits, __touched: touched },
+        };
+      },
+      {
+        // optional, but helps (still keep rebuild OUTSIDE)
+        timeout: 15000,
+      }
+    );
+
+    if (result.kind === "ERR") {
+      return res.status(result.status).json(result.body);
+    }
+
+    // =========================
+    // ✅ OUTSIDE TRANSACTION: REBUILD SUMMARIES (NO tx)
+    // =========================
+    const body: any = result.body;
+
+    if (body?.status === "APPROVED" && body?.leaveType?.name !== "CO" && Array.isArray(body.__touched)) {
+      touchedMonths = body.__touched;
+      yearsTouched = Array.from(new Set(touchedMonths.map((t: any) => t.year)));
+
+      rebuildEmployeeId = body.employeeId;
+      rebuildLeaveTypeId = body.leaveTypeId;
+
+      // Rebuild in order (month chain)
+      touchedMonths.sort((a, b) => a.year - b.year || a.month - b.month);
+      if (
+        rebuildEmployeeId !== null &&
+        rebuildLeaveTypeId !== null
+      ) {
+        for (const m of touchedMonths) {
+          await rebuildMonthlySummaryTx(
+            prisma,
+            rebuildEmployeeId,
+            rebuildLeaveTypeId,
+            m.year,
+            m.month
+          );
+        }
+
+        for (const y of yearsTouched) {
+          await rebuildYearlySummaryTx(
+            prisma,
+            rebuildEmployeeId,
+            rebuildLeaveTypeId,
+            y
+          );
+        }
+      }
+    }
+
+    // cleanup helper key
+    if (body?.__touched) delete body.__touched;
+
+    return res.status(result.status).json(body);
+  } catch (error) {
+    console.error("Error updating leave:", error);
+    return res.status(500).json({ error: "Failed to update leave" });
+  }
+};
+
+// export const createLeaveBalances = async (req: Request, res: Response) => {
+//   try {
+//     const { employeeId, year, leaves = [], permissions = [] } = req.body;
+
+//     if (!employeeId || !year) {
+//       return res.status(400).json({ error: "employeeId and year are required" });
+//     }
+
+//     // 🔹 LEAVES
+//     for (const l of leaves) {
+//       await prisma.employeeLeaveBalance.upsert({
+//         where: {
+//           employeeId_leaveTypeId_year: {
+//             employeeId,
+//             leaveTypeId: l.leaveTypeId,
+//             year
+//           }
+//         },
+//         update: {
+//           totalAllowed: l.totalAllowed,
+//           used: l.used ?? 0,
+//           halfDayUsed: l.halfDayUsed ?? 0
+//         },
+//         create: {
+//           employeeId,
+//           leaveTypeId: l.leaveTypeId,
+//           permissionType: null,
+//           category: "LEAVE",
+//           year,
+//           totalAllowed: l.totalAllowed,
+//           used: l.used ?? 0,
+//           halfDayUsed: l.halfDayUsed ?? 0
+//         }
+//       });
+//     }
+
+//     // 🔹 PERMISSIONS
+//     for (const p of permissions) {
+//       await prisma.employeeLeaveBalance.upsert({
+//         where: {
+//           employeeId_permissionType_year: {
+//             employeeId,
+//             permissionType: p.permissionType,
+//             year
+//           }
+//         },
+//         update: {
+//           totalAllowed: p.totalAllowed,
+//           used: p.used ?? 0
+//         },
+//         create: {
+//           employeeId,
+//           leaveTypeId: null,
+//           permissionType: p.permissionType,
+//           category: "PERMISSION",
+//           year,
+//           totalAllowed: p.totalAllowed,
+//           used: p.used ?? 0
+//         }
+//       });
+//     }
+
+//     res.json({ message: "Leave balances saved successfully" });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: "Failed to create leave balances" });
+//   }
+// };
 export const createLeaveBalances = async (req: Request, res: Response) => {
   try {
-    const { employeeId, year, leaves = [], permissions = [] } = req.body;
+    const { employeeId, year, leaves = [] } = req.body;
 
     if (!employeeId || !year) {
       return res.status(400).json({ error: "employeeId and year are required" });
     }
 
-    // 🔹 LEAVES
+    const affectedLeaveTypes = new Set<number>();
+    const month = new Date().getMonth() + 1;
+
+    // =========================
+    // 🔁 PROCESS LEAVES (SMALL TX PER ITEM)
+    // =========================
     for (const l of leaves) {
-      await prisma.employeeLeaveBalance.upsert({
-        where: {
-          employeeId_leaveTypeId_year: {
+
+      await prisma.$transaction(async (tx) => {
+
+        const existing = await tx.employeeLeaveBalance.findFirst({
+          where: {
             employeeId,
             leaveTypeId: l.leaveTypeId,
             year
           }
-        },
-        update: {
-          totalAllowed: l.totalAllowed,
-          used: l.used ?? 0,
-          halfDayUsed: l.halfDayUsed ?? 0
-        },
-        create: {
-          employeeId,
-          leaveTypeId: l.leaveTypeId,
-          permissionType: null,
-          category: "LEAVE",
-          year,
-          totalAllowed: l.totalAllowed,
-          used: l.used ?? 0,
-          halfDayUsed: l.halfDayUsed ?? 0
-        }
-      });
-    }
+        });
 
-    // 🔹 PERMISSIONS
-    for (const p of permissions) {
-      await prisma.employeeLeaveBalance.upsert({
-        where: {
-          employeeId_permissionType_year: {
+        // =========================
+        // 🔢 CALCULATIONS
+        // =========================
+        const prevTotal = existing?.totalAllowed ?? 0;
+        const newTotal = Number(l.totalAllowed ?? 0);
+        const totalDelta = newTotal - prevTotal;
+
+        const prevUsed = (existing?.used ?? 0) + ((existing?.halfDayUsed ?? 0) * 0.5);
+        const newUsed = (Number(l.used ?? 0)) + ((Number(l.halfDayUsed ?? 0)) * 0.5);
+        const usedDelta = newUsed - prevUsed;
+
+        // =========================
+        // 💾 UPSERT BALANCE
+        // =========================
+        await tx.employeeLeaveBalance.upsert({
+          where: {
+            employeeId_leaveTypeId_year: {
+              employeeId,
+              leaveTypeId: l.leaveTypeId,
+              year
+            }
+          },
+          update: {
+            totalAllowed: newTotal,
+            used: Number(l.used ?? 0),
+            halfDayUsed: Number(l.halfDayUsed ?? 0)
+          },
+          create: {
             employeeId,
-            permissionType: p.permissionType,
-            year
+            leaveTypeId: l.leaveTypeId,
+            permissionType: null,
+            category: "LEAVE",
+            year,
+            totalAllowed: newTotal,
+            used: Number(l.used ?? 0),
+            halfDayUsed: Number(l.halfDayUsed ?? 0)
           }
-        },
-        update: {
-          totalAllowed: p.totalAllowed,
-          used: p.used ?? 0
-        },
-        create: {
+        });
+
+        // =========================
+        // 📊 LEDGER
+        // =========================
+        let prevLedgerBalance = await getLastLedgerBalanceTx(
+          tx,
           employeeId,
-          leaveTypeId: null,
-          permissionType: p.permissionType,
-          category: "PERMISSION",
-          year,
-          totalAllowed: p.totalAllowed,
-          used: p.used ?? 0
+          l.leaveTypeId,
+          year
+        );
+
+        let newLedgerBalance = prevLedgerBalance;
+
+        // 🔹 TOTAL CHANGE
+        if (totalDelta !== 0) {
+          newLedgerBalance += totalDelta;
+
+          await insertLedgerTx(tx, {
+            employeeId,
+            leaveTypeId: l.leaveTypeId,
+            year,
+            month,
+            credit: totalDelta > 0 ? totalDelta : 0,
+            debit: totalDelta < 0 ? Math.abs(totalDelta) : 0,
+            balanceAfter: newLedgerBalance,
+            action: "ADJUSTMENT",
+            referenceType: "MANUAL",
+            source: "ADMIN",
+            remarks: "Total allocation updated"
+          });
         }
-      });
+
+        // 🔹 USED CHANGE (🔥 IMPORTANT)
+        if (usedDelta !== 0) {
+          newLedgerBalance -= usedDelta;
+
+          await insertLedgerTx(tx, {
+            employeeId,
+            leaveTypeId: l.leaveTypeId,
+            year,
+            month,
+            credit: usedDelta < 0 ? Math.abs(usedDelta) : 0,
+            debit: usedDelta > 0 ? usedDelta : 0,
+            balanceAfter: newLedgerBalance,
+            action: "DEBIT",
+            referenceType: "MANUAL",
+            source: "ADMIN",
+            remarks: "Used updated manually"
+          });
+        }
+
+        // ✅ TRACK FOR SUMMARY REBUILD
+        if (totalDelta !== 0 || usedDelta !== 0) {
+          affectedLeaveTypes.add(l.leaveTypeId);
+        }
+
+      }, { timeout: 10000 }); // ⬅️ avoid timeout issues
     }
 
-    res.json({ message: "Leave balances saved successfully" });
+    // =========================
+    // 🔹 PERMISSIONS (NO LEDGER)
+    // =========================
+    // for (const p of permissions) {
+    //   await prisma.employeeLeaveBalance.upsert({
+    //     where: {
+    //       employeeId_permissionType_year: {
+    //         employeeId,
+    //         permissionType: p.permissionType,
+    //         year
+    //       }
+    //     },
+    //     update: {
+    //       totalAllowed: Number(p.totalAllowed ?? 0),
+    //       used: Number(p.used ?? 0)
+    //     },
+    //     create: {
+    //       employeeId,
+    //       leaveTypeId: null,
+    //       permissionType: p.permissionType,
+    //       category: "PERMISSION",
+    //       year,
+    //       totalAllowed: Number(p.totalAllowed ?? 0),
+    //       used: Number(p.used ?? 0)
+    //     }
+    //   });
+    // }
+
+    // =========================
+    // 🔁 REBUILD SUMMARIES (OUTSIDE TX)
+    // =========================
+    for (const leaveTypeId of affectedLeaveTypes) {
+      await rebuildMonthlySummaryTx(prisma, employeeId, leaveTypeId, year, month);
+      await rebuildYearlySummaryTx(prisma, employeeId, leaveTypeId, year);
+    }
+
+    return res.json({ message: "Leave balances updated successfully" });
+
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to create leave balances" });
+    return res.status(500).json({ error: "Failed to update leave balances" });
   }
 };
-
 
 const MS_PER_DAY = 86400000;
 
@@ -1185,7 +2051,12 @@ export const getBlockedDates = async (req: Request, res: Response) => {
 export const getLeaveBalance = async (req: Request, res: Response) => {
   try {
     const employeeId = Number(req.params.employeeId);
-    const year = Number(req.query.year) || new Date().getFullYear();
+    // const year = Number(req.query.year) || getFinancialYear(new Date());
+    const yearParam = Number(req.query.year);
+
+    const year = Number.isFinite(yearParam)
+      ? yearParam
+      : getFinancialYear(new Date());
 
     // 1️⃣ Fetch ALL leave types (master)
     const leaveTypes = await prisma.leaveType.findMany({
@@ -1381,7 +2252,12 @@ export const updateLeaveType = async (req: Request, res: Response) => {
 // GET /leaves/casual/monthly-usage
 export const getMonthlyCasualUsage = async (req: Request, res: Response) => {
   const employeeId = Number(req.query.employeeId);
-  const year = Number(req.query.year);
+  // const year = Number(req.query.year);
+  const yearParam = Number(req.query.year);
+
+  const year = Number.isFinite(yearParam)
+    ? yearParam
+    : getFinancialYear(new Date());
   const month = Number(req.query.month);
 
   const leaveType = await prisma.leaveType.findFirst({
@@ -1406,8 +2282,10 @@ async function getUsedCasualLeaveDays(
   year: number,
   month: number
 ) {
-  const monthStart = new Date(year, month, 1);
-  const monthEnd = new Date(year, month + 1, 0, 23, 59, 59);
+  const calYear = getCalendarYear(year, month);
+
+  const monthStart = new Date(calYear, month - 1, 1);
+  const monthEnd = new Date(calYear, month, 0, 23, 59, 59);
 
   const leaves = await prisma.leaveRequest.findMany({
     where: {
@@ -1446,4 +2324,1118 @@ export const getCompOffCredits = async (req: Request, res: Response) => {
   });
 
   res.json(credits);
+};
+
+
+async function getActivePolicy(leaveTypeId: number, onDate: Date) {
+  // Your schema has: effectiveFrom/effectiveTo nullable, isActive, financialYearStart etc.
+  // Basic: pick latest active policy effective for the date.
+  const policies = await prisma.leavePolicy.findMany({
+    where: {
+      leaveTypeId,
+      isActive: true,
+      OR: [
+        { effectiveFrom: null },
+        { effectiveFrom: { lte: onDate } }
+      ],
+      AND: [
+        {
+          OR: [
+            { effectiveTo: null },
+            { effectiveTo: { gte: onDate } }
+          ]
+        }
+      ]
+    },
+    orderBy: { createdAt: "desc" },
+    take: 1
+  });
+
+  return policies[0] ?? null;
+}
+
+
+
+async function insertLedgerRow(params: {
+  employeeId: number;
+  leaveTypeId: number;
+  year: number;
+  month?: number | null;
+  credit?: number;
+  debit?: number;
+  balanceAfter: number;
+  action: "CREDIT" | "DEBIT" | "LAPSE" | "ENCASHMENT" | "ADJUSTMENT" | "OPENING_BALANCE";
+  referenceType: "ACCRUAL" | "LEAVE_REQUEST" | "LAPSE" | "ENCASHMENT" | "MANUAL";
+  referenceId?: number | null;
+  performedBy?: number | null;
+  source?: "SYSTEM" | "ADMIN" | "EMPLOYEE" | "IMPORT" | null;
+  remarks?: string | null;
+  metadata?: any;
+}) {
+  const {
+    employeeId, leaveTypeId, year, month,
+    credit = 0, debit = 0, balanceAfter,
+    action, referenceType, referenceId = null,
+    performedBy = null, source = null, remarks = null, metadata = null
+  } = params;
+
+  await prisma.leaveLedger.create({
+    data: {
+      employeeId,
+      leaveTypeId,
+      year,
+      month: month ?? null,
+      transactionDate: new Date(),
+      referenceType,
+      referenceId,
+      credit,
+      debit,
+      balanceAfter,
+      action,
+      performedBy,
+      source,
+      remarks,
+      metadata
+    }
+  });
+}
+function computeTotalUsed(balance: { used: number; halfDayUsed: number | null }) {
+  const usedFull = balance.used ?? 0;
+  const halfCount = balance.halfDayUsed ?? 0; // count of half-days
+  return usedFull + halfCount * 0.5;
+}
+
+async function getBalance(employeeId: number, leaveTypeId: number, year: number) {
+  return prisma.employeeLeaveBalance.findFirst({
+    where: { employeeId, leaveTypeId, year, category: "LEAVE" }
+  });
+}
+
+async function getLastLedgerBalance(employeeId: number, leaveTypeId: number) {
+  const last = await prisma.leaveLedger.findFirst({
+    where: { employeeId, leaveTypeId },
+    orderBy: { id: "desc" }, // id autoinc is safe ordering
+    select: { balanceAfter: true },
+  });
+  return last?.balanceAfter ?? 0;
+}
+
+/**
+ * Rebuild 1 month summary from ledger + previous month closing.
+ * IMPORTANT: Opening comes from previous summary closing (or 0 if none).
+ */
+async function rebuildMonthlySummaryTx(
+  tx: Tx,
+  employeeId: number,
+  leaveTypeId: number,
+  year: number,
+  month: number
+) {
+  // previous month
+  const { year: prevYear, month: prevMonth } = getPrevMonthFY(year, month);
+
+  const prev = await tx.leaveMonthlySummary.findUnique({
+    where: {
+      employeeId_leaveTypeId_year_month: {
+        employeeId,
+        leaveTypeId,
+        year: prevYear,
+        month: prevMonth,
+      },
+    },
+  });
+
+  const opening = prev?.closing ?? 0;
+
+  const entries = await tx.leaveLedger.findMany({
+    where: { employeeId, leaveTypeId, year, month },
+    select: { credit: true, debit: true, action: true },
+  });
+
+  let credited = 0;
+  let used = 0;
+  let lapsed = 0;
+
+  for (const e of entries) {
+    credited += Number(e.credit ?? 0);
+
+    if (e.action === "LAPSE") {
+      lapsed += Number(e.debit ?? 0);
+    } else {
+      used += Number(e.debit ?? 0);
+    }
+  }
+
+  const closing = opening + credited - used - lapsed; // (lapsed already part of debit/used)
+
+  await tx.leaveMonthlySummary.upsert({
+    where: {
+      employeeId_leaveTypeId_year_month: {
+        employeeId,
+        leaveTypeId,
+        year,
+        month,
+      },
+    },
+    update: { opening, credited, used, lapsed, closing },
+    create: { employeeId, leaveTypeId, year, month, opening, credited, used, lapsed, closing },
+  });
+
+  return { opening, credited, used, lapsed, closing };
+}
+async function rebuildYearlySummaryTx(
+  tx: Tx,
+  employeeId: number,
+  leaveTypeId: number,
+  year: number
+) {
+  const months = await tx.leaveMonthlySummary.findMany({
+    where: { employeeId, leaveTypeId, year },
+    orderBy: { month: "asc" },
+  });
+
+  // const opening = months.find((m) => m.month === 1)?.opening ?? 0;
+  const opening = months.find((m) => m.month === 4)?.opening ?? 0;
+  const credited = months.reduce((s, m) => s + Number(m.credited ?? 0), 0);
+  const used = months.reduce((s, m) => s + Number(m.used ?? 0), 0);
+  const lapsed = months.reduce((s, m) => s + Number(m.lapsed ?? 0), 0);
+  const closing = opening + credited - used - lapsed; // (lapsed already part of used)
+
+  await tx.leaveYearlySummary.upsert({
+    where: {
+      employeeId_leaveTypeId_year: { employeeId, leaveTypeId, year },
+    },
+    update: { opening, credited, used, lapsed, closing },
+    create: { employeeId, leaveTypeId, year, opening, credited, used, lapsed, closing },
+  });
+
+  return { opening, credited, used, lapsed, closing };
+}
+/**
+ * If a leave spans multiple months, you should rebuild all touched months.
+ */
+function getTouchedMonths(startDate: Date, endDate: Date) {
+  const s = atStartOfDay(startDate);
+  const e = atStartOfDay(endDate);
+
+  const out: Array<{ year: number; month: number }> = [];
+  const cursor = new Date(s);
+
+  cursor.setDate(1);
+  while (cursor <= e) {
+    out.push({ year: getFinancialYear(cursor), month: cursor.getMonth() + 1 });
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+
+  // de-dupe (safe)
+  const keySet = new Set<string>();
+  return out.filter((x) => {
+    const k = `${x.year}-${x.month}`;
+    if (keySet.has(k)) return false;
+    keySet.add(k);
+    return true;
+  });
+}
+
+async function insertLedgerTx(
+  tx: Tx,
+  params: {
+    employeeId: number;
+    leaveTypeId: number;
+    year: number;
+    month?: number | null;
+    credit?: number;
+    debit?: number;
+    balanceAfter: number;
+    action: "CREDIT" | "DEBIT" | "LAPSE" | "ENCASHMENT" | "ADJUSTMENT" | "OPENING_BALANCE";
+    referenceType: "ACCRUAL" | "LEAVE_REQUEST" | "LAPSE" | "ENCASHMENT" | "MANUAL";
+    referenceId?: number | null;
+    performedBy?: number | null;
+    source?: "SYSTEM" | "ADMIN" | "EMPLOYEE" | "IMPORT" | null;
+    remarks?: string | null;
+    metadata?: any;
+  }
+) {
+  const {
+    employeeId,
+    leaveTypeId,
+    year,
+    month,
+    credit = 0,
+    debit = 0,
+    balanceAfter,
+    action,
+    referenceType,
+    referenceId = null,
+    performedBy = null,
+    source = null,
+    remarks = null,
+    metadata = null,
+  } = params;
+
+  return tx.leaveLedger.create({
+    data: {
+      employeeId,
+      leaveTypeId,
+      year,
+      month: month ?? null,
+      transactionDate: new Date(),
+      referenceType,
+      referenceId,
+      credit,
+      debit,
+      balanceAfter,
+      action,
+      performedBy,
+      source,
+      remarks,
+      metadata,
+    },
+  });
+}
+export const initELAccrualCron = () => {
+  cron.schedule("10 2 * * *", async () => {
+    const today = atStartOfDay(new Date());
+    const year = getFinancialYear(today);
+    const month = today.getMonth() + 1;
+    if (today.getDate() !== 1) return;
+
+    try {
+      // 1️⃣ EL Leave Type
+      const el = await prisma.leaveType.findFirst({
+        where: { name: "EL" },
+        select: { id: true }
+      });
+
+      if (!el) return;
+
+      // 2️⃣ Policy
+      const policy = await getActivePolicy(el.id, today);
+      if (!policy) return;
+
+      if (policy.accrualType !== "MONTHLY") return;
+
+      const monthlyCredit = Number(policy.accrualRate ?? 0);
+      if (!monthlyCredit) return;
+
+      const workingDaysRequired = policy.workingDaysRequired ?? 0;
+      const maxBalance = policy.maxBalance ?? null;
+
+      // 3️⃣ Employees
+      const employees = await prisma.employee.findMany({
+        where: { employmentStatus: "ACTIVE" },
+        select: { id: true }
+      });
+
+      // 4️⃣ Loop employees
+      for (const emp of employees) {
+        await prisma.$transaction(async (tx) => {
+          // ❗ Skip if already credited
+          const exists = await tx.leaveAccrual.findUnique({
+            where: {
+              employeeId_leaveTypeId_year_month: {
+                employeeId: emp.id,
+                leaveTypeId: el.id,
+                year,
+                month
+              }
+            }
+          });
+
+          if (exists) return;
+
+          // 4.1️⃣ Get shift config ONCE
+          const shift = await tx.shiftApproval.findFirst({
+            where: {
+              employeeId: emp.id,
+              status: "APPROVED",
+              month,
+              year
+            },
+            select: { weekOffConfig: true }
+          });
+
+          const weekOffConfig = shift?.weekOffConfig ?? null;
+
+          // 4.2️⃣ Calculate worked days
+          const workedDays = await getWorkedDaysOptimized(
+            emp.id,
+            year,
+            month,
+            weekOffConfig
+          );
+
+          // ❗ POLICY CHECK
+          if (workingDaysRequired && workedDays < workingDaysRequired) {
+            console.log(`❌ Skipping EL for emp ${emp.id}, worked: ${workedDays}`);
+            return;
+          }
+
+          // 4.3️⃣ Balance row
+          const bal = await tx.employeeLeaveBalance.upsert({
+            where: {
+              employeeId_leaveTypeId_year: {
+                employeeId: emp.id,
+                leaveTypeId: el.id,
+                year
+              }
+            },
+            update: {},
+            create: {
+              employeeId: emp.id,
+              leaveTypeId: el.id,
+              category: "LEAVE",
+              year,
+              totalAllowed: 0,
+              used: 0,
+              halfDayUsed: 0
+            }
+          });
+
+          // 4.4️⃣ Ledger balance
+          const prevBalance = await getLastLedgerBalanceTx(tx, emp.id, el.id, year);
+
+          let credit = monthlyCredit;
+
+          if (maxBalance != null) {
+            const remaining = maxBalance - prevBalance;
+            if (remaining <= 0) return;
+
+            credit = Math.min(credit, remaining);
+          }
+
+          if (credit <= 0) return;
+
+          // 4.5️⃣ Accrual
+          await tx.leaveAccrual.create({
+            data: {
+              employeeId: emp.id,
+              leaveTypeId: el.id,
+              year,
+              month,
+              accrualType: "MONTHLY",
+              daysCredited: credit
+            }
+          });
+
+          // 4.6️⃣ Balance update
+          await tx.employeeLeaveBalance.update({
+            where: { id: bal.id },
+            data: {
+              totalAllowed: { increment: credit }
+            }
+          });
+
+          // 4.7️⃣ Ledger
+          const newBalance = prevBalance + credit;
+
+          await insertLedgerTx(tx, {
+            employeeId: emp.id,
+            leaveTypeId: el.id,
+            year,
+            month,
+            credit,
+            debit: 0,
+            balanceAfter: newBalance,
+            action: "CREDIT",
+            referenceType: "ACCRUAL",
+            source: "SYSTEM",
+            remarks: `EL credited (worked ${workedDays} days)`
+          });
+
+          // 4.8️⃣ Summaries
+          await rebuildMonthlySummaryTx(tx, emp.id, el.id, year, month);
+          await rebuildYearlySummaryTx(tx, emp.id, el.id, year);
+        });
+      }
+
+      console.log(`✅ EL accrual done for ${year}-${month}`);
+    } catch (e) {
+      console.error("EL CRON ERROR:", e);
+    }
+  });
+};
+async function getLastLedgerBalanceTx(
+  tx: Tx,
+  employeeId: number,
+  leaveTypeId: number,
+  year: number
+) {
+  const last = await tx.leaveLedger.findFirst({
+    where: { employeeId, leaveTypeId, year },
+    orderBy: { id: "desc" },
+    select: { balanceAfter: true },
+  });
+  return last?.balanceAfter ?? 0;
+}
+function calculateDaysForMonth(
+  start: Date,
+  end: Date,
+  year: number,
+  month: number
+) {
+  const calYear = getCalendarYear(year, month);
+
+  const monthStart = new Date(calYear, month - 1, 1);
+  const monthEnd = new Date(calYear, month, 0);
+
+
+  const from = start > monthStart ? start : monthStart;
+  const to = end < monthEnd ? end : monthEnd;
+
+  return daysInclusive(from, to);
+}
+
+
+function getWeekOfMonth(date: Date) {
+  const firstDay = new Date(date.getFullYear(), date.getMonth(), 1);
+  const dayOfMonth = date.getDate();
+  const adjusted = dayOfMonth + firstDay.getDay();
+  return Math.ceil(adjusted / 7);
+}
+
+function isWeeklyOffFromConfig(config: any, date: Date) {
+  const day = date.getDay();
+
+  if (!config) {
+    return day === 0; // Sunday fallback
+  }
+
+  // Fixed weekly off
+  if (config.fixedDays && Array.isArray(config.fixedDays)) {
+    return config.fixedDays.includes(day);
+  }
+
+  // Rotational
+  if (config.weeks && Array.isArray(config.weeks)) {
+    const weekIndex = getWeekOfMonth(date) - 1;
+    const offDay = config.weeks[weekIndex];
+
+    if (offDay !== undefined) {
+      return day === offDay;
+    }
+  }
+
+  return day === 0;
+}
+async function getWorkedDaysOptimized(
+  employeeId: number,
+  year: number,
+  month: number,
+  weekOffConfig: any
+) {
+  const calYear = getCalendarYear(year, month);
+
+  const start = new Date(calYear, month - 1, 1);
+  const end = new Date(calYear, month, 0, 23, 59, 59);
+
+  const workedDates = new Set<string>();
+
+  // 1️⃣ Attendance
+  const attendance = await prisma.attendance.findMany({
+    where: {
+      employeeId,
+      date: { gte: start, lte: end },
+      status: "PRESENT"
+    },
+    select: { date: true }
+  });
+
+  attendance.forEach(a => {
+    workedDates.add(atStartOfDay(a.date).toISOString());
+  });
+
+  // 2️⃣ Approved Leave
+  const leaves = await prisma.leaveRequest.findMany({
+    where: {
+      employeeId,
+      status: "APPROVED",
+      startDate: { lte: end },
+      endDate: { gte: start }
+    }
+  });
+
+  for (const l of leaves) {
+    const from = new Date(Math.max(l.startDate.getTime(), start.getTime()));
+    const to = new Date(Math.min(l.endDate.getTime(), end.getTime()));
+
+    for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
+      workedDates.add(atStartOfDay(d).toISOString());
+    }
+  }
+
+  // 3️⃣ Remove weekly offs (NO DB CALL HERE 🔥)
+  let finalCount = 0;
+
+  for (const dateStr of workedDates) {
+    const d = new Date(dateStr);
+
+    if (!isWeeklyOffFromConfig(weekOffConfig, d)) {
+      finalCount++;
+    }
+  }
+
+  return finalCount;
+}
+
+export const initNewJoineeLeaveAllocationCron = () => {
+  cron.schedule("0 2 * * *", async () => {
+    console.log("Running New Joinee Leave Allocation Cron...");
+
+    const today = new Date();
+
+    const employees = await prisma.employee.findMany({
+      where: {
+        employmentStatus: "ACTIVE",
+        probationEndDate: {
+          lte: today
+        }
+      }
+    });
+
+    for (const emp of employees) {
+      if (!emp.probationEndDate) continue;
+
+      const eligibleDate = new Date(emp.probationEndDate as Date);
+      // const eligibleDate = new Date(emp.probationEndDate);
+
+      // 👉 Only trigger ONCE
+      if (!isSameDate(eligibleDate, today)) continue;
+
+      const fy = getFinancialYearBounds(eligibleDate);
+
+      // ✅ APPLY HALF-MONTH RULE
+      let effectiveStart = new Date(eligibleDate);
+
+      if (eligibleDate.getDate() > 15) {
+        // skip current month → move to next month 1st
+        effectiveStart = new Date(
+          eligibleDate.getFullYear(),
+          eligibleDate.getMonth() + 1,
+          1
+        );
+      }
+
+      const months = getRemainingMonths(effectiveStart, fy.end);
+
+      const CL_ANNUAL = 12;
+      const SL_ANNUAL = 12;
+
+      const cl = (CL_ANNUAL / 12) * months;
+      const sl = (SL_ANNUAL / 12) * months;
+
+      await prisma.$transaction(async (tx) => {
+        await allocateLeave(tx, emp.id, "CL", cl, fy.fyYear, effectiveStart);
+        await allocateLeave(tx, emp.id, "SL", sl, fy.fyYear, effectiveStart);
+      });
+
+      console.log(`✅ Leave allocated for emp ${emp.id}: CL=${cl}, SL=${sl}`);
+    }
+  });
+};
+
+function getRemainingMonths(from: Date, to: Date) {
+  return (
+    (to.getFullYear() - from.getFullYear()) * 12 +
+    (to.getMonth() - from.getMonth()) + 1
+  );
+}
+
+function getFinancialYearBounds(date: Date) {
+  const year = date.getFullYear();
+  const month = date.getMonth() + 1;
+
+  if (month >= 4) {
+    return {
+      start: new Date(year, 3, 1),
+      end: new Date(year + 1, 2, 31),
+      fyYear: year
+    };
+  } else {
+    return {
+      start: new Date(year - 1, 3, 1),
+      end: new Date(year, 2, 31),
+      fyYear: year - 1
+    };
+  }
+}
+async function allocateLeave(
+  tx: Tx,
+  employeeId: number,
+  leaveName: string,
+  amount: number,
+  year: number,
+  date: Date
+) {
+  const lt = await tx.leaveType.findFirst({
+    where: { name: leaveName }
+  });
+
+  if (!lt) return;
+
+  const prevBalance = await getLastLedgerBalanceTx(tx, employeeId, lt.id, year);
+  const newBalance = prevBalance + amount;
+
+  // 1️⃣ Balance Table
+  await tx.employeeLeaveBalance.upsert({
+    where: {
+      employeeId_leaveTypeId_year: {
+        employeeId,
+        leaveTypeId: lt.id,
+        year
+      }
+    },
+    update: {
+      totalAllowed: amount
+    },
+    create: {
+      employeeId,
+      leaveTypeId: lt.id,
+      category: "LEAVE",
+      year,
+      totalAllowed: amount,
+      used: 0,
+      halfDayUsed: 0
+    }
+  });
+
+  // 2️⃣ Ledger Entry
+  await insertLedgerTx(tx, {
+    employeeId,
+    leaveTypeId: lt.id,
+    year,
+    month: date.getMonth() + 1,
+    credit: amount,
+    debit: 0,
+    balanceAfter: newBalance,
+    action: "OPENING_BALANCE",
+    referenceType: "MANUAL",
+    source: "SYSTEM",
+    remarks: "Auto allocation after probation"
+  });
+
+  // 3️⃣ Summaries
+  await rebuildMonthlySummaryTx(tx, employeeId, lt.id, year, date.getMonth() + 1);
+  await rebuildYearlySummaryTx(tx, employeeId, lt.id, year);
+}
+function getFinancialYear(date: Date) {
+  const year = date.getFullYear();
+  const month = date.getMonth() + 1;
+
+  return month >= 4 ? year : year - 1;
+}
+
+function getPrevMonthFY(year: number, month: number) {
+  if (month === 4) {
+    return { year: year - 1, month: 3 }; // March of previous FY
+  }
+  return { year, month: month - 1 };
+}
+function getCalendarYear(fyYear: number, month: number) {
+  return month >= 4 ? fyYear : fyYear + 1;
+}
+
+
+
+export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) => {
+  try {
+    const form = formidable({ multiples: false, keepExtensions: true });
+
+    form.parse(req, async (err, fields, files) => {
+      if (err) {
+        return res.status(500).json({ error: "File parsing error" });
+      }
+
+      const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
+      if (!fileObj) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      // =========================
+      // 📥 READ EXCEL
+      // =========================
+      const workbook = XLSX.readFile(fileObj.filepath);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows: any[] = XLSX.utils.sheet_to_json(sheet);
+
+      // =========================
+      // 🔧 PREP DATA
+      // =========================
+      const year = getFinancialYear(new Date());
+      const month = new Date().getMonth() + 1;
+
+      const [leaveTypes, employees] = await Promise.all([
+        prisma.leaveType.findMany(),
+        prisma.employee.findMany({
+          select: { id: true, employeeCode: true }
+        })
+      ]);
+
+      const leaveTypeMap: Record<string, number> = {};
+      leaveTypes.forEach(lt => {
+        leaveTypeMap[lt.name.toUpperCase()] = lt.id;
+      });
+
+      const employeeMap = new Map<string, number>();
+      employees.forEach(emp => {
+        employeeMap.set(emp.employeeCode, emp.id);
+      });
+
+      const logs: string[] = [];
+      const errorRows: any[] = [];
+      const affected = new Set<string>();
+
+      const limit = pLimit(5); // 🔥 prevent DB overload
+
+      // =========================
+      // 🔁 PROCESS EACH ROW
+      // =========================
+      const processRow = async (row: any, index: number) => {
+        const code = row.employeeCode || row["Emp Code"];
+
+        try {
+          if (!code) throw new Error("employeeCode missing");
+
+          const employeeId = employeeMap.get(String(code).trim());
+
+          if (!employeeId) {
+            throw new Error(`Employee not found: ${code}`);
+          }
+
+          for (const key of ["CL", "SL", "EL"]) {
+            const leaveTypeId = leaveTypeMap[key];
+            if (!leaveTypeId) continue;
+
+            const newTotal = Number(row[key] ?? 0);
+
+            await prisma.$transaction(async (tx) => {
+
+              const existing = await tx.employeeLeaveBalance.findFirst({
+                where: { employeeId, leaveTypeId, year }
+              });
+
+              const prevTotal = existing?.totalAllowed ?? 0;
+              const delta = newTotal - prevTotal;
+
+              // ✅ UPSERT BALANCE
+              await tx.employeeLeaveBalance.upsert({
+                where: {
+                  employeeId_leaveTypeId_year: {
+                    employeeId,
+                    leaveTypeId,
+                    year
+                  }
+                },
+                update: {
+                  totalAllowed: newTotal
+                },
+                create: {
+                  employeeId,
+                  leaveTypeId,
+                  category: "LEAVE",
+                  year,
+                  totalAllowed: newTotal,
+                  used: 0,
+                  halfDayUsed: 0
+                }
+              });
+
+              // ✅ LEDGER
+              if (delta !== 0) {
+                const prevBalance = await getLastLedgerBalanceTx(
+                  tx,
+                  employeeId,
+                  leaveTypeId,
+                  year
+                );
+
+                const newBalance = prevBalance + delta;
+
+                await insertLedgerTx(tx, {
+                  employeeId,
+                  leaveTypeId,
+                  year,
+                  month,
+                  credit: delta > 0 ? delta : 0,
+                  debit: delta < 0 ? Math.abs(delta) : 0,
+                  balanceAfter: newBalance,
+                  action: "ADJUSTMENT",
+                  referenceType: "MANUAL",
+                  source: "IMPORT",
+                  remarks: "Excel bulk upload"
+                });
+              }
+
+            }, { timeout: 10000 });
+
+            affected.add(`${employeeId}-${leaveTypeId}`);
+          }
+
+          logs.push(`Row ${index + 1}: SUCCESS (${code})`);
+
+        } catch (error: any) {
+          errorRows.push({
+            rowNumber: index + 1,
+            employeeCode: code,
+            error: error.message,
+            ...row,
+          });
+
+          logs.push(`Row ${index + 1}: FAILED → ${error.message}`);
+        }
+      };
+
+      // 🔥 Controlled parallel execution
+      await Promise.all(
+        rows.map((row, i) => limit(() => processRow(row, i)))
+      );
+
+      // =========================
+      // 🔁 REBUILD SUMMARIES (ONCE)
+      // =========================
+      for (const key of affected) {
+        const [employeeId, leaveTypeId] = key.split("-").map(Number);
+
+        await rebuildMonthlySummaryTx(
+          prisma,
+          employeeId,
+          leaveTypeId,
+          year,
+          month
+        );
+
+        await rebuildYearlySummaryTx(
+          prisma,
+          employeeId,
+          leaveTypeId,
+          year
+        );
+      }
+
+      return res.json({
+        totalRows: rows.length,
+        successCount: rows.length - errorRows.length,
+        failedCount: errorRows.length,
+        logs,
+        errors: errorRows
+      });
+    });
+
+  } catch (e: any) {
+    console.error(e);
+    return res.status(500).json({ error: "Excel bulk upload failed" });
+  }
+};
+
+export const initFinancialYearRolloverCron = () => {
+  cron.schedule("0 2 1 4 *", async () => {
+    console.log("🚀 Running FY Rollover Cron...");
+
+    const today = new Date();
+    const newYear = getFinancialYear(today);
+    const prevYear = newYear - 1;
+    const month = 4; // April
+
+    try {
+      const [employees, leaveTypes] = await Promise.all([
+        prisma.employee.findMany({
+          where: { employmentStatus: "ACTIVE" },
+          select: { id: true }
+        }),
+        prisma.leaveType.findMany()
+      ]);
+
+      const leaveTypeMap: Record<string, number> = {};
+      leaveTypes.forEach(lt => {
+        leaveTypeMap[lt.name.toUpperCase()] = lt.id;
+      });
+
+      for (const emp of employees) {
+
+        await prisma.$transaction(async (tx) => {
+
+          // =====================================================
+          // 🔹 CL (NO CARRY FORWARD)
+          // =====================================================
+          const clId = leaveTypeMap["CL"];
+
+          if (clId) {
+            const totalCL = 12;
+
+            await tx.employeeLeaveBalance.upsert({
+              where: {
+                employeeId_leaveTypeId_year: {
+                  employeeId: emp.id,
+                  leaveTypeId: clId,
+                  year: newYear
+                }
+              },
+              update: { totalAllowed: totalCL, used: 0, halfDayUsed: 0 },
+              create: {
+                employeeId: emp.id,
+                leaveTypeId: clId,
+                category: "LEAVE",
+                year: newYear,
+                totalAllowed: totalCL,
+                used: 0,
+                halfDayUsed: 0
+              }
+            });
+
+            const prevBalance = await getLastLedgerBalanceTx(tx, emp.id, clId, newYear);
+            const newBalance = prevBalance + totalCL;
+
+            await insertLedgerTx(tx, {
+              employeeId: emp.id,
+              leaveTypeId: clId,
+              year: newYear,
+              month,
+              credit: totalCL,
+              debit: 0,
+              balanceAfter: newBalance,
+              action: "OPENING_BALANCE",
+              referenceType: "MANUAL",
+              source: "SYSTEM",
+              remarks: "CL yearly allocation"
+            });
+
+            await rebuildMonthlySummaryTx(tx, emp.id, clId, newYear, month);
+            await rebuildYearlySummaryTx(tx, emp.id, clId, newYear);
+          }
+
+          // =====================================================
+          // 🔹 SL (CARRY FORWARD MAX 60)
+          // =====================================================
+          const slId = leaveTypeMap["SL"];
+
+          if (slId) {
+            const prev = await tx.employeeLeaveBalance.findFirst({
+              where: { employeeId: emp.id, leaveTypeId: slId, year: prevYear }
+            });
+
+            const prevRemaining = Math.max(
+              0,
+              (prev?.totalAllowed ?? 0) - computeTotalUsed(prev || { used: 0, halfDayUsed: 0 })
+            );
+
+            const carry = Math.min(prevRemaining, 60);
+            const totalSL = 12 + carry;
+
+            await tx.employeeLeaveBalance.upsert({
+              where: {
+                employeeId_leaveTypeId_year: {
+                  employeeId: emp.id,
+                  leaveTypeId: slId,
+                  year: newYear
+                }
+              },
+              update: { totalAllowed: totalSL, used: 0, halfDayUsed: 0 },
+              create: {
+                employeeId: emp.id,
+                leaveTypeId: slId,
+                category: "LEAVE",
+                year: newYear,
+                totalAllowed: totalSL,
+                used: 0,
+                halfDayUsed: 0
+              }
+            });
+
+            const prevBalance = await getLastLedgerBalanceTx(tx, emp.id, slId, newYear);
+            const newBalance = prevBalance + totalSL;
+
+            await insertLedgerTx(tx, {
+              employeeId: emp.id,
+              leaveTypeId: slId,
+              year: newYear,
+              month,
+              credit: totalSL,
+              debit: 0,
+              balanceAfter: newBalance,
+              action: "OPENING_BALANCE",
+              referenceType: "MANUAL",
+              source: "SYSTEM",
+              remarks: "SL yearly allocation with carry"
+            });
+
+            await rebuildMonthlySummaryTx(tx, emp.id, slId, newYear, month);
+            await rebuildYearlySummaryTx(tx, emp.id, slId, newYear);
+          }
+
+          // =====================================================
+          // 🔹 EL (POLICY BASED CARRY)
+          // =====================================================
+          const elId = leaveTypeMap["EL"];
+
+          if (elId) {
+            const policy = await getActivePolicy(elId, today);
+
+            const prev = await tx.employeeLeaveBalance.findFirst({
+              where: { employeeId: emp.id, leaveTypeId: elId, year: prevYear }
+            });
+
+            const prevRemaining = Math.max(
+              0,
+              (prev?.totalAllowed ?? 0) - computeTotalUsed(prev || { used: 0, halfDayUsed: 0 })
+            );
+
+            let carry = 0;
+
+            if (policy?.carryForward) {
+              carry = policy.maxCarryForward
+                ? Math.min(prevRemaining, policy.maxCarryForward)
+                : prevRemaining;
+            }
+
+            await tx.employeeLeaveBalance.upsert({
+              where: {
+                employeeId_leaveTypeId_year: {
+                  employeeId: emp.id,
+                  leaveTypeId: elId,
+                  year: newYear
+                }
+              },
+              update: { totalAllowed: carry, used: 0, halfDayUsed: 0 },
+              create: {
+                employeeId: emp.id,
+                leaveTypeId: elId,
+                category: "LEAVE",
+                year: newYear,
+                totalAllowed: carry,
+                used: 0,
+                halfDayUsed: 0
+              }
+            });
+
+            const prevBalance = await getLastLedgerBalanceTx(tx, emp.id, elId, newYear);
+            const newBalance = prevBalance + carry;
+
+            await insertLedgerTx(tx, {
+              employeeId: emp.id,
+              leaveTypeId: elId,
+              year: newYear,
+              month,
+              credit: carry,
+              debit: 0,
+              balanceAfter: newBalance,
+              action: "OPENING_BALANCE",
+              referenceType: "MANUAL",
+              source: "SYSTEM",
+              remarks: "EL carry forward"
+            });
+
+            await rebuildMonthlySummaryTx(tx, emp.id, elId, newYear, month);
+            await rebuildYearlySummaryTx(tx, emp.id, elId, newYear);
+          }
+
+        }, { timeout: 15000 });
+
+      }
+
+      console.log("✅ FY rollover completed successfully");
+
+    } catch (err) {
+      console.error("❌ FY rollover failed:", err);
+    }
+  });
 };
