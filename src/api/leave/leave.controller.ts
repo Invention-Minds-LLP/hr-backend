@@ -3093,6 +3093,8 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
       const processRow = async (row: any, index: number) => {
         const code = row.employeeCode || row["Emp Code"];
 
+        console.log(code)
+
         try {
           if (!code) throw new Error("employeeCode missing");
 
