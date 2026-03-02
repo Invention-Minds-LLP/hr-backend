@@ -3085,10 +3085,10 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
       const errorRows: any[] = [];
       const affected = new Set<string>();
 
-      const limit = pLimit(5); // 🔥 prevent DB overload
+      const limit = pLimit(5); // prevent DB overload
 
       // =========================
-      // 🔁 PROCESS EACH ROW
+      // PROCESS EACH ROW
       // =========================
       const processRow = async (row: any, index: number) => {
         const code = row.employeeCode || row["Emp Code"];
@@ -3106,7 +3106,26 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
             const leaveTypeId = leaveTypeMap[key];
             if (!leaveTypeId) continue;
 
-            const newTotal = Number(row[key] ?? 0);
+            // const newTotal = Number(row[key] ?? 0);
+
+            const rawValue = row[key];
+
+            // SKIP empty cells (IMPORTANT FIX)
+            if (
+              rawValue === undefined ||
+              rawValue === null ||
+              String(rawValue).trim() === ""
+            ) {
+              continue;
+            }
+
+            const newTotal = Number(rawValue);
+
+            //Validate numeric
+            if (isNaN(newTotal)) {
+              throw new Error(`${key} must be a valid number`);
+            }
+
 
             await prisma.$transaction(async (tx) => {
 
@@ -3117,7 +3136,7 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
               const prevTotal = existing?.totalAllowed ?? 0;
               const delta = newTotal - prevTotal;
 
-              // ✅ UPSERT BALANCE
+              // UPSERT BALANCE
               await tx.employeeLeaveBalance.upsert({
                 where: {
                   employeeId_leaveTypeId_year: {
@@ -3140,7 +3159,7 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
                 }
               });
 
-              // ✅ LEDGER
+              // LEDGER
               if (delta !== 0) {
                 const prevBalance = await getLastLedgerBalanceTx(
                   tx,
@@ -3185,13 +3204,13 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
         }
       };
 
-      // 🔥 Controlled parallel execution
+      //  Controlled parallel execution
       await Promise.all(
         rows.map((row, i) => limit(() => processRow(row, i)))
       );
 
       // =========================
-      // 🔁 REBUILD SUMMARIES (ONCE)
+      // REBUILD SUMMARIES (ONCE)
       // =========================
       for (const key of affected) {
         const [employeeId, leaveTypeId] = key.split("-").map(Number);
