@@ -5,6 +5,7 @@ import { initQuarterlyAppraisalScheduler, sendAppraisalCountReminders } from "..
 import { startShiftCron } from "../api/shift/shift.controller";
 import cron from 'node-cron';
 import { runBiometricSync } from "../api/biometric/biometric.controller";
+import { initFinancialYearRolloverCron, initELAccrualCron, initNewJoineeLeaveAllocationCron } from "../api/leave/leave.controller";
 
 export async function startSchedulers() {
   initSurveyScheduler();
@@ -15,6 +16,10 @@ export async function startSchedulers() {
   // sendAppraisalCountReminders();
   startAttendanceScheduler();
   // await runBiometricBackfill();
+
+    initELAccrualCron();
+  initFinancialYearRolloverCron();
+  initNewJoineeLeaveAllocationCron();
 }
 const schedules = [
   // 00
