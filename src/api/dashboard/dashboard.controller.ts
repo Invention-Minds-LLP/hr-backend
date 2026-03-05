@@ -805,7 +805,7 @@ export class DashboardController {
         });
 
         // 3️⃣ Employees who have pending training (not completed)
-        const [clinicalPending, nonClinicalPending] = await Promise.all([
+        const [clinicalPending, nonClinicalPending, paraMedicalPending] = await Promise.all([
             prisma.employee.count({
                 where: {
                     employeeType: 'CLINICAL',
@@ -815,6 +815,12 @@ export class DashboardController {
             prisma.employee.count({
                 where: {
                     employeeType: 'NONCLINICAL',
+                    AssignedTest: { some: { status: { notIn: ['Completed', 'COMPLETED', 'Done'] } } },
+                },
+            }),
+            prisma.employee.count({
+                where: {
+                    employeeType: 'PARAMEDICAL',
                     AssignedTest: { some: { status: { notIn: ['Completed', 'COMPLETED', 'Done'] } } },
                 },
             }),
@@ -911,6 +917,7 @@ export class DashboardController {
             // { label: 'Attendance not marked (by 11:00)', count: unmarkedCount, severity: 'danger', modal: 'unmarked' },
             { label: 'Clinical staff late (>15min)', count: attendanceSplit.clinicalNotCheckedIn, severity: attendanceSplit.clinicalNotCheckedIn ? 'warn' : 'good', modal: 'clinicalLate' },
             { label: 'Non-clinical staff late (>15min)', count: attendanceSplit.nonClinicalNotCheckedIn, severity: attendanceSplit.nonClinicalNotCheckedIn ? 'warn' : 'good', modal: 'nonClinicalLate' },
+            { label: 'Paramedical staff late(>15min)', count: attendanceSplit.paraMedicalNotCheckedIn, severity: attendanceSplit.paraMedicalNotCheckedIn ? 'warn' : 'good', modal: 'paraMedicalNotCheckedIn' },
             { label: 'Pending leave/permission', count: pendingApprovals, severity: 'warn', modal: 'approvals' },
 
             { label: 'Probation ending soon (7 days)', count: probationSoon, severity: 'warn', modal: 'probation' },
@@ -970,6 +977,7 @@ export class DashboardController {
                 ['Applications received (this month)', String(applicantsThisMonth)],
                 ['Clinical staff pending training', String(clinicalPending), clinicalPending ? 'warn' : 'good'],
                 ['Non-clinical staff pending training', String(nonClinicalPending), nonClinicalPending ? 'warn' : 'good'],
+                ['Para Medical staff pending training', String(paraMedicalPending), paraMedicalPending ? 'warn' : 'good'],
                 ['Employees in notice period (this month)', String(noticePeriodThisMonth), noticePeriodThisMonth ? 'warn' : 'good'],
             ],
 
@@ -1149,7 +1157,7 @@ export class DashboardController {
                 cols: ['Employee', 'EMP ID', 'Department', 'Email', 'Phone', 'Manager'],
                 rows,
                 // actions: ['Remind all', 'Export'],
-                actions:[],
+                actions: [],
                 selectable: true
             });
         }
@@ -1272,7 +1280,7 @@ export class DashboardController {
                 ],
                 rows,
                 // actions: ['Send reminder', 'Mark completed'],
-                actions:[],
+                actions: [],
                 selectable: true,
             });
         }
@@ -1314,7 +1322,7 @@ export class DashboardController {
                 cols: ['Candidate', 'Job Title', 'Stage', 'Start', 'End', 'Result'],
                 rows,
                 // actions: ['Message', 'Reschedule'],
-                actions:[],
+                actions: [],
             });
         }
 
@@ -1344,10 +1352,11 @@ export class DashboardController {
                 fmtDate(x.startDate) + ' → ' + fmtDate(x.endDate),
                 'Approved',
             ]);
-            return res.json({ title: 'Leaves Today', cols: ['Employee', 'Type', 'EMP ID', 'Dept', 'Dates', 'Status'], rows,
+            return res.json({
+                title: 'Leaves Today', cols: ['Employee', 'Type', 'EMP ID', 'Dept', 'Dates', 'Status'], rows,
                 //  actions: ['Message'] 
-                actions:[],
-                });
+                actions: [],
+            });
         }
 
         // WFH (approved & overlapping today)
@@ -1370,10 +1379,11 @@ export class DashboardController {
                 fmtDate(x.startDate) + ' → ' + fmtDate(x.endDate),
                 'Approved',
             ]);
-            return res.json({ title: 'WFH Today', cols: ['Employee', 'EMP ID', 'Dept', 'Window', 'Status'], rows,
+            return res.json({
+                title: 'WFH Today', cols: ['Employee', 'EMP ID', 'Dept', 'Window', 'Status'], rows,
                 //  actions: ['Message']
-                actions:[],
-                 });
+                actions: [],
+            });
         }
 
         // Permissions (approved & today overlap)
@@ -1397,10 +1407,11 @@ export class DashboardController {
                 x.startTime || x.endTime ? `${fmtTime(x.startTime)}–${fmtTime(x.endTime)}` : fmtDate(x.day),
                 'Approved',
             ]);
-            return res.json({ title: 'Permissions Today', cols: ['Employee', 'EMP ID', 'Dept', 'Timing', 'Window/Day', 'Status'], rows,
+            return res.json({
+                title: 'Permissions Today', cols: ['Employee', 'EMP ID', 'Dept', 'Timing', 'Window/Day', 'Status'], rows,
                 //  actions: ['Message'] 
-                actions:[],
-                });
+                actions: [],
+            });
         }
 
         // Late Arrivals (today) — matches your "rotational can use any shift" rule
@@ -1575,7 +1586,7 @@ export class DashboardController {
                 cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Scheduled In', 'Actual In', 'Late (mins)'],
                 rows,
                 // actions: ['Notify all'],
-                actions:[],
+                actions: [],
             });
         }
 
@@ -1739,7 +1750,7 @@ export class DashboardController {
                 cols: ['Employee', 'EMP ID', 'Dept', 'Type', 'Sched End', 'Check-out', 'OT Duration'],
                 rows,
                 // actions: ['Export'],
-                actions:[],
+                actions: [],
                 selectable: true,
             });
         }
@@ -1779,11 +1790,12 @@ export class DashboardController {
             const titles: Record<string, string> = {
                 joiners: 'New Joiners Today', birthdays: 'Birthdays Today', anniversaries: 'Anniversaries Today',
             };
-            return res.json({ title: titles[key], cols: ['Employee', 'EMP ID', 'Dept', 'Date'], rows,
+            return res.json({
+                title: titles[key], cols: ['Employee', 'EMP ID', 'Dept', 'Date'], rows,
                 //  actions: ['Congratulate
                 // '] 
-                actions:[],
-                });
+                actions: [],
+            });
         }
         // add a new key
         if (key === 'offersPendingSignature') {
@@ -2365,8 +2377,10 @@ export class DashboardController {
 
         const clinicalList: any[] = [];
         const nonClinicalList: any[] = [];
+        const paraMedicalList: any[] = [];
         const clinicalNotCheckedIn: any[] = [];
         const nonClinicalNotCheckedIn: any[] = [];
+        const paraMedicalNotCheckedIn: any[] = [];
 
         const now = new Date();
         const shiftMap = new Map<number, typeof assignments[0]>();
@@ -2374,84 +2388,6 @@ export class DashboardController {
         for (const a of assignments) {
             shiftMap.set(a.employeeId, a);
         }
-
-        // for (const e of employees) {
-        //     if (excused.has(e.id)) continue;
-        //     const checkIn = presentMap.get(e.id);
-        //     if (!e.EmployeeShiftSetting) continue;
-
-        //     let shiftStartCandidates: Date[] = [];
-        //     let displayShiftTime = '—';
-
-        //     if (e.EmployeeShiftSetting.mode === 'FIXED' && e.EmployeeShiftSetting.fixedShift?.startTime) {
-        //         const shiftTime = combineDateAndTime(start, e.EmployeeShiftSetting.fixedShift.startTime);
-        //         if (shiftTime) shiftStartCandidates = [shiftTime];
-        //         displayShiftTime = fmtTime(e.EmployeeShiftSetting.fixedShift.startTime);
-        //     } else if (e.EmployeeShiftSetting.mode === 'ROTATIONAL' && e.EmployeeShiftSetting.rotationPattern?.items?.length) {
-        //         const uniq = new Map<number, Date>();
-        //         for (const it of e.EmployeeShiftSetting.rotationPattern.items) {
-        //             const shiftDate = combineDateAndTime(start, it.shift?.startTime);
-        //             if (shiftDate) uniq.set(it.dayIndex, shiftDate);
-        //         }
-        //         shiftStartCandidates = Array.from(uniq.values());
-        //         const first = e.EmployeeShiftSetting.rotationPattern.items[0]?.shift?.startTime;
-        //         if (first) displayShiftTime = fmtTime(first);
-        //     }
-
-        //     if (shiftStartCandidates.length === 0) continue;
-        //     let lateBy: number | null = null;
-        //     let notCheckedIn = false;
-
-        //     const shiftStart = shiftStartCandidates[0]
-        //         ? getTodayShiftTime(new Date(shiftStartCandidates[0]))
-        //         : null;
-
-        //     if (shiftStart) {
-        //         if (checkIn) {
-        //             // ✅ Ensure checkIn is also from today
-        //             const check = new Date(checkIn);
-        //             const checkToday = new Date();
-        //             check.setFullYear(checkToday.getFullYear(), checkToday.getMonth(), checkToday.getDate());
-
-        //             const diffMs = check.getTime() - shiftStart.getTime();
-        //             const diffMins = Math.round(diffMs / 60000);
-
-        //             if (diffMins > 15) lateBy = diffMins;
-        //         } else {
-        //             // ✅ Not checked in → calculate how late from now
-        //             const now = new Date();
-        //             const diffMs = now.getTime() - shiftStart.getTime();
-        //             const diffMins = Math.round(diffMs / 60000);
-        //             if (diffMins > 15) {
-        //                 lateBy = diffMins;
-        //                 notCheckedIn = true;
-        //             }
-        //         }
-        //     }
-
-
-
-        //     const isFixed = e.EmployeeShiftSetting.mode === 'FIXED';
-        //     const baseRow = {
-        //         name: `${e.firstName} ${e.lastName}`,
-        //         code: e.employeeCode,
-        //         dept: e.Department?.name || '-',
-        //         shift: isFixed ? 'General' : 'Rotational',
-        //         shiftTime: displayShiftTime,
-        //     };
-
-        //     if (lateBy != null && !isNaN(lateBy) && (!notCheckedIn)) {
-        //         console.log(lateBy)
-        //         const row = { ...baseRow, delayMins: lateBy };
-        //         if (e.employeeType === 'CLINICAL') clinicalList.push(row);
-        //         else nonClinicalList.push(row);
-        //     } else if (notCheckedIn) {
-        //         console.log(lateBy)
-        //         const row = { ...baseRow, delayMins: lateBy }; // 👈 prevent undefined in table
-        //         if (e.employeeType === 'CLINICAL') clinicalNotCheckedIn.push(row);
-        //         else nonClinicalNotCheckedIn.push(row);
-        //     }
-        // }
         for (const e of employees) {
             if (excused.has(e.id)) continue;
 
@@ -2464,6 +2400,22 @@ export class DashboardController {
             );
 
             if (!shiftStart) continue;
+
+            const typeKey = (t?: string) => (t || '').toUpperCase();
+
+            const bucketLate = (t?: string) => {
+                const k = typeKey(t);
+                if (k === 'CLINICAL') return clinicalList;
+                if (k === 'PARAMEDICAL') return paraMedicalList;
+                return nonClinicalList; // default
+            };
+
+            const bucketNoCheckin = (t?: string) => {
+                const k = typeKey(t);
+                if (k === 'CLINICAL') return clinicalNotCheckedIn;
+                if (k === 'PARAMEDICAL') return paraMedicalNotCheckedIn;
+                return nonClinicalNotCheckedIn; // default
+            };
 
             const checkIn = presentMap.get(e.id);
 
@@ -2493,16 +2445,23 @@ export class DashboardController {
                 shiftTime: fmtTime(assignment.shift.startTime),
             };
 
+            // if (lateBy !== null && !notCheckedIn) {
+            //     (assignment.employee.employeeType === 'CLINICAL'
+            //         ? clinicalList
+            //         : nonClinicalList
+            //     ).push({ ...baseRow, delayMins: lateBy });
+            // } else if (notCheckedIn) {
+            //     (assignment.employee.employeeType === 'CLINICAL'
+            //         ? clinicalNotCheckedIn
+            //         : nonClinicalNotCheckedIn
+            //     ).push({ ...baseRow, delayMins: lateBy });
+            // }
+            const empType = assignment.employee.employeeType ?? undefined;
+
             if (lateBy !== null && !notCheckedIn) {
-                (assignment.employee.employeeType === 'CLINICAL'
-                    ? clinicalList
-                    : nonClinicalList
-                ).push({ ...baseRow, delayMins: lateBy });
+                bucketLate(empType).push({ ...baseRow, delayMins: lateBy });
             } else if (notCheckedIn) {
-                (assignment.employee.employeeType === 'CLINICAL'
-                    ? clinicalNotCheckedIn
-                    : nonClinicalNotCheckedIn
-                ).push({ ...baseRow, delayMins: lateBy });
+                bucketNoCheckin(empType).push({ ...baseRow, delayMins: lateBy });
             }
         }
 
@@ -2511,10 +2470,13 @@ export class DashboardController {
             nonClinicalLate: nonClinicalList.length,
             clinicalList,
             nonClinicalList,
+            paraMedicalList,
             clinicalNotCheckedIn: clinicalNotCheckedIn.length,
+            paraMedicalNotCheckedIn: paraMedicalNotCheckedIn.length,
             nonClinicalNotCheckedIn: nonClinicalNotCheckedIn.length,
             clinicalNotCheckedInList: clinicalNotCheckedIn,
             nonClinicalNotCheckedInList: nonClinicalNotCheckedIn,
+            paraMedicalNotCheckedInList: paraMedicalNotCheckedIn
         };
     }
 
@@ -2617,14 +2579,19 @@ export class DashboardController {
         // Example for unmarked rows
         // const unmarkedRows = (await this.buildUnmarkedList(todayStart, todayEnd))
         // 🩺 Fetch late attendance split (clinical / non-clinical)
-        const { clinicalNotCheckedInList, nonClinicalNotCheckedInList } = await this.getLateAttendanceSplit(
-            (await prisma.employee.findMany({
-                where: { employmentStatus: 'ACTIVE' },
-                select: { id: true },
-            })).map(e => e.id),
-            todayStart,
-            todayEnd
-        );
+        const { clinicalList,
+            nonClinicalList,
+            paraMedicalList,
+            clinicalNotCheckedInList,
+            nonClinicalNotCheckedInList,
+            paraMedicalNotCheckedInList } = await this.getLateAttendanceSplit(
+                (await prisma.employee.findMany({
+                    where: { employmentStatus: 'ACTIVE' },
+                    select: { id: true },
+                })).map(e => e.id),
+                todayStart,
+                todayEnd
+            );
 
         console.log('Clinical late:', clinicalNotCheckedInList.length, clinicalNotCheckedInList, 'Non-clinical late:', nonClinicalNotCheckedInList.length, nonClinicalNotCheckedInList);
 
@@ -2759,7 +2726,7 @@ export class DashboardController {
             //     selectable: true
             // },
             clinicalLate: {
-                title: 'Clinical Staff Late (>15min)',
+                title: 'Clinical Staff Not Checked-in (>15min)',
                 cols: ['Employee', 'EMP ID', 'Dept', 'Shift Type', 'Shift Time', 'Delay (mins)'],
                 rows: clinicalNotCheckedInList.map((x, idx) => ({
                     id: idx + 1,
@@ -2773,12 +2740,12 @@ export class DashboardController {
                     ]
                 })),
                 // actions: ['Notify all'],
-                actions:[],
+                actions: [],
                 selectable: true
             },
 
             nonClinicalLate: {
-                title: 'Non-Clinical Staff Late (>15min)',
+                title: 'Non-Clinical Staff not Checked-in (>15min)',
                 cols: ['Employee', 'EMP ID', 'Dept', 'Shift Type', 'Shift Time', 'Delay (mins)'],
                 rows: nonClinicalNotCheckedInList.map((x, idx) => ({
                     id: idx + 1,
@@ -2792,7 +2759,29 @@ export class DashboardController {
                     ]
                 })),
                 // actions: ['Notify all'],
-                actions:[],
+                actions: [],
+                selectable: true
+            },
+
+            paraMedicalLate: {
+                title: 'Paramedical Staff Late (>15min)',
+                cols: ['Employee', 'EMP ID', 'Dept', 'Shift', 'Shift Time', 'Delay (mins)'],
+                rows: paraMedicalList.map((x, idx) => ({
+                    id: idx + 1,
+                    data: [x.name, x.code, x.dept || '—', x.shift, x.shiftTime, `${x.delayMins} min`]
+                })),
+                actions: [],
+                selectable: true
+            },
+
+            paraMedicalNotCheckedIn: {
+                title: 'Paramedical Staff Not Checked-In (>15min)',
+                cols: ['Employee', 'EMP ID', 'Dept', 'Shift', 'Shift Time', 'Delay (mins)'],
+                rows: paraMedicalNotCheckedInList.map((x, idx) => ({
+                    id: idx + 1,
+                    data: [x.name, x.code, x.dept || '—', x.shift, x.shiftTime, `${x.delayMins} min`]
+                })),
+                actions: [],
                 selectable: true
             },
 
@@ -2990,8 +2979,8 @@ export const messageUnmarked = async (req: Request, res: Response) => {
         // for (const empId of employeeIds) {
         //     createNotification(empId,message)
         // }
-         res.json({ success: true, notified: employeeIds.length });
-         return;
+        res.json({ success: true, notified: employeeIds.length });
+        return;
     } catch (err) {
         console.error("Message Unmarked Error:", err);
         return res.status(500).json({ error: "Failed to send messages" });

@@ -183,7 +183,8 @@ export const createEmployee = async (req: Request, res: Response) => {
       panNumber,
       aadharNumber,
       licenseNumber,
-      geoTrackingEnabled
+      geoTrackingEnabled,
+      experienceType
     } = req.body;
     const data = req.body;
     let finalCode = employeeCode;
@@ -223,6 +224,7 @@ export const createEmployee = async (req: Request, res: Response) => {
           experience,
           employeeType,
           sameAsPermanent,
+          experienceType,
           geoTrackingEnabled: geoTrackingEnabled ?? false,
           // Health & Wellness fields
           preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
@@ -332,6 +334,7 @@ export const createEmployee = async (req: Request, res: Response) => {
             photoUrl,
             phone,
             email,
+            experienceType,
             // designation,
             // designationId: designationId ?? null, // ✅ THIS IS THE FIX
             dateOfJoining: new Date(dateOfJoining),
@@ -680,6 +683,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
       marital,
       totalYearsOfExperience,
       experience,
+      experienceType,
       ...employeeFields
     } = data;
 
@@ -694,6 +698,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
       where: { id: Number(id) },
       data: {
         ...employeeFields,
+        experienceType: data.experienceType,
         // Health & Wellness fields
         preEmploymentCheckDate: preEmploymentCheckDate ? new Date(preEmploymentCheckDate) : null,
         height: data.height ? parseFloat(data.height) : null,

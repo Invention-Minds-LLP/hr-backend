@@ -8,14 +8,27 @@ import cron from "node-cron";
 import { da } from "date-fns/locale";
 import { Prisma } from "@prisma/client";
 import formidable from "formidable";
+import { File } from "formidable";
 import * as XLSX from "xlsx";
 import pLimit from "p-limit";
 import { PermissionType } from "@prisma/client";
+import fs from "fs";
+import { Client } from "basic-ftp";
+import path from "path";
+
+const FTP_CONFIG = {
+  host: "srv680.main-hosting.eu",  // Your FTP hostname
+  user: "u948610439.hrproindia.in",       // Your FTP username
+  password: "Bsrenuk@1993",   // Your FTP password
+  secure: false                    // Set to true if using FTPS
+}
 
 type Tx = Prisma.TransactionClient;
 
 const LEAVE_APPLY_TEMPLATE_ID = "890321";
 const LEAVE_STATUS_TEMPLATE_ID = "909803";
+
+
 // Create Leave Request
 export const createLeaveRequest = async (req: Request, res: Response) => {
   try {
@@ -228,6 +241,7 @@ export const getLeaveRequests = async (_req: Request, res: Response) => {
         createdAt: true,
         isHalfDay: true,
         halfDaySession: true,
+        prescriptionUrl: true,
 
         leaveType: {
           select: {
@@ -3459,4 +3473,97 @@ export const initFinancialYearRolloverCron = () => {
       console.error("❌ FY rollover failed:", err);
     }
   });
+};
+
+
+async function uploadToFTP(localFilePath: string, remoteFileName: string): Promise<any> {
+  const client = new Client();
+  client.ftp.verbose = false;
+  try {
+    await client.access(FTP_CONFIG);
+    const folder = path.dirname(remoteFileName);
+    await client.ensureDir(folder);
+    console.log(remoteFileName)
+    await client.uploadFrom(localFilePath, remoteFileName);
+    await client.close();
+
+    // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
+  } catch (error) {
+    console.error("FTP Upload Error:", error);
+    throw new Error("FTP upload failed");
+  }
+}
+
+export const uploadPrescription = async (req: Request, res: Response) => {
+  try {
+    const { leaveId } = req.params;
+
+    const leave = await prisma.leaveRequest.findUnique({
+      where: { id: Number(leaveId) },
+      include: { leaveType: true }
+    });
+
+    if (!leave) {
+      return res.status(404).json({ error: "Leave not found" });
+    }
+
+    if (leave.leaveType.name !== "SL") {
+      return res.status(400).json({
+        error: "Prescription allowed only for Sick Leave"
+      });
+    }
+
+    const form = formidable({
+      multiples: false,
+      keepExtensions: true,
+      maxFileSize: 10 * 1024 * 1024,
+      filter: part => part.mimetype?.startsWith("image/") ?? false,
+    });
+
+    form.parse(req, async (err, fields, files) => {
+      if (err) {
+        return res.status(400).json({ error: "Upload failed" });
+      }
+
+      const prescription = files.prescription;
+
+      if (!prescription) {
+        return res.status(400).json({
+          error: "Prescription image is required"
+        });
+      }
+
+      // ✅ Safely handle File | File[]
+      const file: File = Array.isArray(prescription)
+        ? prescription[0]
+        : prescription;
+
+      if (!file.filepath) {
+        return res.status(400).json({ error: "Invalid file" });
+      }
+
+      const ext = path.extname(file.originalFilename || "") || ".jpg";
+      const safeName = `prescription_${Date.now()}${ext}`;
+      const remotePath = `/public_html/leave-prescriptions/${safeName}`;
+      const publicUrl = `https://hrproindia.in/leave-prescriptions/${safeName}`;
+
+      await uploadToFTP(file.filepath, remotePath);
+
+      fs.unlinkSync(file.filepath);
+
+      await prisma.leaveRequest.update({
+        where: { id: Number(leaveId) },
+        data: { prescriptionUrl: publicUrl }
+      });
+
+      return res.status(200).json({
+        message: "Prescription uploaded successfully",
+        prescriptionUrl: publicUrl
+      });
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Upload failed" });
+  }
 };

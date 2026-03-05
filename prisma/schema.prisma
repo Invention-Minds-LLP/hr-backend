@@ -79,6 +79,7 @@ model Employee {
   geoTrackingEnabled      Boolean?         @default(false)
   geoTrackingConsent      Boolean?         @default(false)
   geoTrackingConsentAt    DateTime?
+  experienceType          String?
 
   Address                  Address[]
   AnnouncementAck          AnnouncementAck[]
@@ -319,6 +320,7 @@ model LeaveRequest {
   inChargeDecidedAt DateTime?
   inChargeDecision  ApprovalDecision @default(PENDING)
   inChargeNote      String?
+   prescriptionUrl   String?
   employee          Employee         @relation(fields: [employeeId], references: [id])
   leaveType         LeaveType        @relation(fields: [leaveTypeId], references: [id])
 
