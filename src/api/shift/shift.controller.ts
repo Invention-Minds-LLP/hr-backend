@@ -1468,7 +1468,7 @@ export const listApprovalsInbox = async (req: AuthenticatedRequest, res: Respons
         employee: {
           select: {
             id: true, firstName: true, lastName: true, employeeCode: true,
-            gender:true, photoUrl: true,
+            gender: true, photoUrl: true,
             inchargeId: true, reportingManager: true,
             Department: { select: { name: true } },
             designation: { select: { name: true } }
@@ -2031,21 +2031,21 @@ export const requestMonthlyShift = async (
     }
 
     // ✅ Validate weekOffConfig
-if (weekOffConfig?.weeks) {
-  for (const [weekIndex, day] of Object.entries(weekOffConfig.weeks)) {
-    const weekOffDay = Number(day);
+    if (weekOffConfig?.weeks) {
+      for (const [weekIndex, day] of Object.entries(weekOffConfig.weeks)) {
+        const weekOffDay = Number(day);
 
-    if (
-      Number.isNaN(weekOffDay) ||
-      weekOffDay < 0 ||
-      weekOffDay > 6
-    ) {
-      return res.status(400).json({
-        error: `Invalid weekOffDay for week ${weekIndex}`
-      });
+        if (
+          Number.isNaN(weekOffDay) ||
+          weekOffDay < 0 ||
+          weekOffDay > 6
+        ) {
+          return res.status(400).json({
+            error: `Invalid weekOffDay for week ${weekIndex}`
+          });
+        }
+      }
     }
-  }
-}
 
 
     const hasIncharge = !!employee.inchargeId;
@@ -2143,9 +2143,9 @@ if (weekOffConfig?.weeks) {
         startDate: monthStart,
         requestedBy: requesterId,
         hasIncharge,
-           weekOffConfig: weekOffConfig ?? null,
-           month: month,
-            year: year
+        weekOffConfig: weekOffConfig ?? null,
+        month: month,
+        year: year
       }
     });
 
@@ -2359,30 +2359,30 @@ export const getMonthlyShiftStatus = async (req: Request, res: Response) => {
   //   }
   // });
   const pattern = await prisma.shiftRotationPattern.findFirst({
-  where: {
-    source: 'MONTHLY',
-    month,
-    year,
-    shiftApprovals: {
-      some: {
-        employeeId,
-        status: 'APPROVED'
+    where: {
+      source: 'MONTHLY',
+      month,
+      year,
+      shiftApprovals: {
+        some: {
+          employeeId,
+          status: 'APPROVED'
+        }
+      }
+    },
+    include: {
+      items: { orderBy: { dayIndex: 'asc' } },
+      shiftApprovals: {
+        where: {
+          employeeId,
+          status: 'APPROVED'
+        },
+        select: {
+          weekOffConfig: true
+        }
       }
     }
-  },
-  include: {
-    items: { orderBy: { dayIndex: 'asc' } },
-    shiftApprovals: {
-      where: {
-        employeeId,
-        status: 'APPROVED'
-      },
-      select: {
-        weekOffConfig: true
-      }
-    }
-  }
-});
+  });
 
 
   if (!pattern) {
@@ -2396,7 +2396,7 @@ export const getMonthlyShiftStatus = async (req: Request, res: Response) => {
   const weekShifts: Record<number, number> = {};
 
   const weekOffConfig =
-  pattern.shiftApprovals?.[0]?.weekOffConfig ?? null;
+    pattern.shiftApprovals?.[0]?.weekOffConfig ?? null;
 
 
   pattern.items.forEach(item => {
@@ -2495,11 +2495,11 @@ export const getApprovedWeekOffs = async (req: Request, res: Response) => {
       month,
       year,
       status: "APPROVED",
-    weekOffConfig: {
-      not: Prisma.DbNull
-    }
+      weekOffConfig: {
+        not: Prisma.DbNull
+      }
     },
-    
+
   });
 
   console.log('getApprovedWeekOffs:', {
@@ -2560,3 +2560,158 @@ export const getApprovedWeekOffs = async (req: Request, res: Response) => {
     weekOffDates: sundays
   });
 };
+
+export const getEmployeeWeeklyShiftsForMonth = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.query.employeeId);
+    const month = Number(req.query.month); // 1-12
+    const year = Number(req.query.year);
+
+    if (!employeeId || !month || !year) {
+      return res.status(400).json({
+        error: "employeeId, month and year are required"
+      });
+    }
+
+    const monthStart = new Date(year, month - 1, 1);
+    const monthEnd = new Date(year, month, 0);
+    const firstWeekStart = startOfWeek(monthStart);
+    const lastWeekEnd = new Date(startOfWeek(monthEnd));
+    lastWeekEnd.setDate(lastWeekEnd.getDate() + 6);
+
+    // 1️⃣ First check approved monthly rotational shift
+    const monthlyApproval = await prisma.shiftApproval.findFirst({
+      where: {
+        employeeId,
+        month,
+        year,
+        status: "APPROVED",
+        requestedMode: "ROTATIONAL",
+        patternId: { not: null }
+      },
+      include: {
+        pattern: {
+          include: {
+            items: {
+              orderBy: { dayIndex: "asc" },
+              include: {
+                shift: {
+                  select: {
+                    id: true,
+                    name: true,
+                    startTime: true,
+                    endTime: true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      orderBy: {
+        requestedAt: "desc"
+      }
+    });
+
+    // 2️⃣ If rotational monthly approval exists → build week-wise from pattern
+    if (monthlyApproval?.pattern) {
+      const weekMap = new Map<number, any>();
+
+      for (const item of monthlyApproval.pattern.items) {
+        const date = new Date(firstWeekStart.getTime() + item.dayIndex * 86400000);
+
+        if (date < monthStart || date > monthEnd) continue;
+
+        const weekIndex = Math.floor(
+          (date.getTime() - firstWeekStart.getTime()) / (7 * 86400000)
+        );
+
+        const weekStart = new Date(firstWeekStart);
+        weekStart.setDate(firstWeekStart.getDate() + weekIndex * 7);
+
+        const weekEnd = new Date(weekStart);
+        weekEnd.setDate(weekStart.getDate() + 6);
+
+        if (!weekMap.has(weekIndex)) {
+          weekMap.set(weekIndex, {
+            weekIndex,
+            label: `Week ${weekIndex + 1}`,
+            fromDate: formatDate(weekStart),
+            toDate: formatDate(weekEnd),
+            shiftId: item.shift.id,
+            shiftName: item.shift.name,
+            startTime: item.shift.startTime,
+            endTime: item.shift.endTime
+          });
+        }
+      }
+      return res.json({
+        mode: "ROTATIONAL",
+        weeks: Array.from(weekMap.values()).sort((a, b) => a.weekIndex - b.weekIndex)
+      });
+    }
+
+    // 3️⃣ Otherwise check employee fixed shift setting
+    const setting = await prisma.employeeShiftSetting.findUnique({
+      where: { employeeId },
+      include: {
+        fixedShift: {
+          select: {
+            id: true,
+            name: true,
+            startTime: true,
+            endTime: true
+          }
+        }
+      }
+    });
+
+    if (setting?.mode === "FIXED" && setting.fixedShift) {
+      const weeks: any[] = [];
+
+      let current = new Date(firstWeekStart);
+      let weekIndex = 0;
+
+      while (current <= lastWeekEnd) {
+        const weekStart = new Date(current);
+        const weekEnd = new Date(current);
+        weekEnd.setDate(weekEnd.getDate() + 6);
+
+        if (weekEnd >= monthStart && weekStart <= monthEnd) {
+          weeks.push({
+            weekIndex,
+            label: `Week ${weekIndex + 1}`,
+            fromDate: formatDate(weekStart),
+            toDate: formatDate(weekEnd),
+            shiftId: setting.fixedShift.id,
+            shiftName: setting.fixedShift.name,
+            startTime: setting.fixedShift.startTime,
+            endTime: setting.fixedShift.endTime
+          });
+        }
+
+        current.setDate(current.getDate() + 7);
+        weekIndex++;
+      }
+
+      return res.json({
+        mode: "FIXED",
+        weeks
+      });
+    }
+
+    return res.json({
+      mode: null,
+      weeks: []
+    });
+  } catch (error) {
+    console.error("getEmployeeWeeklyShiftsForMonth error:", error);
+    return res.status(500).json({
+      error: "Failed to fetch weekly shifts for month"
+    });
+  }
+};
+
+function formatDate(d: Date) {
+  return d.toISOString().slice(0, 10);
+}

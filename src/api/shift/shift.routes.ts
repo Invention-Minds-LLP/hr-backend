@@ -30,6 +30,7 @@ import {
   getMonthlyShiftStatus,
   getEmployeeDailyShiftsForRange,
   getApprovedWeekOffs,
+  getEmployeeWeeklyShiftsForMonth,
 } from "./shift.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -92,6 +93,11 @@ router.post('/approve/:id', authenticateToken, approveShiftChange);
 router.get('/approvals/inbox', authenticateToken, listApprovalsInbox);
 router.get('/approvals/mine', authenticateToken, listMyShiftRequests);
 router.get('/approvals/employee/:employeeId', authenticateToken, listEmployeeShiftRequests);
+router.get(
+  '/weekly-month',
+  authenticateToken,
+  getEmployeeWeeklyShiftsForMonth
+);
 
 
 export default router;
