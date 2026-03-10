@@ -2981,6 +2981,8 @@ export const bulkUpdateReportingManager = async (req: Request, res: Response) =>
 };
 // controllers/employee.controller.ts
 export const getInchargeEmployees = async (req: Request, res: Response) => {
+
+  console.log('calling incharge employees')
   try {
     const incharges = await prisma.employee.findMany({
       where: {

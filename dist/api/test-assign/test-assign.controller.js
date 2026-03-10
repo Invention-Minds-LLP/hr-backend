@@ -13,8 +13,6 @@ exports.getAssignedTestOverview = exports.getAssignedTests = exports.assignTestT
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
-const leave_controller_1 = require("../leave/leave.controller");
-const notifications_controller_1 = require("../notifications/notifications.controller");
 const TEST_ASSIGNED_TEMPLATE_ID = '888289';
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" }) : "";
 const fmtTime = (d) => d ? new Date(d).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "";
@@ -66,22 +64,20 @@ const assignTestToEmployees = (req, res) => __awaiter(void 0, void 0, void 0, fu
             // 📩 Notification message
             const message = `You have been assigned the ${testName} scheduled on ${dateLabel} at ${timeLabel}.\nKindly ensure to complete it as instructed.`;
             // --- In-App Notification
-            try {
-                yield (0, notifications_controller_1.createNotification)(emp.id, message); // creates + broadcasts
-            }
-            catch (e) {
-                console.error("Test assign in-app notification failed:", e);
-            }
-            try {
-                yield (0, leave_controller_1.sendWhatsAppTemplate)({
-                    to,
-                    templateId: TEST_ASSIGNED_TEMPLATE_ID,
-                    placeholders: [employeeName, testName, dateLabel]
-                });
-            }
-            catch (e) {
-                console.error("Test assignment WA send failed:", e);
-            }
+            // try {
+            //   await createNotification(emp.id, message); // creates + broadcasts
+            // } catch (e) {
+            //   console.error("Test assign in-app notification failed:", e);
+            // }
+            // try {
+            //   await sendWhatsAppTemplate({
+            //     to,
+            //     templateId: TEST_ASSIGNED_TEMPLATE_ID,
+            //     placeholders: [employeeName, testName, dateLabel]
+            //   });
+            // } catch (e) {
+            //   console.error("Test assignment WA send failed:", e);
+            // }
         })));
         res.json({ message: 'Test assigned to employees' });
     }
@@ -102,8 +98,20 @@ exports.assignTestToEmployees = assignTestToEmployees;
 // };
 const getAssignedTests = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        // 1) Assignments with employee & test (need passingPercent)
+        const roleId = req.user.roleId;
+        const empId = req.user.empId;
+        let whereCondition = {};
+        // Reporting Manager → only their employees
+        if (roleId === 3) {
+            whereCondition = {
+                employee: {
+                    reportingManager: empId
+                }
+            };
+        }
+        // 1) Assignments with employee & test
         const assignments = yield prisma_1.prisma.assignedTest.findMany({
+            where: whereCondition,
             include: { employee: true, test: true },
             orderBy: { assignedAt: 'desc' },
         });
@@ -137,7 +145,7 @@ const getAssignedTests = (req, res) => __awaiter(void 0, void 0, void 0, functio
             const passThreshold = (_c = (_b = a.test) === null || _b === void 0 ? void 0 : _b.passingPercent) !== null && _c !== void 0 ? _c : null;
             // Assumes score is already a percentage (0–100). If not, adjust here.
             const pass = score !== null && passThreshold !== null ? Number(score) >= Number(passThreshold) : null;
-            return Object.assign(Object.assign({}, a), { status: latest ? latest.status : a.status, latestAttempt: latest, latestScore: score, result: pass === null ? null : pass ? 'Pass' : 'Fail' });
+            return Object.assign(Object.assign({}, a), { status: latest ? latest.status : a.status, latestAttempt: latest, latestScore: score, result: pass === null ? null : pass ? 'Pass' : 'On-Hold' });
         });
         res.json(enriched);
     }
@@ -272,4 +280,16 @@ function timeDiffSec(start, end) {
     if (!start || !end)
         return null;
     return Math.max(0, Math.floor((new Date(end).getTime() - new Date(start).getTime()) / 1000));
+}
+function getHRIds() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const hrs = yield prisma_1.prisma.employee.findMany({
+            where: {
+                departmentId: 1,
+                employmentStatus: 'ACTIVE'
+            },
+            select: { id: true }
+        });
+        return hrs.map(h => h.id);
+    });
 }

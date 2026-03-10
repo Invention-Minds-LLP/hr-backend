@@ -5,6 +5,9 @@ const attendance_controller_1 = require("./attendance.controller");
 const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = (0, express_1.Router)();
 //  GET /api/attendance-calendar/:employeeId?month=YYYY-MM
+router.get('/today', attendance_controller_1.getTodayAttendanceList);
+router.get('/history', attendance_controller_1.getAttendanceHistory);
+router.get('/register', attendance_controller_1.getMonthlyAttendanceRegister);
 router.get('/:employeeId', authMiddleware_1.authenticateToken, attendance_controller_1.getAttendanceCalendar);
 router.get("/", authMiddleware_1.authenticateToken, attendance_controller_1.getWeeklyAttendance);
 router.post("/approve", authMiddleware_1.authenticateToken, attendance_controller_1.approveAttendance);

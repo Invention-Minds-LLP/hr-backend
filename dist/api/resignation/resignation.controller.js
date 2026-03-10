@@ -15,13 +15,23 @@ var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (
 }) : function(o, v) {
     o["default"] = v;
 });
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
-    __setModuleDefault(result, mod);
-    return result;
-};
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -61,6 +71,8 @@ exports.hrApproveWithdraw = hrApproveWithdraw;
 exports.hrRejectWithdraw = hrRejectWithdraw;
 exports.uploadToFTP = uploadToFTP;
 exports.listResignationsWithClearances = listResignationsWithClearances;
+exports.setApplicableDepartments = setApplicableDepartments;
+exports.bulkUpdateClearanceItems = bulkUpdateClearanceItems;
 const client_1 = require("@prisma/client");
 const date_fns_1 = require("date-fns");
 const fsp = __importStar(require("fs/promises"));
@@ -70,9 +82,20 @@ const os = __importStar(require("os"));
 const path = __importStar(require("path"));
 const axios_1 = __importDefault(require("axios"));
 const basic_ftp_1 = require("basic-ftp");
+// import { ClearanceType } from '@prisma/client';
 const prisma = new client_1.PrismaClient();
 const node_cron_1 = __importDefault(require("node-cron"));
 const employee_controller_1 = require("../employee/employee.controller");
+function computeClearanceDecision(items) {
+    // If any DUE -> REJECTED
+    if (items.some(i => i.status === "DUE"))
+        return "REJECTED";
+    // If all are CLEARED or NA -> APPROVED
+    if (items.length > 0 && items.every(i => i.status === "CLEARED" || i.status === "NA"))
+        return "APPROVED";
+    // Else pending
+    return "PENDING";
+}
 /** Utils */
 const addDays = (d, days) => new Date(d.getTime() + days * 86400000);
 /** Create resignation (Employee) */
@@ -84,7 +107,7 @@ function createResignation(req, res) {
             // capture manager at the time of submission
             const emp = yield prisma.employee.findUnique({
                 where: { id: Number(employeeId) },
-                select: { reportingManager: true }
+                select: { reportingManager: true, employeeCode: true, firstName: true, lastName: true }
             });
             if (!emp)
                 return res.status(404).json({ error: 'Employee not found' });
@@ -101,6 +124,21 @@ function createResignation(req, res) {
                     status: 'SUBMITTED'
                 }
             });
+            // 🔔 Notify manager + HR
+            try {
+                const hrIds = yield getHRIds();
+                const notifyIds = new Set();
+                if (emp.reportingManager)
+                    notifyIds.add(emp.reportingManager);
+                hrIds.forEach(id => notifyIds.add(id));
+                const message = `New resignation submitted by Employee ${emp.firstName} ${emp.lastName} (${emp.employeeCode}).`;
+                // for (const id of notifyIds) {
+                //   await createNotification(id, message);
+                // }
+            }
+            catch (err) {
+                console.error("Resignation notification failed:", err);
+            }
             res.status(201).json(rec);
         }
         catch (e) {
@@ -131,7 +169,11 @@ function listResignations(req, res) {
                 where,
                 orderBy: { createdAt: 'desc' },
                 include: {
-                    employee: { select: { id: true, firstName: true, lastName: true, departmentId: true, designation: true, reportingManager: true } },
+                    employee: {
+                        select: {
+                            id: true, firstName: true, lastName: true, departmentId: true, designation: true, reportingManager: true, gender: true, photoUrl: true
+                        }
+                    },
                     handoverTasks: true,
                     clearances: true,
                     exitInterview: true,
@@ -175,6 +217,25 @@ function getResignationById(req, res) {
                         }
                     },
                     // Clearances
+                    // clearances: {
+                    //   select: {
+                    //     id: true,
+                    //     type: true,
+                    //     decision: true,
+                    //     note: true,
+                    //     verifierId: true,
+                    //     departmentId:true,
+                    //     department: {
+                    //       select: { name: true }
+                    //     },
+                    //     verifier: {
+                    //       select: {
+                    //         firstName: true,
+                    //         lastName: true
+                    //       }
+                    //     }
+                    //   }
+                    // },
                     clearances: {
                         select: {
                             id: true,
@@ -182,11 +243,30 @@ function getResignationById(req, res) {
                             decision: true,
                             note: true,
                             verifierId: true,
+                            departmentId: true,
+                            department: {
+                                select: { name: true }
+                            },
                             verifier: {
                                 select: {
                                     firstName: true,
                                     lastName: true
                                 }
+                            },
+                            items: {
+                                select: {
+                                    id: true,
+                                    label: true,
+                                    status: true,
+                                    note: true,
+                                    verifier: {
+                                        select: {
+                                            firstName: true,
+                                            lastName: true
+                                        }
+                                    }
+                                },
+                                orderBy: { id: 'asc' }
                             }
                         }
                     },
@@ -204,7 +284,8 @@ function getResignationById(req, res) {
                             status: true,
                             note: true
                         }
-                    }
+                    },
+                    documents: true
                 }
             });
             if (!row)
@@ -256,8 +337,28 @@ function managerApprove(req, res) {
                 data.proposedLastWorkingDay = new Date(overrideLastWorkingDay);
             const upd = yield prisma.resignationRequest.update({
                 where: { id },
-                data
+                data,
+                include: {
+                    employee: {
+                        select: {
+                            firstName: true,
+                            lastName: true,
+                            employeeCode: true
+                        }
+                    }
+                }
             });
+            // 🔔 Notify HR after manager decision
+            try {
+                const hrIds = yield getHRIds();
+                const message = `Manager has approved the resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
+                // for (const hrId of hrIds) {
+                //   await createNotification(hrId, message);
+                // }
+            }
+            catch (err) {
+                console.error("Manager action notification failed:", err);
+            }
             res.json(upd);
         }
         catch (e) {
@@ -278,8 +379,28 @@ function managerReject(req, res) {
                     managerDecidedAt: new Date(),
                     managerNote: note,
                     status: 'REJECTED'
+                },
+                include: {
+                    employee: {
+                        select: {
+                            firstName: true,
+                            lastName: true,
+                            employeeCode: true
+                        }
+                    }
                 }
             });
+            // 🔔 Notify HR after manager decision
+            try {
+                const hrIds = yield getHRIds();
+                const message = `Manager has rejected the resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
+                // for (const hrId of hrIds) {
+                //   await createNotification(hrId, message);
+                // }
+            }
+            catch (err) {
+                console.error("Manager action notification failed:", err);
+            }
             res.json(upd);
         }
         catch (e) {
@@ -342,6 +463,23 @@ function hrApprove(req, res) {
                 });
                 console.log(`✅ Created new job for replacement: Job ID ${newJob.id}`);
             }
+            // 🔔 Notify employee about HR approval
+            // try {
+            //   const message = `Your resignation has been approved. Please complete exit formalities.`;
+            //   await createNotification(upd.employeeId, message);
+            // } catch (err) {
+            //   console.error("HR approval notification failed:", err);
+            // }
+            const defaultDepts = yield prisma.department.findMany({
+                where: { isDefaultClearance: true },
+                select: { id: true },
+            });
+            const defaultDeptIds = defaultDepts.map(d => d.id);
+            // create HOD + default departments
+            yield initOffboardingClearances(upd.id, defaultDeptIds);
+            // ✅ IMPORTANT: at HR approval, create HOD clearance only (department manager)
+            // Department clearances will be created after HR selects departments in post-HR screen
+            // await initOffboardingClearances(upd.id, []); // only HOD
             res.json(upd);
         }
         catch (e) {
@@ -364,6 +502,12 @@ function hrReject(req, res) {
                     status: 'REJECTED'
                 }
             });
+            // try {
+            //   const message = `Your resignation has been rejected by HR.`;
+            //   await createNotification(upd.employeeId, message);
+            // } catch (err) {
+            //   console.error("HR rejection notification failed:", err);
+            // }
             res.json(upd);
         }
         catch (e) {
@@ -380,6 +524,12 @@ function hrCancel(req, res) {
                 where: { id },
                 data: { status: 'CANCELLED' }
             });
+            // try {
+            //   const message = `Your resignation has been cancelled by HR.`;
+            //   await createNotification(upd.employeeId, message);
+            // } catch (err) {
+            //   console.error("HR cancel notification failed:", err);
+            // }
             res.json(upd);
         }
         catch (e) {
@@ -436,13 +586,48 @@ function updateTask(req, res) {
     });
 }
 /** Clearances (upsert per type) */
+// export async function upsertClearance(req: Request, res: Response) {
+//   try {
+//     const id = Number(req.params.id);
+//     const { type, decision, note, verifierId } = req.body as {
+//       type: $Enums.ClearanceType;
+//       decision: $Enums.ApprovalDecision;
+//       note?: string;
+//       verifierId?: number;
+//     };
+//     const existing = await prisma.resignationClearance.findUnique({
+//       where: { resignationId_type: { resignationId: id, type } }
+//     });
+//     const row = existing
+//       ? await prisma.resignationClearance.update({
+//         where: { id: existing.id },
+//         data: { decision, note, verifierId: verifierId ?? null, decidedAt: new Date() }
+//       })
+//       : await prisma.resignationClearance.create({
+//         data: { resignationId: id, type, decision, note, verifierId: verifierId ?? null, decidedAt: new Date() }
+//       });
+//     res.json(row);
+//   } catch (e) {
+//     console.error(e);
+//     res.status(500).json({ error: 'Clearance update failed' });
+//   }
+// }
 function upsertClearance(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
         try {
             const id = Number(req.params.id);
-            const { type, decision, note, verifierId } = req.body;
-            const existing = yield prisma.resignationClearance.findUnique({
-                where: { resignationId_type: { resignationId: id, type } }
+            const { departmentId, decision, note, verifierId } = req.body;
+            // get department name
+            const dept = yield prisma.department.findUnique({
+                where: { id: departmentId },
+                select: { name: true }
+            });
+            if (!dept) {
+                return res.status(404).json({ error: 'Department not found' });
+            }
+            const type = dept.name;
+            const existing = yield prisma.resignationClearance.findFirst({
+                where: { resignationId: id, departmentId }
             });
             const row = existing
                 ? yield prisma.resignationClearance.update({
@@ -450,7 +635,15 @@ function upsertClearance(req, res) {
                     data: { decision, note, verifierId: verifierId !== null && verifierId !== void 0 ? verifierId : null, decidedAt: new Date() }
                 })
                 : yield prisma.resignationClearance.create({
-                    data: { resignationId: id, type, decision, note, verifierId: verifierId !== null && verifierId !== void 0 ? verifierId : null, decidedAt: new Date() }
+                    data: {
+                        resignationId: id,
+                        departmentId,
+                        type,
+                        decision,
+                        note,
+                        verifierId: verifierId !== null && verifierId !== void 0 ? verifierId : null,
+                        decidedAt: new Date()
+                    }
                 });
             res.json(row);
         }
@@ -489,6 +682,13 @@ function scheduleExitInterview(req, res) {
                     notes
                 }
             });
+            // 🔔 Notify employee about exit interview
+            // try {
+            //   const message = `Your exit interview has been scheduled. Please check details.`;
+            //   await createNotification(resignation.employeeId, message);
+            // } catch (err) {
+            //   console.error("Exit interview notification failed:", err);
+            // }
             res.json(row);
         }
         catch (e) {
@@ -580,7 +780,7 @@ function listExitInterviews(_req, res) {
                 if (interview.interviewerId) {
                     const interviewer = yield prisma.employee.findUnique({
                         where: { id: interview.interviewerId },
-                        select: { firstName: true, lastName: true },
+                        select: { firstName: true, lastName: true, gender: true, photoUrl: true },
                     });
                     if (interviewer) {
                         interviewerName = `${interviewer.firstName} ${interviewer.lastName}`;
@@ -624,6 +824,14 @@ function markCompleted(req, res) {
                 where: { id },
                 data: { status: 'COMPLETED' }
             });
+            // try {
+            //   await createNotification(
+            //     upd.employeeId,
+            //     "Your exit process has been completed. We wish you all the best."
+            //   );
+            // } catch (err) {
+            //   console.error("Completion notification failed:", err);
+            // }
             res.json(upd);
         }
         catch (e) {
@@ -647,6 +855,14 @@ function hrHold(req, res) {
                     // hrDecidedAt: null  // optional: clear decidedAt if it was set
                 }
             });
+            // try {
+            //   await createNotification(
+            //     upd.employeeId,
+            //     "Your resignation has been placed on hold by HR. Please contact HR for details."
+            //   );
+            // } catch (err) {
+            //   console.error("HR hold notification failed:", err);
+            // }
             res.json(upd);
         }
         catch (e) {
@@ -677,7 +893,26 @@ function requestWithdraw(req, res) {
                     withdrawDecision: null,
                     withdrawDecidedAt: null,
                 },
+                include: {
+                    employee: {
+                        select: {
+                            firstName: true,
+                            lastName: true,
+                            employeeCode: true
+                        }
+                    }
+                }
             });
+            // 🔔 Notify HR about withdraw request
+            // try {
+            //   const hrIds = await getHRIds();
+            //   const message = `Withdraw request submitted for resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
+            //   for (const hrId of hrIds) {
+            //     await createNotification(hrId, message);
+            //   }
+            // } catch (err) {
+            //   console.error("Withdraw notification failed:", err);
+            // }
             res.json(upd);
         }
         catch (e) {
@@ -708,6 +943,13 @@ function hrApproveWithdraw(req, res) {
                     withdrawStatusChangedBy: approvedBy,
                 },
             });
+            // 🔔 Notify employee withdraw approved
+            // try {
+            //   const message = `Your resignation withdrawal has been approved.`;
+            //   await createNotification(row.employeeId, message);
+            // } catch (err) {
+            //   console.error("Employee withdraw notification failed:", err);
+            // }
             res.json(upd);
         }
         catch (e) {
@@ -737,6 +979,13 @@ function hrRejectWithdraw(req, res) {
                     status: "SUBMITTED", // go back to normal resignation workflow
                 },
             });
+            // 🔔 Notify employee withdraw approved
+            // try {
+            //   const message = `Your resignation withdrawal has been rejected.`;
+            //   await createNotification(row.employeeId, message);
+            // } catch (err) {
+            //   console.error("Employee withdraw notification failed:", err);
+            // }
             res.json(upd);
         }
         catch (e) {
@@ -759,7 +1008,22 @@ const generateClearanceCertificate = (req, res) => __awaiter(void 0, void 0, voi
         where: { id },
         include: {
             employee: { include: { Department: true, Branch: true } },
-            clearances: true,
+            clearances: {
+                include: {
+                    department: { select: { name: true } },
+                    items: {
+                        include: {
+                            verifier: {
+                                select: {
+                                    firstName: true,
+                                    lastName: true,
+                                    employeeCode: true
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             handoverTasks: true,
             finalSettlement: true,
         },
@@ -767,7 +1031,13 @@ const generateClearanceCertificate = (req, res) => __awaiter(void 0, void 0, voi
     if (!r)
         return res.status(404).json({ message: 'Resignation not found' });
     // 2) Eligibility checks
-    const allClearancesApproved = r.clearances.length > 0 && r.clearances.every(c => c.decision === 'APPROVED');
+    // const allClearancesApproved = r.clearances.length > 0 && r.clearances.every(c => c.decision === 'APPROVED');
+    const requiredClearances = r.clearances;
+    // const allClearancesApproved =
+    //   requiredClearances.length > 0 &&
+    //   requiredClearances.every(c => c.decision === 'APPROVED');
+    const allClearancesApproved = r.clearances.length > 0 &&
+        r.clearances.every(c => c.decision === "APPROVED");
     const allTasksDone = r.handoverTasks.every(t => t.status === 'DONE');
     const settlementPaid = ((_a = r.finalSettlement) === null || _a === void 0 ? void 0 : _a.status) === 'PAID';
     const statusOk = ['APPROVED', 'COMPLETED'].includes(r.status);
@@ -791,12 +1061,41 @@ const generateClearanceCertificate = (req, res) => __awaiter(void 0, void 0, voi
         branchName: (_e = (_d = r.employee.Branch) === null || _d === void 0 ? void 0 : _d.name) !== null && _e !== void 0 ? _e : null,
         dateOfJoining: r.employee.dateOfJoining,
         lastWorkingDay: (_f = r.actualLastWorkingDay) !== null && _f !== void 0 ? _f : r.proposedLastWorkingDay,
-        clearances: r.clearances.map(c => ({
-            type: String(c.type),
-            decision: c.decision, // 'PENDING' | 'APPROVED' | 'REJECTED'
-            decidedAt: c.decidedAt,
-            note: c.note,
-        })),
+        // clearances: r.clearances.map(c => ({
+        //   type: c.department?.name || c.type,
+        //   decision: c.decision as any, // 'PENDING' | 'APPROVED' | 'REJECTED'
+        //   decidedAt: c.decidedAt,
+        //   note: c.note,
+        //   // ✅ NEW: include checklist summary
+        //   items: (c.items || []).map(it => ({
+        //     label: it.label,
+        //     status: it.status,
+        //     verifierName: it.verifier ? `${it.verifier.firstName} ${it.verifier.lastName}` : ""
+        //   })),
+        // })),
+        clearances: r.clearances.map(c => {
+            var _a;
+            return ({
+                // type: c.department?.name || c.type,
+                type: c.type === 'HOD'
+                    ? 'HOD'
+                    : ((_a = c.department) === null || _a === void 0 ? void 0 : _a.name) || c.type,
+                decision: c.decision,
+                decidedAt: c.decidedAt,
+                note: c.note,
+                items: (c.items || []).map(it => {
+                    var _a;
+                    return ({
+                        label: it.label,
+                        status: it.status,
+                        verifierName: it.verifier
+                            ? `${it.verifier.firstName} ${it.verifier.lastName}`
+                            : "",
+                        verifierCode: ((_a = it.verifier) === null || _a === void 0 ? void 0 : _a.employeeCode) || ""
+                    });
+                }),
+            });
+        }),
         companyName: COMPANY_NAME,
         companyLogoUrl: COMPANY_LOGO_URL,
         companyTagline: COMPANY_TAGLINE,
@@ -920,17 +1219,17 @@ function generateClearancePdf(input) {
             y += headerH;
         };
         drawHeader();
-        for (const c of input.clearances) {
-            const cells = [c.type, c.decision, fmtDate((_e = c.decidedAt) !== null && _e !== void 0 ? _e : null), (_f = c.note) !== null && _f !== void 0 ? _f : ''];
-            const neededH = measureRowHeight({ doc, widths: colWidths, cells });
-            if (y + neededH > pageBottom) {
-                doc.addPage();
-                y = M;
-                // repeat header on new page
-                drawHeader();
-            }
-            y += drawRow({ doc, x: tableX, y, heights: 22, widths: colWidths, cells });
-        }
+        // for (const c of input.clearances) {
+        //   const cells = [c.type, c.decision, fmtDate(c.decidedAt ?? null), c.note ?? ''];
+        //   const neededH = measureRowHeight({ doc, widths: colWidths, cells });
+        //   if (y + neededH > pageBottom) {
+        //     doc.addPage();
+        //     y = M;
+        //     // repeat header on new page
+        //     drawHeader();
+        //   }
+        //   y += drawRow({ doc, x: tableX, y, heights: 22, widths: colWidths, cells });
+        // }
         // QR + signatures
         // const qrDataUrl = await QRCode.toDataURL(input.verifyUrl);
         // const qrBuf = dataURLtoBuffer(qrDataUrl);
@@ -940,6 +1239,42 @@ function generateClearancePdf(input) {
         // doc.image(qrBuf, qrX, qrY, { width: qrSize });
         // doc.font('Helvetica').fontSize(10).fillColor('#6b7280')
         //    .text('Scan to verify', qrX, qrY + qrSize + 4, { width: qrSize, align: 'center' });
+        for (const c of input.clearances) {
+            // Department row (bold)
+            const deptCells = [
+                c.type,
+                c.decision,
+                fmtDate((_e = c.decidedAt) !== null && _e !== void 0 ? _e : null),
+                (_f = c.note) !== null && _f !== void 0 ? _f : ''
+            ];
+            const deptH = measureRowHeight({ doc, widths: colWidths, cells: deptCells });
+            if (y + deptH > pageBottom) {
+                doc.addPage();
+                y = M;
+                drawHeader();
+            }
+            doc.font('Helvetica-Bold');
+            y += drawRow({ doc, x: tableX, y, heights: 22, widths: colWidths, cells: deptCells });
+            doc.font('Helvetica');
+            // Checklist items
+            for (const it of c.items || []) {
+                const itemCells = [
+                    `   • ${it.label}`,
+                    it.status,
+                    '',
+                    it.verifierName
+                        ? `${it.verifierName} (${it.verifierCode})`
+                        : ''
+                ];
+                const itemH = measureRowHeight({ doc, widths: colWidths, cells: itemCells });
+                if (y + itemH > pageBottom) {
+                    doc.addPage();
+                    y = M;
+                    drawHeader();
+                }
+                y += drawRow({ doc, x: tableX, y, heights: 20, widths: colWidths, cells: itemCells });
+            }
+        }
         const sigY = Math.min(h - 180, y + 12) + 20;
         doc.moveTo(M + 30, sigY).lineTo(M + 180, sigY).stroke('#9ca3af');
         doc.moveTo(M + 230, sigY).lineTo(M + 380, sigY).stroke('#9ca3af');
@@ -1035,69 +1370,210 @@ function uploadToFTP(localFilePath, remoteFilePath) {
         }
     });
 }
+// export async function listResignationsWithClearances(req: AuthenticatedRequest, res: Response) {
+//   try {
+//     const userId = req.user?.userId;
+//     if (!userId) {
+//       res.status(401).json({ error: 'Unauthorized' });
+//       return;
+//     }
+//     const user = await prisma.user.findUnique({
+//       where: { id: userId },
+//       include: {
+//         employee: {
+//           include: { role: true, Department: true }
+//         }
+//       }
+//     });
+//     if (!user) {
+//       res.status(404).json({ error: 'User not found' });
+//       return;
+//     }
+//     const emp = user.employee;
+//     const isReportingManager = emp.roleId === 3;
+//     const isHRManager = emp.roleId === 1;
+//     // ✅ Determine which clearance type this user manages
+//     const deptName = emp.Department?.name?.toUpperCase() ?? '';
+//     // const allowedClearanceType =
+//     //   ['HR', 'FINANCE', 'IT', 'ADMIN', 'SECURITY'].includes(deptName)
+//     //     ? deptName
+//     //     : null;
+//     const allowedDepartmentId = emp.departmentId;
+//     const whereCondition = isHRManager
+//       ? {} // HR sees all
+//       : { managerId: emp.id }; // Reporting managers see only their reports
+//     if (!isReportingManager) {
+//       // If not reporting manager → optional logic
+//       // either block access or show all (if HR/Admin)
+//       // return res.status(403).json({ error: 'Access denied. Only reporting managers can view clearances.' });
+//     }
+//     // Fetch resignations under this reporting manager
+//     const resignations = await prisma.resignationRequest.findMany({
+//       where: whereCondition, // 👈 show only employees reporting to this manager
+//       include: {
+//         employee: {
+//           select: {
+//             id: true,
+//             firstName: true,
+//             lastName: true,
+//             departmentId: true,
+//             employeeCode: true,
+//             gender:true,
+//             photoUrl: true,
+//             Department: { select: { name: true } }
+//           }
+//         },
+//         // clearances: allowedClearanceType
+//         //   ? { where: { type: allowedClearanceType as ClearanceType } } // ✅ Cast it to the enum
+//         //   : false,
+//         clearances: allowedDepartmentId
+//           ? { where: { departmentId: allowedDepartmentId } }
+//           : false,
+//       },
+//       orderBy: { createdAt: 'desc' }
+//     });
+//     res.json(resignations);
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: 'Failed to load resignation clearances' });
+//   }
+// }
+// export async function listResignationsWithClearances(req: AuthenticatedRequest, res: Response) {
+//   try {
+//     const userId = req.user?.userId;
+//     if (!userId) return res.status(401).json({ error: "Unauthorized" });
+//     const user = await prisma.user.findUnique({
+//       where: { id: userId },
+//       include: { employee: { include: { role: true, Department: true } } },
+//     });
+//     if (!user?.employee) return res.status(404).json({ error: "User not found" });
+//     const emp = user.employee;
+//     const isHRManager = emp.roleId === 1; // adjust to your role mapping
+//     const isReportingManager = emp.roleId === 3; // adjust
+//     console.log(emp, isReportingManager)
+//     const whereCondition = isHRManager ? {} : isReportingManager ? { managerId: emp.id } : {};
+//     console.log(whereCondition)
+//     const resignations = await prisma.resignationRequest.findMany({
+//       where: whereCondition,
+//       orderBy: { createdAt: "desc" },
+//       include: {
+//         employee: {
+//           select: {
+//             id: true,
+//             firstName: true,
+//             lastName: true,
+//             employeeCode: true,
+//             gender: true,
+//             photoUrl: true,
+//             Department: { select: { name: true } },
+//           }
+//         },
+//         // clearances: isHRManager
+//         //   ? {
+//         //     include: {
+//         //       department: { select: { name: true } },
+//         //       items: { orderBy: [{ id: "asc" }] },
+//         //     }
+//         //   }
+//         //   : {
+//         //     where: { departmentId: emp.departmentId },
+//         //     include: {
+//         //       department: { select: { name: true } },
+//         //       items: { orderBy: [{ id: "asc" }] },
+//         //     }
+//         //   },
+//         clearances: isHRManager
+//           ? {
+//             include: {
+//               department: { select: { name: true } },
+//               items: { orderBy: [{ id: "asc" }] },
+//             }
+//           }
+//           : {
+//             where: {
+//               OR: [
+//                 { departmentId: emp.departmentId }, // department clearance
+//                 { type: "HOD", verifierId: emp.id } // HOD clearance
+//               ]
+//             },
+//             include: {
+//               department: { select: { name: true } },
+//               items: { orderBy: [{ id: "asc" }] },
+//             }
+//           },
+//       }
+//     });
+//     return res.json(resignations);
+//   } catch (e) {
+//     console.error(e);
+//     return res.status(500).json({ error: "Failed to load resignation clearances" });
+//   }
+// }
 function listResignationsWithClearances(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
-        var _a, _b, _c, _d;
+        var _a;
         try {
             const userId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.userId;
-            if (!userId) {
-                res.status(401).json({ error: 'Unauthorized' });
-                return;
-            }
+            if (!userId)
+                return res.status(401).json({ error: "Unauthorized" });
             const user = yield prisma.user.findUnique({
                 where: { id: userId },
-                include: {
-                    employee: {
-                        include: { role: true, Department: true }
-                    }
-                }
+                include: { employee: { include: { role: true, Department: true } } },
             });
-            if (!user) {
-                res.status(404).json({ error: 'User not found' });
-                return;
-            }
+            if (!(user === null || user === void 0 ? void 0 : user.employee))
+                return res.status(404).json({ error: "User not found" });
             const emp = user.employee;
-            const isReportingManager = emp.roleId === 3;
             const isHRManager = emp.roleId === 1;
-            // ✅ Determine which clearance type this user manages
-            const deptName = (_d = (_c = (_b = emp.Department) === null || _b === void 0 ? void 0 : _b.name) === null || _c === void 0 ? void 0 : _c.toUpperCase()) !== null && _d !== void 0 ? _d : '';
-            const allowedClearanceType = ['HR', 'FINANCE', 'IT', 'ADMIN', 'SECURITY'].includes(deptName)
-                ? deptName
-                : null;
             const whereCondition = isHRManager
-                ? {} // HR sees all
-                : { managerId: emp.id }; // Reporting managers see only their reports
-            if (!isReportingManager) {
-                // If not reporting manager → optional logic
-                // either block access or show all (if HR/Admin)
-                return res.status(403).json({ error: 'Access denied. Only reporting managers can view clearances.' });
-            }
-            // Fetch resignations under this reporting manager
+                ? {}
+                : {
+                    clearances: {
+                        some: {
+                            departmentId: emp.departmentId,
+                        },
+                    },
+                };
             const resignations = yield prisma.resignationRequest.findMany({
-                where: whereCondition, // 👈 show only employees reporting to this manager
+                where: whereCondition,
+                orderBy: { createdAt: "desc" },
                 include: {
                     employee: {
                         select: {
                             id: true,
                             firstName: true,
                             lastName: true,
-                            departmentId: true,
                             employeeCode: true,
-                            Department: { select: { name: true } }
-                        }
+                            gender: true,
+                            photoUrl: true,
+                            Department: { select: { name: true } },
+                        },
                     },
-                    clearances: allowedClearanceType
-                        ? { where: { type: allowedClearanceType } } // ✅ Cast it to the enum
-                        : false,
+                    clearances: {
+                        include: {
+                            department: { select: { name: true } },
+                            items: { orderBy: [{ id: "asc" }] },
+                        },
+                    },
                 },
-                orderBy: { createdAt: 'desc' }
             });
-            res.json(resignations);
+            return res.json(resignations);
         }
-        catch (err) {
-            console.error(err);
-            res.status(500).json({ error: 'Failed to load resignation clearances' });
+        catch (e) {
+            console.error(e);
+            return res.status(500).json({ error: "Failed to load resignation clearances" });
         }
+    });
+}
+function getHRIds() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const hrs = yield prisma.employee.findMany({
+            where: {
+                departmentId: 1,
+                employmentStatus: 'ACTIVE'
+            },
+            select: { id: true }
+        });
+        return hrs.map(h => h.id);
     });
 }
 const initNoticePeriodSchedular = () => {
@@ -1144,3 +1620,648 @@ const initNoticePeriodSchedular = () => {
     }));
 };
 exports.initNoticePeriodSchedular = initNoticePeriodSchedular;
+// export async function setApplicableDepartments(req: Request, res: Response) {
+//   const id = Number(req.params.id);
+//   const { departmentIds } = req.body;
+//   await prisma.$transaction(async (tx) => {
+//     // remove old
+//     await tx.resignationClearance.deleteMany({
+//       where: { resignationId: id }
+//     });
+//     // create new clearance rows
+//     for (const deptId of departmentIds) {
+//       const dept = await tx.department.findUnique({
+//         where: { id: deptId },
+//         select: { name: true }
+//       });
+//       if (dept) {
+//         await tx.resignationClearance.create({
+//           data: {
+//             resignationId: id,
+//             departmentId: deptId,
+//             type: dept.name,
+//             decision: 'PENDING'
+//           }
+//         });
+//       }
+//     }
+//   });
+//   res.json({ success: true });
+// }
+function rebuildClearanceItemsFromTemplate(tx, clearanceId, departmentId) {
+    return __awaiter(this, void 0, void 0, function* () {
+        // load template items
+        const templates = yield tx.clearanceTemplateItem.findMany({
+            where: { departmentId },
+            orderBy: [{ orderNo: "asc" }, { id: "asc" }],
+        });
+        // create items (copy label)
+        if (templates.length) {
+            yield tx.resignationClearanceItem.createMany({
+                data: templates.map(t => ({
+                    clearanceId,
+                    templateItemId: t.id,
+                    label: t.label,
+                    status: "PENDING",
+                })),
+            });
+        }
+        else {
+            // fallback: if no template exists, create one generic line
+            yield tx.resignationClearanceItem.create({
+                data: {
+                    clearanceId,
+                    templateItemId: null,
+                    label: "Clearance checklist not configured",
+                    status: "PENDING",
+                }
+            });
+        }
+    });
+}
+/**
+ * HR sets applicable departments:
+ * - Deletes existing clearances + items
+ * - Creates new ResignationClearance per department
+ * - Creates ResignationClearanceItem from ClearanceTemplateItem
+ */
+// export async function setApplicableDepartments(req: Request, res: Response) {
+//   const resignationId = Number(req.params.id);
+//   const { departmentIds } = req.body as { departmentIds: number[] };
+//   if (!Array.isArray(departmentIds) || departmentIds.length === 0) {
+//     return res.status(400).json({ error: "departmentIds is required" });
+//   }
+//   try {
+//     await prisma.$transaction(async (tx) => {
+//       // find existing clearances
+//       const existing = await tx.resignationClearance.findMany({
+//         where: { resignationId },
+//         select: { id: true },
+//       });
+//       const clearanceIds = existing.map(c => c.id);
+//       // delete items then clearances
+//       if (clearanceIds.length) {
+//         await tx.resignationClearanceItem.deleteMany({
+//           where: { clearanceId: { in: clearanceIds } },
+//         });
+//         await tx.resignationClearance.deleteMany({
+//           where: { id: { in: clearanceIds } },
+//         });
+//       }
+//       // create new clearances + items
+//       for (const deptId of departmentIds) {
+//         const dept = await tx.department.findUnique({
+//           where: { id: deptId },
+//           select: { id: true, name: true },
+//         });
+//         if (!dept) continue;
+//         const clearance = await tx.resignationClearance.create({
+//           data: {
+//             resignationId,
+//             departmentId: dept.id,
+//             type: dept.name,         // keep for display (optional)
+//             decision: "PENDING",
+//           },
+//           select: { id: true },
+//         });
+//         await rebuildClearanceItemsFromTemplate(tx as any, clearance.id, dept.id);
+//       }
+//     });
+//     return res.json({ success: true });
+//   } catch (e) {
+//     console.error("setApplicableDepartments error:", e);
+//     return res.status(500).json({ error: "Failed to set applicable departments" });
+//   }
+// }
+// export async function setApplicableDepartments(req: Request, res: Response) {
+//   const resignationId = Number(req.params.id);
+//   const { departmentIds } = req.body as { departmentIds: number[] };
+//   if (!Array.isArray(departmentIds) || departmentIds.length === 0) {
+//     return res.status(400).json({ error: "departmentIds is required" });
+//   }
+//   try {
+//     await prisma.$transaction(async (tx) => {
+//       // get existing clearances
+//       const existing = await tx.resignationClearance.findMany({
+//         where: { resignationId },
+//         select: { id: true, departmentId: true }
+//       });
+//       // const existingDeptIds = existing.map(c => c.departmentId);
+//       // const toAdd = departmentIds.filter(id => !existingDeptIds.includes(id));
+//       // const toRemove = existing.filter(c => !departmentIds.includes(c.departmentId));
+//       const existingDeptIds = existing
+//         .map(c => c.departmentId)
+//         .filter((id): id is number => id !== null);
+//       const toAdd = departmentIds.filter(id => !existingDeptIds.includes(id));
+//       const toRemove = existing.filter(
+//         c => c.departmentId !== null && !departmentIds.includes(c.departmentId)
+//       );
+//       // 1) Remove deselected departments
+//       for (const c of toRemove) {
+//         await tx.resignationClearanceItem.deleteMany({
+//           where: { clearanceId: c.id }
+//         });
+//         await tx.resignationClearance.delete({
+//           where: { id: c.id }
+//         });
+//       }
+//       // 2) Add new departments
+//       for (const deptId of toAdd) {
+//         const dept = await tx.department.findUnique({
+//           where: { id: deptId },
+//           select: { id: true, name: true }
+//         });
+//         if (!dept || typeof dept.name !== "string") {
+//           console.warn(`Invalid department data for id ${deptId}`);
+//           continue;
+//         }
+//         const clearance = await tx.resignationClearance.create({
+//           data: {
+//             resignationId,
+//             departmentId: dept.id,
+//             type: dept.name,
+//             decision: "PENDING"
+//           },
+//           select: { id: true }
+//         });
+//         await rebuildClearanceItemsFromTemplate(tx as any, clearance.id, dept.id);
+//       }
+//     });
+//     return res.json({ success: true });
+//   } catch (e) {
+//     console.error("setApplicableDepartments error:", e);
+//     return res.status(500).json({ error: "Failed to set applicable departments" });
+//   }
+// }
+function setApplicableDepartments(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const resignationId = Number(req.params.id);
+        const { departmentIds } = req.body;
+        if (!Array.isArray(departmentIds)) {
+            return res.status(400).json({ error: "departmentIds must be array" });
+        }
+        try {
+            // ✅ Create/ensure clearances + items for these departments
+            yield initOffboardingClearances(resignationId, departmentIds);
+            return res.json({ success: true });
+        }
+        catch (e) {
+            console.error("setApplicableDepartments error:", e);
+            return res.status(500).json({ error: "Failed to set applicable departments" });
+        }
+    });
+}
+/**
+ * Bulk update items for one department clearance:
+ * PATCH /resignations/:id/clearances/:clearanceId/items
+ * body: { items: [{ id, status, note? }] }
+ *
+ * - verifies items belong to clearance
+ * - updates items
+ * - re-computes ResignationClearance.decision
+ */
+// export async function bulkUpdateClearanceItems(req: AuthenticatedRequest, res: Response) {
+//   try {
+//     const resignationId = Number(req.params.id);
+//     const clearanceId = Number(req.params.clearanceId);
+//     const { items } = req.body as { items: Array<{ id: number; status: ClearanceItemStatus; note?: string }> };
+//     const userId = req.user?.userId;
+//     if (!userId) {
+//       res.status(401).json({ error: "Unauthorized" });
+//       return;
+//     }
+//     if (!Array.isArray(items) || items.length === 0) {
+//       res.status(400).json({ error: "items is required" });
+//       return;
+//     }
+//     const user = await prisma.user.findUnique({
+//       where: { id: userId },
+//       include: { employee: true },
+//     });
+//     if (!user?.employee) {
+//       res.status(404).json({ error: "User not found" });
+//       return;
+//     }
+//     // load clearance (and verify resignation)
+//     const clearance = await prisma.resignationClearance.findFirst({
+//       where: { id: clearanceId, resignationId },
+//       select: { id: true, departmentId: true },
+//     });
+//     if (!clearance) {
+//       res.status(404).json({ error: "Clearance not found" });
+//       return;
+//     }
+//     // Security: only allow department owner (or HR) to update
+//     const isHR = user.employee.roleId === 1; // adjust
+//     const isSameDept = clearance.departmentId && user.employee.departmentId === clearance.departmentId;
+//     if (!isHR && !isSameDept) {
+//       res.status(403).json({ error: "Forbidden" });
+//       return;
+//     }
+//     await prisma.$transaction(async (tx) => {
+//       // update each item (only if belongs to clearance)
+//       for (const it of items) {
+//         await tx.resignationClearanceItem.updateMany({
+//           where: { id: it.id, clearanceId: clearance.id },
+//           data: {
+//             status: it.status,
+//             note: it.note ?? undefined,
+//             verifierId: user.employee.id,
+//             decidedAt: new Date(),
+//           }
+//         });
+//       }
+//       // reload items and compute clearance decision
+//       const allItems = await tx.resignationClearanceItem.findMany({
+//         where: { clearanceId: clearance.id },
+//         select: { status: true },
+//       });
+//       const decision = computeClearanceDecision(allItems as any);
+//       await tx.resignationClearance.update({
+//         where: { id: clearance.id },
+//         data: {
+//           decision,
+//           verifierId: user.employee.id,
+//           decidedAt: decision === "PENDING" ? null : new Date(),
+//         }
+//       });
+//     });
+//     res.json({ success: true });
+//     return;
+//   } catch (e) {
+//     console.error("bulkUpdateClearanceItems error:", e);
+//     res.status(500).json({ error: "Failed to update clearance items" });
+//     return;
+//   }
+// }
+// async function initOffboardingClearances(resignationId: number, selectedDeptIds: number[]) {
+//   await prisma.$transaction(async (tx) => {
+//     const resign = await tx.resignationRequest.findUnique({
+//       where: { id: resignationId },
+//       include: { employee: { select: { departmentId: true, reportingManager: true } } }
+//     });
+//     if (!resign?.employee) throw new Error("Resignation/Employee not found");
+//     const empDeptId = resign.employee.departmentId;
+//     const hodVerifierId = resign.employee.reportingManager;
+//     // 1) HOD clearance (type = "HOD", departmentId = employee.departmentId, verifier = reportingManager)
+//     if (empDeptId && hodVerifierId) {
+//       const existingHod = await tx.resignationClearance.findFirst({
+//         where: { resignationId, type: "HOD" }
+//       });
+//       const hod = existingHod
+//         ? existingHod
+//         : await tx.resignationClearance.create({
+//           data: {
+//             resignationId,
+//             type: "HOD",
+//             departmentId: empDeptId,
+//             verifierId: hodVerifierId,
+//             decision: "PENDING",
+//           }
+//         });
+//       // ensure items exist (create only if none)
+//       const hodItemsCount = await tx.resignationClearanceItem.count({ where: { clearanceId: hod.id } });
+//       if (hodItemsCount === 0) {
+//         await rebuildClearanceItemsFromTemplate(tx, hod.id, empDeptId);
+//       }
+//     }
+//     // 2) Department clearances for selected depts
+//     for (const deptId of selectedDeptIds) {
+//       const dept = await tx.department.findUnique({
+//         where: { id: deptId },
+//         select: { id: true, name: true }
+//       });
+//       if (!dept) continue;
+//       const existing = await tx.resignationClearance.findFirst({
+//         where: { resignationId, departmentId: dept.id }
+//       });
+//       const cl = existing
+//         ? existing
+//         : await tx.resignationClearance.create({
+//           data: {
+//             resignationId,
+//             departmentId: dept.id,
+//             type: dept.name, // for display
+//             decision: "PENDING",
+//           },
+//         });
+//       const count = await tx.resignationClearanceItem.count({ where: { clearanceId: cl.id } });
+//       if (count === 0) {
+//         await rebuildClearanceItemsFromTemplate(tx, cl.id, dept.id);
+//       }
+//     }
+//   });
+// }
+// export async function bulkUpdateClearanceItems(req: AuthenticatedRequest, res: Response) {
+//   try {
+//     const resignationId = Number(req.params.id);
+//     const { items } = req.body as {
+//       items: Array<{ id: number; status: ClearanceItemStatus; note?: string }>;
+//     };
+//     const userId = req.user?.userId;
+//     if (!userId) {
+//       res.status(401).json({ error: "Unauthorized" });
+//       return;
+//     }
+//     if (!Array.isArray(items) || items.length === 0) {
+//       res.status(400).json({ error: "items is required" });
+//       return;
+//     }
+//     const user = await prisma.user.findUnique({
+//       where: { id: userId },
+//       include: { employee: true },
+//     });
+//     if (!user?.employee) {
+//       res.status(404).json({ error: "User not found" });
+//       return;
+//     }
+//     // await prisma.$transaction(async (tx) => {
+//     //   // 1. Update all items
+//     //   for (const it of items) {
+//     //     await tx.resignationClearanceItem.update({
+//     //       where: { id: it.id },
+//     //       data: {
+//     //         status: it.status,
+//     //         note: it.note ?? undefined,
+//     //         verifierId: user.employee.id,
+//     //         decidedAt: new Date(),
+//     //       }
+//     //     });
+//     //   }
+//     //   // 2. Get all affected clearances
+//     //   const affectedClearances = await tx.resignationClearanceItem.findMany({
+//     //     where: {
+//     //       id: { in: items.map(i => i.id) }
+//     //     },
+//     //     select: { clearanceId: true },
+//     //     distinct: ['clearanceId']
+//     //   });
+//     //   // 3. Recompute decision for each clearance
+//     //   for (const cl of affectedClearances) {
+//     //     const allItems = await tx.resignationClearanceItem.findMany({
+//     //       where: { clearanceId: cl.clearanceId },
+//     //       select: { status: true },
+//     //     });
+//     //     const decision = computeClearanceDecision(allItems as any);
+//     //     await tx.resignationClearance.update({
+//     //       where: { id: cl.clearanceId },
+//     //       data: {
+//     //         decision,
+//     //         verifierId: user.employee.id,
+//     //         decidedAt: decision === "PENDING" ? null : new Date(),
+//     //       }
+//     //     });
+//     //   }
+//     // });
+//     await prisma.$transaction(async (tx) => {
+//       const now = new Date();
+//       // 1. Update all items in parallel
+//       await Promise.all(
+//         items.map((it) =>
+//           tx.resignationClearanceItem.update({
+//             where: { id: it.id },
+//             data: {
+//               status: it.status,
+//               note: it.note ?? undefined,
+//               verifierId: user.employee.id,
+//               decidedAt: now,
+//             },
+//           })
+//         )
+//       );
+//       // 2. Get affected clearanceIds in one query
+//       const affected = await tx.resignationClearanceItem.findMany({
+//         where: { id: { in: items.map((i) => i.id) } },
+//         select: { clearanceId: true },
+//         distinct: ["clearanceId"],
+//       });
+//       const clearanceIds = affected.map((a) => a.clearanceId);
+//       // 3. Load all items for those clearances at once
+//       const allItems = await tx.resignationClearanceItem.findMany({
+//         where: { clearanceId: { in: clearanceIds } },
+//         select: { clearanceId: true, status: true },
+//       });
+//       // 4. Group items by clearanceId
+//       const grouped: Record<number, { status: string }[]> = {};
+//       for (const it of allItems) {
+//         if (!grouped[it.clearanceId]) grouped[it.clearanceId] = [];
+//         grouped[it.clearanceId].push(it);
+//       }
+//       // 5. Update each clearance decision
+//       await Promise.all(
+//         clearanceIds.map((id) => {
+//           const decision = computeClearanceDecision(grouped[id] as any);
+//           return tx.resignationClearance.update({
+//             where: { id },
+//             data: {
+//               decision,
+//               verifierId: user.employee.id,
+//               decidedAt: decision === "PENDING" ? null : now,
+//             },
+//           });
+//         })
+//       );
+//     });
+//     res.json({ success: true });
+//     return;
+//   } catch (e) {
+//     console.error("bulkUpdateClearanceItems error:", e);
+//     res.status(500).json({ error: "Failed to update clearance items" });
+//     return;
+//   }
+// }
+function bulkUpdateClearanceItems(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        try {
+            const resignationId = Number(req.params.id);
+            const { items } = req.body;
+            const userId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.userId;
+            if (!userId) {
+                res.status(401).json({ error: "Unauthorized" });
+                return;
+            }
+            if (!Array.isArray(items) || items.length === 0) {
+                res.status(400).json({ error: "items is required" });
+                return;
+            }
+            const user = yield prisma.user.findUnique({
+                where: { id: userId },
+                include: { employee: true },
+            });
+            if (!(user === null || user === void 0 ? void 0 : user.employee)) {
+                res.status(404).json({ error: "User not found" });
+                return;
+            }
+            const now = new Date();
+            // 1. Update all items using batch transaction
+            yield prisma.$transaction(items.map((it) => {
+                var _a;
+                return prisma.resignationClearanceItem.update({
+                    where: { id: it.id },
+                    data: {
+                        status: it.status,
+                        note: (_a = it.note) !== null && _a !== void 0 ? _a : undefined,
+                        verifierId: user.employee.id,
+                        decidedAt: now,
+                    },
+                });
+            }));
+            // 2. Get affected clearances
+            const affected = yield prisma.resignationClearanceItem.findMany({
+                where: { id: { in: items.map((i) => i.id) } },
+                select: { clearanceId: true },
+                distinct: ["clearanceId"],
+            });
+            const clearanceIds = affected.map((a) => a.clearanceId);
+            // 3. Recompute decisions
+            for (const clearanceId of clearanceIds) {
+                const allItems = yield prisma.resignationClearanceItem.findMany({
+                    where: { clearanceId },
+                    select: { status: true },
+                });
+                const decision = computeClearanceDecision(allItems);
+                yield prisma.resignationClearance.update({
+                    where: { id: clearanceId },
+                    data: {
+                        decision,
+                        verifierId: user.employee.id,
+                        decidedAt: decision === "PENDING" ? null : now,
+                    },
+                });
+            }
+            res.json({ success: true });
+        }
+        catch (e) {
+            console.error("bulkUpdateClearanceItems error:", e);
+            res.status(500).json({ error: "Failed to update clearance items" });
+        }
+    });
+}
+function initOffboardingClearances(resignationId, selectedDeptIds) {
+    return __awaiter(this, void 0, void 0, function* () {
+        // Load outside transaction
+        const resign = yield prisma.resignationRequest.findUnique({
+            where: { id: resignationId },
+            include: { employee: { select: { departmentId: true, reportingManager: true } } }
+        });
+        if (!(resign === null || resign === void 0 ? void 0 : resign.employee))
+            throw new Error("Resignation/Employee not found");
+        const empDeptId = resign.employee.departmentId;
+        const hodVerifierId = resign.employee.reportingManager;
+        yield prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
+            // HOD clearance
+            // if (empDeptId && hodVerifierId) {
+            //   const existingHod = await tx.resignationClearance.findFirst({
+            //     where: { resignationId, type: "HOD" }
+            //   });
+            //   const hod = existingHod
+            //     ? existingHod
+            //     : await tx.resignationClearance.create({
+            //       data: {
+            //         resignationId,
+            //         type: "HOD",
+            //         departmentId: empDeptId,
+            //         verifierId: hodVerifierId,
+            //         decision: "PENDING",
+            //       }
+            //     });
+            //   const count = await tx.resignationClearanceItem.count({
+            //     where: { clearanceId: hod.id }
+            //   });
+            //   if (count === 0) {
+            //     await rebuildClearanceItemsFromTemplate(tx, hod.id, empDeptId);
+            //   }
+            // }
+            // HOD clearance
+            if (empDeptId && hodVerifierId) {
+                const existingHod = yield tx.resignationClearance.findFirst({
+                    where: { resignationId, type: "HOD" }
+                });
+                const hod = existingHod
+                    ? existingHod
+                    : yield tx.resignationClearance.create({
+                        data: {
+                            resignationId,
+                            type: "HOD",
+                            departmentId: empDeptId,
+                            verifierId: hodVerifierId,
+                            decision: "PENDING",
+                        }
+                    });
+                const count = yield tx.resignationClearanceItem.count({
+                    where: { clearanceId: hod.id }
+                });
+                if (count === 0) {
+                    yield tx.resignationClearanceItem.createMany({
+                        data: [
+                            {
+                                clearanceId: hod.id,
+                                templateItemId: null,
+                                label: "Handing over files / correspondence / documents / keys",
+                                status: "PENDING",
+                            },
+                            {
+                                clearanceId: hod.id,
+                                templateItemId: null,
+                                label: "Loss of items / breakage / others",
+                                status: "PENDING",
+                            }
+                        ]
+                    });
+                }
+            }
+            // Department clearances
+            // for (const deptId of selectedDeptIds) {
+            //   const existing = await tx.resignationClearance.findFirst({
+            //     where: { resignationId, departmentId: deptId }
+            //   });
+            //   const cl = existing
+            //     ? existing
+            //     : await tx.resignationClearance.create({
+            //         data: {
+            //           resignationId,
+            //           departmentId: deptId,
+            //           type: "DEPARTMENT",
+            //           decision: "PENDING",
+            //         }
+            //       });
+            //   const count = await tx.resignationClearanceItem.count({
+            //     where: { clearanceId: cl.id }
+            //   });
+            //   if (count === 0) {
+            //     await rebuildClearanceItemsFromTemplate(tx, cl.id, deptId);
+            //   }
+            // }
+            for (const deptId of selectedDeptIds) {
+                const dept = yield tx.department.findUnique({
+                    where: { id: deptId },
+                    select: { id: true, name: true }
+                });
+                if (!dept)
+                    continue;
+                const typeKey = `DEPT_${dept.name}`;
+                const existing = yield tx.resignationClearance.findFirst({
+                    where: { resignationId, type: typeKey }
+                });
+                const cl = existing
+                    ? existing
+                    : yield tx.resignationClearance.create({
+                        data: {
+                            resignationId,
+                            departmentId: dept.id,
+                            type: typeKey,
+                            decision: "PENDING",
+                        },
+                    });
+                const count = yield tx.resignationClearanceItem.count({
+                    where: { clearanceId: cl.id }
+                });
+                if (count === 0) {
+                    yield rebuildClearanceItemsFromTemplate(tx, cl.id, dept.id);
+                }
+            }
+        }), { timeout: 20000 } // increase timeout
+        );
+    });
+}

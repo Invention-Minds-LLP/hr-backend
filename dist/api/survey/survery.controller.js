@@ -103,6 +103,29 @@ function submitSurvey(req, res) {
                     },
                 },
             });
+            // 3️⃣ Notify HR
+            try {
+                // get employee details
+                const emp = yield prisma_1.prisma.employee.findUnique({
+                    where: { id: Number(employeeId) },
+                    select: {
+                        firstName: true,
+                        lastName: true,
+                        employeeCode: true,
+                    },
+                });
+                if (emp) {
+                    const hrIds = yield getHRIds();
+                    const empName = `${emp.firstName} ${emp.lastName}`;
+                    const message = `Survey submitted by ${empName} (${emp.employeeCode}).`;
+                    // for (const hrId of hrIds) {
+                    //   await createNotification(hrId, message);
+                    // }
+                }
+            }
+            catch (err) {
+                console.error("Survey notification failed:", err);
+            }
             return res.json({
                 success: true,
                 surveyId: updatedSurvey.id,
@@ -163,6 +186,8 @@ function getAllSurveys(_req, res) {
                             firstName: true,
                             lastName: true,
                             employeeCode: true,
+                            gender: true,
+                            photoUrl: true,
                             Department: {
                                 select: { name: true }
                             }
@@ -195,7 +220,7 @@ const initSurveyScheduler = () => {
             // Get all active employees
             const activeEmployees = yield prisma_1.prisma.employee.findMany({
                 where: { employmentStatus: "ACTIVE" },
-                select: { id: true, dateOfJoining: true },
+                select: { id: true, dateOfJoining: true, firstName: true, lastName: true },
             });
             for (const emp of activeEmployees) {
                 // 1️⃣ Get the latest survey
@@ -221,6 +246,15 @@ const initSurveyScheduler = () => {
                         },
                     });
                     console.log(`✅ Created new survey for employee ${emp.id}`);
+                    // 🔔 Notify employee
+                    try {
+                        const empName = `${emp.firstName} ${emp.lastName}`;
+                        const message = `${empName}, your 6-month employee survey is now available. Please complete it at your earliest convenience.`;
+                        // await createNotification(emp.id, message);
+                    }
+                    catch (err) {
+                        console.error(`Notification failed for employee ${emp.id}:`, err);
+                    }
                 }
             }
             console.log("🎯 Employee survey scheduling complete.");
@@ -268,5 +302,17 @@ function getDraftSurveys(req, res) {
                 .status(500)
                 .json({ error: error.message || "Failed to fetch draft surveys" });
         }
+    });
+}
+function getHRIds() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const hrs = yield prisma_1.prisma.employee.findMany({
+            where: {
+                departmentId: 1,
+                employmentStatus: 'ACTIVE'
+            },
+            select: { id: true }
+        });
+        return hrs.map(h => h.id);
     });
 }

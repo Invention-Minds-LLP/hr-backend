@@ -271,6 +271,26 @@ class RecruitingController {
                             include: { candidate: true, job: true },
                         });
                     }));
+                    // 🔔 Notify HR about new application
+                    try {
+                        const hrEmployees = yield prisma.employee.findMany({
+                            where: {
+                                departmentId: 1, // HR department
+                                employmentStatus: 'ACTIVE'
+                            },
+                            select: { id: true }
+                        });
+                        const hrIds = hrEmployees.map(e => e.id);
+                        if (hrIds.length) {
+                            const message = `New application received for ${app.job.title} from ${app.candidate.name}.`;
+                            // for (const id of hrIds) {
+                            //   await createNotification(id, message);
+                            // }
+                        }
+                    }
+                    catch (notifyErr) {
+                        console.error("HR notification failed:", notifyErr);
+                    }
                     res.status(201).json(app);
                 }
                 catch (error) {
@@ -1092,6 +1112,7 @@ class RecruitingController {
 exports.RecruitingController = RecruitingController;
 // POST /api/interviews/:id/feedback
 exports.upsertFeedback = asyncHandler((req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     const interviewId = Number(req.params.id);
     // NEW: take panelId from the client (e.g., from localStorage on the frontend)
     const panelId = Number(req.body.panelId);
@@ -1100,7 +1121,15 @@ exports.upsertFeedback = asyncHandler((req, res) => __awaiter(void 0, void 0, vo
     }
     const { name, designation, jobSkills, jobKnowledge, attitude, communication, notes, signature, submit } = req.body;
     // Fetch interview & authorize: panelId must belong to this interview
-    const itv = yield prisma.interview.findUnique({ where: { id: interviewId } });
+    const itv = yield prisma.interview.findUnique({
+        where: { id: interviewId }, include: {
+            application: {
+                include: {
+                    candidate: true
+                }
+            }
+        }
+    });
     if (!itv)
         return bad(res, 'Interview not found', 404);
     // Parse CSV "panelUserIds" safely into numbers
@@ -1140,6 +1169,35 @@ exports.upsertFeedback = asyncHandler((req, res) => __awaiter(void 0, void 0, vo
             submittedAt: submit ? new Date() : null,
         },
     });
+    if (submit) {
+        const candidateName = ((_b = (_a = itv.application) === null || _a === void 0 ? void 0 : _a.candidate) === null || _b === void 0 ? void 0 : _b.name) || 'Candidate';
+        // get panel member name from Employee
+        const panelEmp = yield prisma.employee.findUnique({
+            where: { id: panelId },
+            select: { firstName: true, lastName: true }
+        });
+        const panelName = panelEmp
+            ? `${panelEmp.firstName} ${panelEmp.lastName}`
+            : name || `Panel #${panelId}`;
+        // fetch HR employees
+        const hrUsers = yield prisma.employee.findMany({
+            where: {
+                departmentId: 1, // adjust if needed
+                roleId: 1,
+                employmentStatus: 'ACTIVE'
+            },
+            select: { id: true }
+        });
+        const hrIds = hrUsers.map(u => u.id);
+        if (hrIds.length) {
+            // for (const hrId of hrIds) {
+            //   await createNotification(
+            //     hrId,
+            //     `${panelName} submitted interview feedback for ${candidateName}.`
+            //   );
+            // }
+        }
+    }
     res.json(fb);
 }));
 function generateEmployeeCode() {
@@ -1373,6 +1431,7 @@ exports.listEmployeeInterviews = asyncHandler((req, res) => __awaiter(void 0, vo
                             phone: true,
                             experience: true,
                             qualification: true,
+                            resumeUrl: true
                         },
                     },
                     job: {

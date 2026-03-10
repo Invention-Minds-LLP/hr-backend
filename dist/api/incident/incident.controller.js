@@ -9,7 +9,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.listIncidentsByEmployee = exports.listIncidentsByReporter = exports.createIncident = void 0;
+exports.listAllIncidents = exports.listIncidentsByEmployee = exports.listIncidentsByReporter = exports.createIncident = void 0;
 // import { PrismaClient, PermissionStatus } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
@@ -79,3 +79,20 @@ const listIncidentsByEmployee = (req, res) => __awaiter(void 0, void 0, void 0, 
     }
 });
 exports.listIncidentsByEmployee = listIncidentsByEmployee;
+const listAllIncidents = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const list = yield prisma_1.prisma.incident.findMany({
+            include: {
+                employee: true,
+                reporter: true,
+            },
+            orderBy: { createdAt: "desc" },
+        });
+        res.json(list);
+    }
+    catch (err) {
+        console.error("Error fetching all incidents:", err);
+        res.status(500).json({ error: "Failed to load incidents" });
+    }
+});
+exports.listAllIncidents = listAllIncidents;

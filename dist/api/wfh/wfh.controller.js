@@ -219,18 +219,17 @@ const updateWFHStatus = (req, res) => __awaiter(void 0, void 0, void 0, function
         const end = fmtDate(updatedWFH.endDate);
         const statusLabel = updatedWFH.status === client_1.WFHStatus.APPROVED ? 'Approved' :
             updatedWFH.status === client_1.WFHStatus.REJECTED ? 'Declined' : 'Pending';
-        if (employeePhone && (data.hodDecision === 'REJECTED' || data.hrDecision)) {
-            try {
-                yield (0, leave_controller_1.sendWhatsAppTemplate)({
-                    to: employeePhone,
-                    templateId: WFH_STATUS_TEMPLATE_ID,
-                    placeholders: [employeeName, days, start, end, statusLabel],
-                });
-            }
-            catch (e) {
-                console.error('WFH status WA send failed:', (e === null || e === void 0 ? void 0 : e.message) || e);
-            }
-        }
+        // if (employeePhone && (data.hodDecision === 'REJECTED' || data.hrDecision)) {
+        //   try {
+        //     await sendWhatsAppTemplate({
+        //       to: employeePhone,
+        //       templateId: WFH_STATUS_TEMPLATE_ID,
+        //       placeholders: [employeeName, days, start, end, statusLabel],
+        //     });
+        //   } catch (e: any) {
+        //     console.error('WFH status WA send failed:', e?.message || e);
+        //   }
+        // }
         res.json(updatedWFH);
     }
     catch (error) {

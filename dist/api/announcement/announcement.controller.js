@@ -21,7 +21,6 @@ const client_1 = require("@prisma/client");
 const basic_ftp_1 = require("basic-ftp");
 const fs_1 = __importDefault(require("fs"));
 const multer_1 = __importDefault(require("multer"));
-const notifications_controller_1 = require("../notifications/notifications.controller");
 const prisma = new client_1.PrismaClient();
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu",
@@ -45,7 +44,6 @@ function uploadToFTP(localFilePath, remoteFilePath) {
 }
 // Utility: build an Employee where-filter from stored audience JSON
 function buildAudienceWhere(audienceJson) {
-    var _a, _b, _c, _d;
     if (!audienceJson)
         return undefined;
     try {
@@ -57,17 +55,37 @@ function buildAudienceWhere(audienceJson) {
         if (f.all) {
             return where; // no extra filters (all active employees)
         }
-        if ((_a = f.departmentId) === null || _a === void 0 ? void 0 : _a.length) {
-            where.departmentId = { in: f.departmentId.map((d) => Number(d)) };
+        // if (f.departmentId?.length) {
+        //   where.departmentId = { in: f.departmentId.map((d: any) => Number(d)) };
+        // }
+        // if (f.branchId?.length) {
+        //   where.branchId = { in: f.branchId.map((b: any) => Number(b)) };
+        // }
+        // if (f.roleId?.length) {
+        //   where.roleId = { in: f.roleId.map((r: any) => Number(r)) };
+        // }
+        // if (f.employeeId?.length) {
+        //   where.id = { in: f.employeeId.map((e: any) => Number(e)) };
+        // }
+        if (Array.isArray(f.departmentId) && f.departmentId.length > 0) {
+            where.departmentId = { in: f.departmentId.map(Number) };
         }
-        if ((_b = f.branchId) === null || _b === void 0 ? void 0 : _b.length) {
-            where.branchId = { in: f.branchId.map((b) => Number(b)) };
+        if (Array.isArray(f.branchId) && f.branchId.length > 0) {
+            where.branchId = { in: f.branchId.map(Number) };
         }
-        if ((_c = f.roleId) === null || _c === void 0 ? void 0 : _c.length) {
-            where.roleId = { in: f.roleId.map((r) => Number(r)) };
+        if (Array.isArray(f.roleId) && f.roleId.length > 0) {
+            where.roleId = { in: f.roleId.map(Number) };
         }
-        if ((_d = f.employeeId) === null || _d === void 0 ? void 0 : _d.length) {
-            where.id = { in: f.employeeId.map((e) => Number(e)) };
+        // if (Array.isArray(f.employeeId) && f.employeeId.length > 0) {
+        //   where.id = { in: f.employeeId.map(Number) };
+        // }
+        if (f.employeeId) {
+            const ids = Array.isArray(f.employeeId)
+                ? f.employeeId
+                : [f.employeeId];
+            where.id = {
+                in: ids.map((e) => typeof e === "object" ? Number(e.id) : Number(e))
+            };
         }
         return where;
     }
@@ -137,9 +155,9 @@ function createAnnouncement(req, res) {
                 select: { id: true }
             });
             // ---- notify all target employees ----
-            for (const emp of employees) {
-                yield (0, notifications_controller_1.createNotification)(emp.id, 'NEW_ANNOUNCEMENT');
-            }
+            // for (const emp of employees) {
+            //   await createNotification(emp.id, 'NEW_ANNOUNCEMENT');
+            // }
             return res.status(201).json(created);
         }
         catch (e) {

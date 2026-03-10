@@ -23,12 +23,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getBulkUploadProgress = exports.bulkUploadEmployees = exports.downloadEmployeeTemplate = exports.getUnreportedAbsentees = exports.sendHealthCheckReminders = exports.getEmployeesByDepartments = exports.uploadVaccineProof = exports.getEmployeeRequests = exports.getActiveEmployees = exports.getSpecificRoles = exports.uploadEmployeeDisabilityProof = exports.uploadEmployeePhoto = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
+exports.bulkUploadLeaveBalance = exports.bulkUpdateEmployeeExtras = exports.getEmployeesByManager = exports.initSabbaticalReminderScheduler = exports.terminateFromSabbatical = exports.endSabbatical = exports.extendSabbatical = exports.startSabbatical = exports.getEmployeeProfile = exports.updateEmployeeProfile = exports.deleteEmployeeDocument = exports.getInchargeEmployees = exports.bulkUpdateReportingManager = exports.getBulkUploadProgress = exports.bulkUploadEmployees = exports.downloadEmployeeTemplate = exports.getUnreportedAbsentees = exports.sendHealthCheckReminders = exports.getEmployeesByDepartments = exports.uploadVaccineProof = exports.getEmployeeRequests = exports.getActiveEmployees = exports.getEmployeesByRole = exports.getSpecificRoles = exports.uploadEmployeeDisabilityProof = exports.uploadEmployeePhoto = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
 exports.getAccruals = getAccruals;
 exports.getEmployeeAccrualsController = getEmployeeAccrualsController;
 exports.getTodayCelebrants = getTodayCelebrants;
 exports.listMentors = listMentors;
 exports.mapExcelRowToEmployee = mapExcelRowToEmployee;
+exports.deleteFromFTP = deleteFromFTP;
 const client_1 = require("@prisma/client");
 const prisma = new client_1.PrismaClient();
 const formidable_1 = __importDefault(require("formidable"));
@@ -38,6 +39,7 @@ const path_1 = __importDefault(require("path"));
 const client_2 = require("@prisma/client");
 const notifications_controller_1 = require("../notifications/notifications.controller");
 const xlsx_1 = __importDefault(require("xlsx"));
+const node_cron_1 = __importDefault(require("node-cron"));
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu", // Your FTP hostname
     user: "u948610439.hrproindia.in", // Your FTP username
@@ -48,14 +50,79 @@ const TEMP_FOLDER = path_1.default.join(__dirname, '../temp'); // absolute path
 if (!fs_1.default.existsSync(TEMP_FOLDER)) {
     fs_1.default.mkdirSync(TEMP_FOLDER, { recursive: true });
 }
-function generateEmployeeCode() {
+// async function generateEmployeeCode() {
+//   const prefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+//   const startNumber = process.env.EMPLOYEE_CODE_START || '001';
+//   const lastEmployee = await prisma.employee.findFirst({
+//     orderBy: { employeeCode: 'desc' },
+//     select: { employeeCode: true }
+//   });
+//   console.log(lastEmployee)
+//   let newCode = `${prefix}${startNumber}`;
+//   if (lastEmployee?.employeeCode) {
+//     const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
+//     console.log(lastNumber)
+//     newCode = `${prefix}${String(lastNumber + 1).padStart(3, '0')}`;
+//   }
+//   return newCode;
+// }
+const EMPLOYEE_PREFIX_MAP = {
+    PERMANENT: '',
+    CONTRACT: '',
+    INTERN: 'TR',
+    TRAINEE: 'TR',
+    PROBATION: '',
+    DOCTOR: 'DR'
+};
+// async function generateEmployeeCode(employmentType: string) {
+//   const prefix =
+//     EMPLOYEE_PREFIX_MAP[employmentType?.toUpperCase()] || 'EMP';
+//   const startNumber = process.env.EMPLOYEE_CODE_START || '001';
+//   // Get last employee with same prefix
+//   const lastEmployee = await prisma.employee.findFirst({
+//     where: {
+//       employeeCode: {
+//         startsWith: prefix
+//       }
+//     },
+//     orderBy: {
+//       employeeCode: 'desc'
+//     },
+//     select: {
+//       employeeCode: true
+//     }
+//   });
+//   let newCode = `${prefix}${startNumber}`;
+//   if (lastEmployee?.employeeCode) {
+//     const lastNumber = parseInt(
+//       lastEmployee.employeeCode.replace(/\D/g, ''),
+//       10
+//     );
+//     newCode = `${prefix}${String(lastNumber + 1).padStart(3, '0')}`;
+//   }
+//   return newCode;
+// }
+function generateEmployeeCode(employmentType) {
     return __awaiter(this, void 0, void 0, function* () {
-        const prefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+        var _a;
+        const basePrefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+        const suffix = (_a = EMPLOYEE_PREFIX_MAP[employmentType === null || employmentType === void 0 ? void 0 : employmentType.toUpperCase()]) !== null && _a !== void 0 ? _a : '';
+        const prefix = `${basePrefix}${suffix}`;
         const startNumber = process.env.EMPLOYEE_CODE_START || '001';
         const lastEmployee = yield prisma.employee.findFirst({
-            orderBy: { employeeCode: 'desc' },
-            select: { employeeCode: true }
+            where: {
+                employeeCode: {
+                    startsWith: prefix
+                }
+            },
+            orderBy: {
+                employeeCode: 'desc'
+            },
+            select: {
+                employeeCode: true
+            }
         });
+        console.log(lastEmployee);
         let newCode = `${prefix}${startNumber}`;
         if (lastEmployee === null || lastEmployee === void 0 ? void 0 : lastEmployee.employeeCode) {
             const lastNumber = parseInt(lastEmployee.employeeCode.replace(/\D/g, ''), 10);
@@ -72,12 +139,12 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
         fixedShiftId, // optional
         rotationPatternId, // optional
         rotationStartDate, // optional
-        employeeType, sameAsPermanent } = req.body;
+        employeeType, sameAsPermanent, inchargeId, fatherName, marital, totalYearsOfExperience, experience, licenseRegDate, licenseExpiryDate, motherName, alternatePhone, uanNumber, panNumber, aadharNumber, licenseNumber, geoTrackingEnabled, experienceType } = req.body;
         const data = req.body;
         let finalCode = employeeCode;
         console.log(finalCode);
         if (!finalCode) {
-            finalCode = yield generateEmployeeCode();
+            finalCode = yield generateEmployeeCode(employmentType);
             console.log("Generated employeeCode:", finalCode);
         }
         let newEmployee;
@@ -102,8 +169,14 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     bloodGroup,
                     age,
                     reportingManager,
+                    fatherName,
+                    marital,
+                    totalYearsOfExperience,
+                    experience,
                     employeeType,
                     sameAsPermanent,
+                    experienceType,
+                    geoTrackingEnabled: geoTrackingEnabled !== null && geoTrackingEnabled !== void 0 ? geoTrackingEnabled : false,
                     // Health & Wellness fields
                     preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
                     height: data.height ? parseFloat(data.height) : null,
@@ -128,13 +201,27 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     preferredHospital: data.preferredHospital,
                     primaryPhysician: data.primaryPhysician,
                     emergencyNotes: data.emergencyNotes,
+                    motherName,
+                    alternatePhone,
+                    uanNumber,
+                    panNumber,
+                    aadharNumber,
+                    licenseNumber,
+                    licenseRegDate: licenseRegDate ? new Date(licenseRegDate) : null,
+                    licenseExpiryDate: licenseExpiryDate ? new Date(licenseExpiryDate) : null,
                     healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined,
                     vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined,
                     // Connect relations
                     Department: { connect: { id: departmentId } },
                     Branch: { connect: { id: branchId } },
                     role: { connect: { id: roleId } },
-                    designation: { connect: { id: designationId } },
+                    // designation: { connect: { id: designationId } },
+                    designation: designationId
+                        ? { connect: { id: Number(designationId) } }
+                        : undefined,
+                    incharge: inchargeId
+                        ? { connect: { id: Number(inchargeId) } }
+                        : undefined,
                     Address: {
                         create: addresses === null || addresses === void 0 ? void 0 : addresses.map((a) => ({
                             type: a.type,
@@ -178,7 +265,8 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
         catch (err) {
             if (err.code === 'P2002' && ((_b = (_a = err.meta) === null || _a === void 0 ? void 0 : _a.target) === null || _b === void 0 ? void 0 : _b.includes('employeeCode'))) {
                 // Regenerate a fresh code and retry
-                finalCode = yield generateEmployeeCode();
+                finalCode = yield generateEmployeeCode(employmentType);
+                console.log(finalCode);
                 newEmployee = yield prisma.employee.create({
                     data: {
                         employeeCode: finalCode,
@@ -190,8 +278,9 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                         photoUrl,
                         phone,
                         email,
+                        experienceType,
                         // designation,
-                        designationId: designationId !== null && designationId !== void 0 ? designationId : null, // ✅ THIS IS THE FIX
+                        // designationId: designationId ?? null, // ✅ THIS IS THE FIX
                         dateOfJoining: new Date(dateOfJoining),
                         employmentType,
                         probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
@@ -201,10 +290,26 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                         reportingManager,
                         employeeType,
                         sameAsPermanent,
+                        fatherName,
+                        marital,
+                        totalYearsOfExperience,
+                        experience,
+                        geoTrackingEnabled,
+                        motherName,
+                        alternatePhone,
+                        uanNumber,
+                        panNumber,
+                        aadharNumber,
+                        licenseNumber,
+                        licenseRegDate: data.licenseRegDate ? new Date(data.licenseRegDate) : null,
+                        licenseExpiryDate: data.licenseExpiryDate ? new Date(data.licenseExpiryDate) : null,
                         // Connect relations
                         Department: { connect: { id: departmentId } },
                         Branch: { connect: { id: branchId } },
                         role: { connect: { id: roleId } },
+                        designation: designationId
+                            ? { connect: { id: Number(designationId) } }
+                            : undefined,
                         Address: {
                             create: addresses === null || addresses === void 0 ? void 0 : addresses.map((a) => ({
                                 type: a.type,
@@ -406,6 +511,7 @@ const getEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                     departmentId: true,
                     roleId: true,
                     photoUrl: true,
+                    gender: true,
                     Department: { select: { id: true, name: true } },
                     Branch: { select: { id: true, name: true } },
                     shifts: {
@@ -446,6 +552,7 @@ const getEmployeeById = (req, res) => __awaiter(void 0, void 0, void 0, function
                 EmployeeShiftSetting: true,
                 Department: true,
                 designation: true,
+                sabbaticals: true,
                 shifts: {
                     orderBy: { date: 'desc' }, // Most recent first
                     take: 1, // Only 1 record
@@ -477,18 +584,20 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
         fixedShiftId, // number | undefined
         rotationPatternId, // number | undefined
         rotationStartDate, // ISO string | undefined
-        dob, dateOfJoining, probationEndDate } = data, employeeFields = __rest(data, ["addresses", "emergencyContacts", "qualifications", "departmentId", "designationId", "branchId", "roleId", "shiftMode", "fixedShiftId", "rotationPatternId", "rotationStartDate", "dob", "dateOfJoining", "probationEndDate"]);
+        dob, dateOfJoining, probationEndDate, inchargeId, preEmploymentCheckDate, fatherName, marital, totalYearsOfExperience, experience, experienceType } = data, employeeFields = __rest(data, ["addresses", "emergencyContacts", "qualifications", "departmentId", "designationId", "branchId", "roleId", "shiftMode", "fixedShiftId", "rotationPatternId", "rotationStartDate", "dob", "dateOfJoining", "probationEndDate", "inchargeId", "preEmploymentCheckDate", "fatherName", "marital", "totalYearsOfExperience", "experience", "experienceType"]);
         const toDate = (v) => (v ? new Date(v) : null);
         employeeFields.dob = (_a = toDate(dob)) !== null && _a !== void 0 ? _a : undefined;
         employeeFields.dateOfJoining = (_b = toDate(dateOfJoining)) !== null && _b !== void 0 ? _b : undefined;
         employeeFields.probationEndDate = toDate(probationEndDate);
         const updatedEmployee = yield prisma.employee.update({
             where: { id: Number(id) },
-            data: Object.assign(Object.assign({}, employeeFields), { 
+            data: Object.assign(Object.assign({}, employeeFields), { experienceType: data.experienceType, 
                 // Health & Wellness fields
-                preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null, height: data.height ? parseFloat(data.height) : null, weight: data.weight ? parseFloat(data.weight) : null, bmi: data.bmi ? parseFloat(data.bmi) : null, bloodPressure: data.bloodPressure, bloodSugar: data.bloodSugar, cholesterol: data.cholesterol, sameAsPermanent: data.sameAsPermanent, allergies: data.allergies, chronicConditions: data.chronicConditions, 
+                preEmploymentCheckDate: preEmploymentCheckDate ? new Date(preEmploymentCheckDate) : null, height: data.height ? parseFloat(data.height) : null, weight: data.weight ? parseFloat(data.weight) : null, bmi: data.bmi ? parseFloat(data.bmi) : null, bloodPressure: data.bloodPressure, bloodSugar: data.bloodSugar, cholesterol: data.cholesterol, sameAsPermanent: data.sameAsPermanent, fatherName: data.fatherName, marital: data.marital, totalYearsOfExperience: data.totalYearsOfExperience, experience: data.experience, allergies: data.allergies, chronicConditions: data.chronicConditions, 
                 // designationId: designationId ?? null, // ✅ THIS IS THE FIX
-                smoking: data.smoking, alcohol: data.alcohol, visionType: data.visionType, usesGlasses: data.usesGlasses, visionRemarks: data.visionRemarks, hasDisability: data.hasDisability, disabilityType: data.disabilityType, disabilityDescription: data.disabilityDescription, disabilityProofFile: data.disabilityProofFile, disabilityProofFileName: data.disabilityProofFileName, disabilityProofUrl: data.disabilityProofUrl, preferredHospital: data.preferredHospital, primaryPhysician: data.primaryPhysician, emergencyNotes: data.emergencyNotes, healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined, vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined, Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, designation: { connect: { id: designationId } }, Address: {
+                smoking: data.smoking, alcohol: data.alcohol, visionType: data.visionType, usesGlasses: data.usesGlasses, visionRemarks: data.visionRemarks, hasDisability: data.hasDisability, disabilityType: data.disabilityType, disabilityDescription: data.disabilityDescription, disabilityProofFile: data.disabilityProofFile, disabilityProofFileName: data.disabilityProofFileName, disabilityProofUrl: data.disabilityProofUrl, preferredHospital: data.preferredHospital, primaryPhysician: data.primaryPhysician, emergencyNotes: data.emergencyNotes, geoTrackingEnabled: data.geoTrackingEnabled, motherName: data.motherName, alternatePhone: data.alternatePhone, uanNumber: data.uanNumber, panNumber: data.panNumber, aadharNumber: data.aadharNumber, licenseNumber: data.licenseNumber, licenseRegDate: toDate(data.licenseRegDate), licenseExpiryDate: toDate(data.licenseExpiryDate), pastSurgeries: data.pastSurgeries, exerciseFrequency: data.exerciseFrequency, healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined, vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined, Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, designation: { connect: { id: designationId } }, incharge: inchargeId
+                    ? { connect: { id: Number(inchargeId) } }
+                    : { disconnect: true }, Address: {
                     deleteMany: {},
                     create: addresses === null || addresses === void 0 ? void 0 : addresses.map((a) => ({
                         type: a.type,
@@ -599,57 +708,455 @@ function uploadToFTP(localFilePath, remoteFileName) {
     });
 }
 // API Handler
+// export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
+//   try {
+//     const { employeeId } = req.params;
+//     const form = formidable({
+//       uploadDir: TEMP_FOLDER,
+//       keepExtensions: true,
+//       multiples: true,
+//     });
+//     console.log(form)
+//     form.parse(req, async (err, fields, files) => {
+//       if (err) {
+//         console.error("Formidable Parse Error:", err);
+//         return res.status(500).json({ error: err.message });
+//       }
+//       const metadata = JSON.parse(fields.metadata?.[0] || "[]"); // metadata array
+//       if (!files.file) {
+//         return res.status(400).json({ error: "No files uploaded" });
+//       }
+//       const uploadedFiles = Array.isArray(files.file) ? files.file : [files.file];
+//       console.log(uploadedFiles)
+//       const uploadedDocs = [];
+//       for (let i = 0; i < uploadedFiles.length; i++) {
+//         const file = uploadedFiles[i];
+//         const tempFilePath = file.filepath;
+//         const fileName = sanitizeFileName(file.originalFilename || `file_${Date.now()}.png`);
+//         const remoteFilePath = `/public_html/documents/${fileName}`;
+//         await uploadToFTP(tempFilePath, remoteFilePath);
+//         const fileUrl = `https://hrproindia.in/documents/${fileName}`
+//         console.log(fileUrl);
+//         fs.unlinkSync(tempFilePath); // cleanup temp file
+//         // // Save in DB
+//         // const savedDoc = await prisma.document.create({
+//         //   data: {
+//         //     employeeId: Number(employeeId),
+//         //     title: metadata[i].title || metadata[i].type,
+//         //     type: metadata[i].type,
+//         //     category: metadata[i].category,
+//         //     issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+//         //     expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+//         //     fileUrl: fileUrl
+//         //   }
+//         // });
+//         // const savedDoc = await prisma.document.upsert({
+//         //   where: {
+//         //     employeeId_type: {
+//         //       employeeId: Number(employeeId),
+//         //       type: metadata[i].type,
+//         //     },
+//         //   },
+//         //   create: {
+//         //     employeeId: Number(employeeId),
+//         //     title: metadata[i].title || metadata[i].type,
+//         //     type: metadata[i].type,
+//         //     category: metadata[i].category,
+//         //     issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+//         //     expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+//         //     fileUrl,
+//         //   },
+//         //   update: {
+//         //     title: metadata[i].title || metadata[i].type,
+//         //     category: metadata[i].category,
+//         //     issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+//         //     expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+//         //     fileUrl,
+//         //   },
+//         // });
+//         const existingDoc = await prisma.document.findFirst({
+//           where: {
+//             employeeId: Number(employeeId),
+//             type: metadata[i].type,
+//           },
+//         });
+//         let savedDoc;
+//         if (existingDoc) {
+//           savedDoc = await prisma.document.update({
+//             where: { id: existingDoc.id },
+//             data: {
+//               title: metadata[i].title || metadata[i].type,
+//               category: metadata[i].category,
+//               issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+//               expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+//               fileUrl,
+//             },
+//           });
+//         } else {
+//           savedDoc = await prisma.document.create({
+//             data: {
+//               employeeId: Number(employeeId),
+//               title: metadata[i].title || metadata[i].type,
+//               type: metadata[i].type,
+//               category: metadata[i].category,
+//               issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
+//               expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
+//               fileUrl,
+//             },
+//           });
+//         }
+//         uploadedDocs.push(savedDoc);
+//       }
+//       res.status(201).json({ message: "Documents uploaded successfully", documents: uploadedDocs });
+//     });
+//   } catch (error) {
+//     console.error("Upload Error:", error);
+//     res.status(500).json({ error: (error as Error).message });
+//   }
+// };
+// export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
+//   try {
+//     const employeeId = Number(req.params.employeeId);
+//     if (Number.isNaN(employeeId)) {
+//       return res.status(400).json({ error: "Invalid employeeId" });
+//     }
+//     const form = formidable({
+//       uploadDir: TEMP_FOLDER,
+//       keepExtensions: true,
+//       multiples: true,
+//     });
+//     form.parse(req, async (err, fields, files) => {
+//       try {
+//         if (err) {
+//           console.error("Formidable error:", err);
+//           return res.status(500).json({ error: err.message });
+//         }
+//         /* ----------------------------------
+//            1️⃣ Parse metadata
+//         ---------------------------------- */
+//         const metadata: any[] = JSON.parse(
+//           (fields.metadata?.[0] as string) || "[]"
+//         );
+//         /* ----------------------------------
+//            2️⃣ Parse fileIndex (FormArray index)
+//         ---------------------------------- */
+//         const fileIndexRaw = fields.fileIndex;
+//         const fileIndexes: number[] = Array.isArray(fileIndexRaw)
+//           ? fileIndexRaw.map((x) => Number(x))
+//           : fileIndexRaw
+//           ? [Number(fileIndexRaw)]
+//           : [];
+//         /* ----------------------------------
+//            3️⃣ Normalize uploaded files
+//         ---------------------------------- */
+//         const uploaded = files.file;
+//         const uploadedFiles = Array.isArray(uploaded)
+//           ? uploaded
+//           : uploaded
+//           ? [uploaded]
+//           : [];
+//         /* ----------------------------------
+//            4️⃣ Map: formIndex → file
+//         ---------------------------------- */
+//         const fileMap = new Map<number, any>();
+//         for (let i = 0; i < uploadedFiles.length; i++) {
+//           const idx = fileIndexes[i];
+//           if (Number.isFinite(idx)) {
+//             fileMap.set(idx, uploadedFiles[i]);
+//           }
+//         }
+//         const savedDocuments: any[] = [];
+//         /* ----------------------------------
+//            5️⃣ Process each metadata row
+//         ---------------------------------- */
+//         for (let i = 0; i < metadata.length; i++) {
+//           const meta = metadata[i];
+//           if (!meta?.type) continue;
+//           const issueDate = meta.issueDate ? new Date(meta.issueDate) : null;
+//           const expiryDate = meta.expiryDate ? new Date(meta.expiryDate) : null;
+//           let newFileUrl: string | null = null;
+//           /* ---------- Upload only if new file exists ---------- */
+//           const f = fileMap.get(i);
+//           if (f?.filepath) {
+//             const tempFilePath = f.filepath;
+//             const originalName =
+//               f.originalFilename || `doc_${employeeId}_${Date.now()}`;
+//             const fileName = sanitizeFileName(originalName);
+//             const remotePath = `/public_html/documents/${fileName}`;
+//             await uploadToFTP(tempFilePath, remotePath);
+//             try {
+//               fs.unlinkSync(tempFilePath);
+//             } catch {}
+//             newFileUrl = `https://hrproindia.in/documents/${fileName}`;
+//           }
+//           /* ---------- UPDATE ---------- */
+//           if (meta.id) {
+//             const existing = await prisma.document.findUnique({
+//               where: { id: Number(meta.id) },
+//               select: { fileUrl: true },
+//             });
+//             const updatedDoc = await prisma.document.update({
+//               where: { id: Number(meta.id) },
+//               data: {
+//                 employeeId,
+//                 title: meta.title || meta.type || "",
+//                 category: meta.category ?? undefined,
+//                 type: meta.type,
+//                 issueDate,
+//                 expiryDate,
+//                 // ✅ keep old if no new upload
+//                 fileUrl: newFileUrl ?? existing?.fileUrl ?? undefined,
+//               },
+//             });
+//             savedDocuments.push(updatedDoc);
+//             continue;
+//           }
+//           /* ---------- CREATE (only if file uploaded) ---------- */
+//           if (!newFileUrl) continue;
+//           const createdDoc = await prisma.document.create({
+//             data: {
+//               employeeId,
+//               title: meta.title || meta.type || "",
+//               category: meta.category ?? undefined,
+//               type: meta.type,
+//               issueDate,
+//               expiryDate,
+//               fileUrl: newFileUrl,
+//             },
+//           });
+//           savedDocuments.push(createdDoc);
+//         }
+//         return res.status(201).json({
+//           message: "Documents uploaded successfully",
+//           documents: savedDocuments,
+//         });
+//       } catch (e: any) {
+//         console.error("uploadEmployeeDocuments inner error:", e);
+//         return res.status(500).json({ error: e?.message || "Upload failed" });
+//       }
+//     });
+//   } catch (error: any) {
+//     console.error("uploadEmployeeDocuments error:", error);
+//     return res.status(500).json({ error: error?.message || "Upload failed" });
+//   }
+// };
+// export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
+//   try {
+//     const employeeId = Number(req.params.employeeId);
+//     if (Number.isNaN(employeeId)) {
+//       return res.status(400).json({ error: "Invalid employeeId" });
+//     }
+//     const form = formidable({
+//       uploadDir: TEMP_FOLDER,
+//       keepExtensions: true,
+//       multiples: true
+//     });
+//     form.parse(req, async (err, fields, files) => {
+//       try {
+//         if (err) {
+//           console.error("Formidable error:", err);
+//           return res.status(500).json({ error: err.message });
+//         }
+//         /* -------------------- 1️⃣ Metadata -------------------- */
+//         const metadata: any[] = JSON.parse(
+//           (fields.metadata?.[0] as string) || "[]"
+//         );
+//         /* -------------------- 2️⃣ File indexes -------------------- */
+//         const rawIndex = fields.fileIndex;
+//         const fileIndexes: number[] = Array.isArray(rawIndex)
+//           ? rawIndex.map(Number)
+//           : rawIndex
+//             ? [Number(rawIndex)]
+//             : [];
+//         /* -------------------- 3️⃣ Uploaded files -------------------- */
+//         const uploaded = files.file;
+//         const uploadedFiles = Array.isArray(uploaded)
+//           ? uploaded
+//           : uploaded
+//             ? [uploaded]
+//             : [];
+//         /* -------------------- 4️⃣ SAFETY CHECK -------------------- */
+//         if (fileIndexes.length !== uploadedFiles.length) {
+//           return res.status(400).json({
+//             error: "File index mismatch",
+//             fileIndexes,
+//             uploadedFiles: uploadedFiles.length
+//           });
+//         }
+//         /* -------------------- 5️⃣ Map index → file -------------------- */
+//         const fileMap = new Map<number, any>();
+//         uploadedFiles.forEach((file, i) => {
+//           fileMap.set(fileIndexes[i], file);
+//         });
+//         console.log("METADATA:", metadata.length);
+//         console.log("FILE MAP:", [...fileMap.keys()]);
+//         const savedDocuments: any[] = [];
+//         /* -------------------- 6️⃣ Process rows -------------------- */
+//         metadata.forEach(async (meta, index) => {
+//           if (!meta?.type) return;
+//           const issueDate = meta.issueDate ? new Date(meta.issueDate) : null;
+//           const expiryDate = meta.expiryDate ? new Date(meta.expiryDate) : null;
+//           let newFileUrl: string | null = null;
+//           const f = fileMap.get(index);
+//           if (f?.filepath) {
+//             const safeName = sanitizeFileName(
+//               f.originalFilename || `doc_${employeeId}_${Date.now()}`
+//             );
+//             const remotePath = `/public_html/documents/${safeName}`;
+//             await uploadToFTP(f.filepath, remotePath);
+//             try {
+//               fs.unlinkSync(f.filepath);
+//             } catch { }
+//             newFileUrl = `https://hrproindia.in/documents/${safeName}`;
+//           }
+//           /* ---------- UPDATE ---------- */
+//           if (meta.id) {
+//             const updated = await prisma.document.update({
+//               where: { id: Number(meta.id) },
+//               data: {
+//                 employeeId,
+//                 title: meta.title || meta.type,
+//                 category: meta.category ?? undefined,
+//                 type: meta.type,
+//                 issueDate,
+//                 expiryDate,
+//                 ...(newFileUrl ? { fileUrl: newFileUrl } : {})
+//               }
+//             });
+//             savedDocuments.push(updated);
+//             return;
+//           }
+//           /* ---------- CREATE ---------- */
+//           if (!newFileUrl) return;
+//           const created = await prisma.document.create({
+//             data: {
+//               employeeId,
+//               title: meta.title || meta.type,
+//               category: meta.category ?? undefined,
+//               type: meta.type,
+//               issueDate,
+//               expiryDate,
+//               fileUrl: newFileUrl
+//             }
+//           });
+//           savedDocuments.push(created);
+//         });
+//         return res.status(201).json({
+//           message: "Documents uploaded successfully",
+//           documents: savedDocuments
+//         });
+//       } catch (e: any) {
+//         console.error("Upload inner error:", e);
+//         return res.status(500).json({ error: e.message });
+//       }
+//     });
+//   } catch (error: any) {
+//     console.error("Upload error:", error);
+//     return res.status(500).json({ error: error.message });
+//   }
+// };
 const uploadEmployeeDocuments = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const { employeeId } = req.params;
+        const employeeId = Number(req.params.employeeId);
+        if (Number.isNaN(employeeId)) {
+            return res.status(400).json({ error: "Invalid employeeId" });
+        }
         const form = (0, formidable_1.default)({
             uploadDir: TEMP_FOLDER,
             keepExtensions: true,
-            multiples: true,
+            multiples: true
         });
-        console.log(form);
         form.parse(req, (err, fields, files) => __awaiter(void 0, void 0, void 0, function* () {
             var _a;
-            if (err) {
-                console.error("Formidable Parse Error:", err);
-                return res.status(500).json({ error: err.message });
-            }
-            const metadata = JSON.parse(((_a = fields.metadata) === null || _a === void 0 ? void 0 : _a[0]) || "[]"); // metadata array
-            if (!files.file) {
-                return res.status(400).json({ error: "No files uploaded" });
-            }
-            const uploadedFiles = Array.isArray(files.file) ? files.file : [files.file];
-            console.log(uploadedFiles);
-            const uploadedDocs = [];
-            for (let i = 0; i < uploadedFiles.length; i++) {
-                const file = uploadedFiles[i];
-                const tempFilePath = file.filepath;
-                const fileName = sanitizeFileName(file.originalFilename || `file_${Date.now()}.png`);
-                const remoteFilePath = `/public_html/documents/${fileName}`;
-                yield uploadToFTP(tempFilePath, remoteFilePath);
-                const fileUrl = `https://hrproindia.in/documents/${fileName}`;
-                console.log(fileUrl);
-                fs_1.default.unlinkSync(tempFilePath); // cleanup temp file
-                // Save in DB
-                const savedDoc = yield prisma.document.create({
-                    data: {
-                        employeeId: Number(employeeId),
-                        title: metadata[i].title || metadata[i].type,
-                        type: metadata[i].type,
-                        category: metadata[i].category,
-                        issueDate: metadata[i].issueDate ? new Date(metadata[i].issueDate) : null,
-                        expiryDate: metadata[i].expiryDate ? new Date(metadata[i].expiryDate) : null,
-                        fileUrl: fileUrl
-                    }
+            try {
+                if (err) {
+                    console.error("Formidable error:", err);
+                    return res.status(500).json({ error: err.message });
+                }
+                /* -------------------- 1️⃣ Metadata -------------------- */
+                const metadata = JSON.parse(((_a = fields.metadata) === null || _a === void 0 ? void 0 : _a[0]) || "[]");
+                /* -------------------- 2️⃣ File Keys -------------------- */
+                const rawKeys = fields.fileKey;
+                const fileKeys = Array.isArray(rawKeys)
+                    ? rawKeys
+                    : rawKeys
+                        ? [rawKeys]
+                        : [];
+                /* -------------------- 3️⃣ Uploaded Files -------------------- */
+                const uploaded = files.file;
+                const uploadedFiles = Array.isArray(uploaded)
+                    ? uploaded
+                    : uploaded
+                        ? [uploaded]
+                        : [];
+                if (fileKeys.length !== uploadedFiles.length) {
+                    return res.status(400).json({
+                        error: "fileKey and file count mismatch"
+                    });
+                }
+                /* -------------------- 4️⃣ Build fileMap -------------------- */
+                const fileMap = new Map();
+                uploadedFiles.forEach((file, i) => {
+                    fileMap.set(fileKeys[i], file);
                 });
-                uploadedDocs.push(savedDoc);
+                const savedDocuments = [];
+                /* -------------------- 5️⃣ Process Documents (SAFE LOOP) -------------------- */
+                for (const meta of metadata) {
+                    if (!(meta === null || meta === void 0 ? void 0 : meta.type))
+                        continue;
+                    const issueDate = meta.issueDate ? new Date(meta.issueDate) : null;
+                    const expiryDate = meta.expiryDate ? new Date(meta.expiryDate) : null;
+                    let newFileUrl = null;
+                    const file = meta.fileKey ? fileMap.get(meta.fileKey) : null;
+                    if (file === null || file === void 0 ? void 0 : file.filepath) {
+                        const safeName = sanitizeFileName(file.originalFilename || `doc_${employeeId}_${Date.now()}`);
+                        const remotePath = `/public_html/documents/${safeName}`;
+                        yield uploadToFTP(file.filepath, remotePath);
+                        try {
+                            fs_1.default.unlinkSync(file.filepath);
+                        }
+                        catch (_b) { }
+                        newFileUrl = `https://hrproindia.in/documents/${safeName}`;
+                    }
+                    /* ---------- UPDATE EXISTING DOCUMENT ---------- */
+                    if (meta.id) {
+                        const updated = yield prisma.document.update({
+                            where: { id: Number(meta.id) },
+                            data: Object.assign({ employeeId, title: meta.title || meta.type, category: meta.category, type: meta.type, issueDate,
+                                expiryDate }, (newFileUrl ? { fileUrl: newFileUrl } : {}))
+                        });
+                        savedDocuments.push(updated);
+                    }
+                    /* ---------- CREATE NEW DOCUMENT ---------- */
+                    else if (newFileUrl) {
+                        const created = yield prisma.document.create({
+                            data: {
+                                employeeId,
+                                title: meta.title || meta.type,
+                                category: meta.category,
+                                type: meta.type,
+                                issueDate,
+                                expiryDate,
+                                fileUrl: newFileUrl
+                            }
+                        });
+                        savedDocuments.push(created);
+                    }
+                }
+                return res.status(201).json({
+                    message: "Documents uploaded successfully",
+                    documents: savedDocuments
+                });
             }
-            res.status(201).json({ message: "Documents uploaded successfully", documents: uploadedDocs });
+            catch (e) {
+                console.error("Upload inner error:", e);
+                return res.status(500).json({ error: e.message });
+            }
         }));
     }
     catch (error) {
-        console.error("Upload Error:", error);
-        res.status(500).json({ error: error.message });
+        console.error("Upload error:", error);
+        return res.status(500).json({ error: error.message });
     }
 });
 exports.uploadEmployeeDocuments = uploadEmployeeDocuments;
@@ -763,6 +1270,32 @@ const getSpecificRoles = (req, res) => __awaiter(void 0, void 0, void 0, functio
     }
 });
 exports.getSpecificRoles = getSpecificRoles;
+const getEmployeesByRole = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const roleId = Number(req.query.roleId);
+        if (!roleId) {
+            return res.status(400).json({ error: "roleId is required" });
+        }
+        const employees = yield prisma.employee.findMany({
+            where: {
+                roleId: roleId
+            },
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                employeeCode: true,
+                roleId: true
+            }
+        });
+        return res.status(200).json(employees);
+    }
+    catch (error) {
+        console.error(error);
+        return res.status(500).json({ error: "Failed to fetch employees" });
+    }
+});
+exports.getEmployeesByRole = getEmployeesByRole;
 const getActiveEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const employees = yield prisma.employee.findMany({
@@ -1317,6 +1850,8 @@ const getUnreportedAbsentees = (req, res) => __awaiter(void 0, void 0, void 0, f
                         lastName: true,
                         designation: true,
                         Department: true,
+                        gender: true,
+                        photoUrl: true,
                     },
                 },
             },
@@ -1523,33 +2058,45 @@ function mapExcelRowToEmployee(row) {
                 create: { name: designationName },
             }),
         ]);
-        const manager = row.reportingManagerCode
+        // const manager = row.reportingManagerCode
+        //   ? await prisma.employee.findUnique({
+        //       where: { employeeCode: normalizeCode(row.reportingManagerCode) },
+        //     })
+        //   : null;
+        const managerCode = normalizeManagerCode(row.reportingManagerCode);
+        const manager = managerCode
             ? yield prisma.employee.findUnique({
-                where: { employeeCode: normalizeCode(row.reportingManagerCode) },
+                where: { employeeCode: managerCode },
             })
             : null;
         const dob = parseDate(row.dob);
         const doj = parseDate(row.dateOfJoining);
         if (!dob || !doj)
             throw new Error("Invalid DOB or Date of Joining");
+        console.log("Mapped Employee:", {
+            gender: normalizeGender(row.gender),
+            employmentType: normalizeEmploymentType(row.employmentType),
+            employmentStatus: normalizeEmploymentStatus(row.employmentStatus),
+        });
         return {
             employeeCode: normalizeCode(row.employeeCode),
             referenceCode: row.referenceCode || null,
             firstName: row.firstName,
             lastName: row.lastName,
-            gender: row.gender,
+            gender: normalizeGender(row.gender),
             dob,
             dateOfJoining: doj,
             phone: String(row.phone),
             email: String(row.email),
-            employmentType: row.employmentType,
-            employmentStatus: row.employmentStatus,
+            employmentType: normalizeEmploymentType(row.employmentType),
+            employmentStatus: normalizeEmploymentStatus(row.employmentStatus),
             employeeType: row.employeeType || "CLINICAL",
             reportingManager: manager ? manager.id : null,
             Department: { connect: { id: dept.id } },
             Branch: { connect: { id: branch.id } },
             role: { connect: { id: role.id } },
             designation: { connect: { id: designation.id } },
+            bloodGroup: 'O+',
         };
     });
 }
@@ -1664,11 +2211,13 @@ const bulkUploadEmployees = (req, res) => __awaiter(void 0, void 0, void 0, func
     try {
         const form = (0, formidable_1.default)({ multiples: false, keepExtensions: true });
         form.parse(req, (err, fields, files) => __awaiter(void 0, void 0, void 0, function* () {
-            if (err)
+            if (err) {
                 return res.status(500).json({ error: "File parsing error" });
+            }
             const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
-            if (!fileObj)
+            if (!fileObj) {
                 return res.status(400).json({ error: "No file uploaded" });
+            }
             const workbook = xlsx_1.default.readFile(fileObj.filepath);
             const sheet = workbook.Sheets[workbook.SheetNames[0]];
             const rawRows = xlsx_1.default.utils.sheet_to_json(sheet);
@@ -1712,7 +2261,10 @@ const bulkUploadEmployees = (req, res) => __awaiter(void 0, void 0, void 0, func
                     }
                     // Map & create
                     const mapped = yield mapExcelRowToEmployee(row);
-                    createOps.push(prisma.employee.create({ data: mapped }));
+                    // createOps.push(prisma.employee.create({ data: mapped }));
+                    createOps.push(prisma.employee.create({
+                        data: Object.assign({}, mapped)
+                    }));
                     logs.push(`Row ${i + 1}: SUCCESS (${employeeCode})`);
                 }
                 catch (error) {
@@ -1758,6 +2310,14 @@ const bulkUploadEmployees = (req, res) => __awaiter(void 0, void 0, void 0, func
     }
 });
 exports.bulkUploadEmployees = bulkUploadEmployees;
+function normalizeManagerCode(code) {
+    if (!code)
+        return null;
+    const c = String(code).trim().toUpperCase();
+    if (c === "0")
+        return null;
+    return c;
+}
 /* ============================================================
    PROGRESS API
 ============================================================ */
@@ -1768,3 +2328,858 @@ const getBulkUploadProgress = (req, res) => {
     res.json(progress);
 };
 exports.getBulkUploadProgress = getBulkUploadProgress;
+function normalizeGender(value) {
+    if (!value)
+        throw new Error("Gender is required");
+    const v = String(value)
+        .replace(/\u00A0/g, " ") // remove non-breaking spaces
+        .trim()
+        .toUpperCase();
+    switch (v) {
+        case "MALE":
+        case "M":
+            return "MALE";
+        case "FEMALE":
+        case "F":
+            return "FEMALE";
+        case "OTHER":
+        case "O":
+            return "OTHER";
+        default:
+            throw new Error(`Invalid gender value: "${value}"`);
+    }
+}
+function normalizeEmploymentType(value) {
+    const v = String(value).trim().toUpperCase();
+    if (!["PERMANENT", "CONTRACT", "PROBATION"].includes(v)) {
+        throw new Error(`Invalid employmentType: "${value}"`);
+    }
+    return v;
+}
+function normalizeEmploymentStatus(value) {
+    const v = String(value).trim().toUpperCase();
+    if (!["ACTIVE", "TERMINATED", "SUSPENDED", "NOTICE_PERIOD", "RESIGNED"].includes(v)) {
+        throw new Error(`Invalid employmentStatus: "${value}"`);
+    }
+    return v;
+}
+// export const bulkUpdateReportingManager = async (req: Request, res: Response) => {
+//   const form = formidable({ multiples: false });
+//   form.parse(req, async (err, fields, files) => {
+//     if (err) return res.status(500).json({ error: "File parse error" });
+//     const file = Array.isArray(files.file) ? files.file[0] : files.file;
+//     if (!file) return res.status(400).json({ error: "No file uploaded" });
+//     const workbook = XLSX.readFile(file.filepath);
+//     const sheet = workbook.Sheets[workbook.SheetNames[0]];
+//     const rows = XLSX.utils.sheet_to_json(sheet) as any[];
+//     const errors: any[] = [];
+//     let updated = 0;
+//     for (let i = 0; i < rows.length; i++) {
+//       const empCode = normalizeCode(rows[i].employeeCode);
+//       const mgrCode = normalizeCode(rows[i].reportingManagerCode);
+//       try {
+//         if (!empCode || !mgrCode) {
+//           throw new Error("employeeCode and reportingManagerCode required");
+//         }
+//         const manager = await prisma.employee.findUnique({
+//           where: { employeeCode: mgrCode },
+//         });
+//         if (!manager) {
+//           throw new Error(`Manager not found: ${mgrCode}`);
+//         }
+//         await prisma.employee.update({
+//           where: { employeeCode: empCode },
+//           data: { reportingManager: manager.id },
+//         });
+//         updated++;
+//       } catch (e: any) {
+//         errors.push({
+//           row: i + 1,
+//           employeeCode: empCode,
+//           reportingManagerCode: mgrCode,
+//           error: e.message,
+//         });
+//       }
+//     }
+//     res.json({
+//       total: rows.length,
+//       updated,
+//       failed: errors.length,
+//       errors,
+//     });
+//   });
+// };
+const bulkUpdateReportingManager = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const form = (0, formidable_1.default)({ multiples: false });
+    form.parse(req, (err, fields, files) => __awaiter(void 0, void 0, void 0, function* () {
+        if (err)
+            return res.status(500).json({ error: "File parse error" });
+        const file = Array.isArray(files.file) ? files.file[0] : files.file;
+        if (!file)
+            return res.status(400).json({ error: "No file uploaded" });
+        const workbook = xlsx_1.default.readFile(file.filepath);
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rows = xlsx_1.default.utils.sheet_to_json(sheet);
+        const errors = [];
+        let updated = 0;
+        let skipped = 0;
+        for (let i = 0; i < rows.length; i++) {
+            const empCode = normalizeCode(rows[i].employeeCode);
+            const mgrCodeRaw = rows[i].reportingManagerCode;
+            const mgrCode = normalizeCode(mgrCodeRaw);
+            try {
+                if (!empCode) {
+                    throw new Error("employeeCode is required");
+                }
+                // ✅ Skip if manager code is empty
+                if (!mgrCodeRaw || !mgrCode) {
+                    skipped++;
+                    continue;
+                }
+                if (empCode === mgrCode) {
+                    throw new Error("Employee cannot be own manager");
+                }
+                const manager = yield prisma.employee.findUnique({
+                    where: { employeeCode: mgrCode },
+                });
+                if (!manager) {
+                    throw new Error(`Manager not found: ${mgrCode}`);
+                }
+                yield prisma.employee.update({
+                    where: { employeeCode: empCode },
+                    data: { reportingManager: manager.id },
+                });
+                updated++;
+            }
+            catch (e) {
+                errors.push({
+                    row: i + 1,
+                    employeeCode: empCode,
+                    reportingManagerCode: mgrCodeRaw,
+                    error: e.message,
+                });
+            }
+        }
+        res.json({
+            totalRows: rows.length,
+            updated,
+            skipped, // 👈 important
+            failed: errors.length,
+            errors,
+        });
+    }));
+});
+exports.bulkUpdateReportingManager = bulkUpdateReportingManager;
+// controllers/employee.controller.ts
+const getInchargeEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    console.log('calling incharge employees');
+    try {
+        const incharges = yield prisma.employee.findMany({
+            where: {
+                roleId: 5, // ✅ INCHARGE
+                employmentStatus: 'ACTIVE'
+            },
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                employeeCode: true
+            }
+        });
+        res.json(incharges.map(e => ({
+            label: `${e.firstName} ${e.lastName} (${e.employeeCode})`,
+            value: e.id
+        })));
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to fetch incharge employees' });
+    }
+});
+exports.getInchargeEmployees = getInchargeEmployees;
+const deleteEmployeeDocument = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const docId = Number(req.params.documentId);
+        const doc = yield prisma.document.findUnique({
+            where: { id: docId }
+        });
+        if (!doc) {
+            return res.status(404).json({ error: 'Document not found' });
+        }
+        // 🔥 DELETE FILE FROM FTP
+        if (doc.fileUrl) {
+            const fileName = doc.fileUrl.split('/').pop();
+            if (fileName) {
+                const ftpPath = `/public_html/documents/${fileName}`;
+                try {
+                    yield deleteFromFTP(ftpPath);
+                }
+                catch (ftpErr) {
+                    console.warn('FTP delete failed:', ftpErr);
+                    // ❗ Do NOT fail DB deletion if FTP fails
+                }
+            }
+        }
+        // 🗑️ DELETE DB ROW
+        yield prisma.document.delete({
+            where: { id: docId }
+        });
+        res.json({ message: 'Document deleted successfully' });
+    }
+    catch (error) {
+        console.error('Delete document error:', error);
+        res.status(500).json({ error: 'Failed to delete document' });
+    }
+});
+exports.deleteEmployeeDocument = deleteEmployeeDocument;
+function deleteFromFTP(remotePath) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const client = new basic_ftp_1.Client();
+        client.ftp.verbose = false;
+        try {
+            yield client.access({
+                host: FTP_CONFIG.host,
+                user: FTP_CONFIG.user,
+                password: FTP_CONFIG.password,
+                secure: false,
+            });
+            yield client.remove(remotePath);
+        }
+        finally {
+            client.close();
+        }
+    });
+}
+// controllers/employee.controller.ts
+const updateEmployeeProfile = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const employeeId = Number(req.params.id);
+        if (!employeeId) {
+            return res.status(400).json({ error: 'Invalid employee id' });
+        }
+        const { firstName, lastName, bloodGroup, phone, email } = req.body;
+        // ✅ OPTIONAL VALIDATION
+        if (!firstName || !lastName) {
+            return res.status(400).json({
+                error: 'First name and last name are required'
+            });
+        }
+        const updatedEmployee = yield prisma.employee.update({
+            where: { id: employeeId },
+            data: {
+                firstName,
+                lastName,
+                bloodGroup,
+                phone,
+                email
+            },
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                bloodGroup: true,
+                phone: true,
+                email: true,
+                photoUrl: true
+            }
+        });
+        return res.json({
+            message: 'Profile updated successfully',
+            employee: updatedEmployee
+        });
+    }
+    catch (error) {
+        console.error('updateEmployeeProfile error:', error);
+        return res.status(500).json({
+            error: 'Failed to update profile'
+        });
+    }
+});
+exports.updateEmployeeProfile = updateEmployeeProfile;
+// controllers/employee.controller.ts
+const getEmployeeProfile = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const employeeId = Number(req.params.id);
+        if (!employeeId) {
+            return res.status(400).json({ error: 'Invalid employee id' });
+        }
+        const employee = yield prisma.employee.findUnique({
+            where: { id: employeeId },
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                bloodGroup: true,
+                phone: true,
+                email: true,
+                photoUrl: true
+            }
+        });
+        if (!employee) {
+            return res.status(404).json({ error: 'Employee not found' });
+        }
+        return res.json(employee);
+    }
+    catch (error) {
+        console.error('getEmployeeProfile error:', error);
+        return res.status(500).json({
+            error: 'Failed to fetch profile'
+        });
+    }
+});
+exports.getEmployeeProfile = getEmployeeProfile;
+// export const initSabbaticalReminderScheduler = () => {
+//   cron.schedule("0 9 * * *", async () => {
+//     console.log("Running sabbatical reminder cron...");
+//     const today = new Date();
+//     today.setHours(0, 0, 0, 0);
+//     const reminderDate = new Date(today);
+//     reminderDate.setDate(today.getDate() + 3); // 3 days before end
+//     const employees = await prisma.employee.findMany({
+//       where: {
+//         employmentStatus: 'SABBATICAL',
+//         sabbaticalEndDate: {
+//           gte: today,
+//           lte: reminderDate
+//         }
+//       },
+//       select: {
+//         id: true,
+//         firstName: true,
+//         sabbaticalEndDate: true
+//       }
+//     });
+//     for (const emp of employees) {
+//       const message = `Your sabbatical period will end on ${fmtDate(emp.sabbaticalEndDate)}. Please contact HR regarding your next steps.`;
+//       // Employee notification
+//       await createNotification(emp.id, message);
+//       // HR notification (assuming HR role = 1)
+//       const hrUsers = await prisma.employee.findMany({
+//         where: { roleId: 1, employmentStatus: 'ACTIVE' },
+//         select: { id: true }
+//       });
+//       for (const hr of hrUsers) {
+//         await createNotification(
+//           hr.id,
+//           `${emp.firstName}'s sabbatical ends on ${fmtDate(emp.sabbaticalEndDate)}. Please take action.`
+//         );
+//       }
+//     }
+//     // On exact end date
+// if (isSameDate(today, emp.sabbaticalEndDate)) {
+//   const hrUsers = await prisma.employee.findMany({
+//     where: { roleId: 1, employmentStatus: 'ACTIVE' },
+//     select: { id: true }
+//   });
+//   for (const hr of hrUsers) {
+//     await createNotification(
+//       hr.id,
+//       `${emp.firstName}'s sabbatical ends today. Please mark as Active, Extend, or Terminate.`
+//     );
+//   }
+// }
+//   });
+// };
+// 1) Reactivate employee
+// employmentStatus: 'ACTIVE',
+// sabbaticalStartDate: null,
+// sabbaticalEndDate: null
+// 2) Extend sabbatical
+// employmentStatus: 'SABBATICAL',
+// sabbaticalEndDate: newDate
+// 3) Terminate
+// employmentStatus: 'TERMINATED'
+const startSabbatical = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const employeeId = Number(req.params.employeeId);
+        const { startDate, endDate, reason } = req.body;
+        if (!employeeId || !startDate || !endDate) {
+            return res.status(400).json({
+                error: "employeeId, startDate, and endDate are required"
+            });
+        }
+        const result = yield prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            // check if already on sabbatical
+            const active = yield tx.sabbatical.findFirst({
+                where: {
+                    employeeId,
+                    status: "ACTIVE"
+                }
+            });
+            if (active) {
+                throw new Error("Employee already on sabbatical");
+            }
+            // create sabbatical
+            const sabbatical = yield tx.sabbatical.create({
+                data: {
+                    employeeId,
+                    startDate: new Date(startDate),
+                    endDate: new Date(endDate),
+                    reason,
+                    status: "ACTIVE"
+                }
+            });
+            // update employee status
+            yield tx.employee.update({
+                where: { id: employeeId },
+                data: { employmentStatus: "SABBATICAL" }
+            });
+            return sabbatical;
+        }));
+        res.json(result);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.startSabbatical = startSabbatical;
+const extendSabbatical = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const sabbaticalId = Number(req.params.id);
+        const { endDate } = req.body;
+        const result = yield prisma.sabbatical.update({
+            where: { id: sabbaticalId },
+            data: {
+                endDate: new Date(endDate)
+            }
+        });
+        res.json(result);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.extendSabbatical = extendSabbatical;
+const endSabbatical = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const sabbaticalId = Number(req.params.id);
+        const result = yield prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            const sabbatical = yield tx.sabbatical.update({
+                where: { id: sabbaticalId },
+                data: { status: "COMPLETED" }
+            });
+            yield tx.employee.update({
+                where: { id: sabbatical.employeeId },
+                data: { employmentStatus: "ACTIVE" }
+            });
+            return sabbatical;
+        }));
+        res.json(result);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.endSabbatical = endSabbatical;
+const terminateFromSabbatical = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const sabbaticalId = Number(req.params.id);
+        const result = yield prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            const sabbatical = yield tx.sabbatical.update({
+                where: { id: sabbaticalId },
+                data: { status: "COMPLETED" }
+            });
+            yield tx.employee.update({
+                where: { id: sabbatical.employeeId },
+                data: { employmentStatus: "TERMINATED" }
+            });
+            return sabbatical;
+        }));
+        res.json(result);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.terminateFromSabbatical = terminateFromSabbatical;
+const initSabbaticalReminderScheduler = () => {
+    node_cron_1.default.schedule("0 9 * * *", () => __awaiter(void 0, void 0, void 0, function* () {
+        console.log("Running sabbatical reminder cron...");
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const reminderDate = new Date(today);
+        reminderDate.setDate(today.getDate() + 3);
+        const sabbaticals = yield prisma.sabbatical.findMany({
+            where: {
+                status: "ACTIVE",
+                endDate: {
+                    gte: today,
+                    lte: reminderDate
+                }
+            },
+            include: {
+                employee: true
+            }
+        });
+        for (const sab of sabbaticals) {
+            const emp = sab.employee;
+            const message = `Your sabbatical ends on ${sab.endDate.toDateString()}. Please contact HR.`;
+            // await createNotification(emp.id, message);
+            const hrUsers = yield prisma.employee.findMany({
+                where: { roleId: 1, employmentStatus: "ACTIVE" },
+                select: { id: true }
+            });
+            // for (const hr of hrUsers) {
+            //   await createNotification(
+            //     hr.id,
+            //     `${emp.firstName}'s sabbatical ends on ${sab.endDate.toDateString()}`
+            //   );
+            // }
+        }
+    }));
+};
+exports.initSabbaticalReminderScheduler = initSabbaticalReminderScheduler;
+// GET /employees/by-manager/:managerId
+const getEmployeesByManager = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const managerId = Number(req.params.managerId);
+        const employees = yield prisma.employee.findMany({
+            where: {
+                reportingManager: managerId,
+                employmentStatus: "ACTIVE"
+            },
+            orderBy: { firstName: "asc" }
+        });
+        res.json(employees);
+    }
+    catch (err) {
+        console.error("❌ Failed to fetch employees by manager:", err);
+        res.status(500).json({ error: "Failed to fetch employees" });
+    }
+});
+exports.getEmployeesByManager = getEmployeesByManager;
+const bulkUpdateEmployeeExtras = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const form = (0, formidable_1.default)({ multiples: false, keepExtensions: true });
+        form.parse(req, (err, fields, files) => __awaiter(void 0, void 0, void 0, function* () {
+            if (err) {
+                return res.status(500).json({ error: "File parsing error" });
+            }
+            const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
+            if (!fileObj) {
+                return res.status(400).json({ error: "No file uploaded" });
+            }
+            const workbook = xlsx_1.default.readFile(fileObj.filepath);
+            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+            const rows = xlsx_1.default.utils.sheet_to_json(sheet);
+            const logs = [];
+            const errorRows = [];
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                const code = normalizeCode(row.employeeCode);
+                try {
+                    if (!code)
+                        throw new Error("employeeCode missing");
+                    const employee = yield prisma.employee.findUnique({
+                        where: { employeeCode: code },
+                    });
+                    if (!employee) {
+                        throw new Error(`Employee not found: ${code}`);
+                    }
+                    /** Helper date parser */
+                    const parseOptionalDate = (value) => {
+                        if (!value)
+                            return null;
+                        const d = new Date(value);
+                        return isNaN(d.getTime()) ? null : d;
+                    };
+                    /** 1️⃣ Update employee fields */
+                    yield prisma.employee.update({
+                        where: { employeeCode: code },
+                        data: {
+                            marital: row.maritalStatus || null,
+                            fatherName: row.fatherName || null,
+                            motherName: row.motherName || null,
+                            alternatePhone: row.alternatePhone
+                                ? String(row.alternatePhone)
+                                : null,
+                            bloodGroup: row.bloodGroup || null,
+                            uanNumber: row.uanNumber
+                                ? String(row.uanNumber)
+                                : null,
+                            panNumber: row.panNumber
+                                ? String(row.panNumber)
+                                : null,
+                            aadharNumber: row.aadharNumber
+                                ? String(row.aadharNumber)
+                                : null,
+                            licenseNumber: row.licenseNumber
+                                ? String(row.licenseNumber)
+                                : null,
+                            licenseRegDate: parseOptionalDate(row.licenseRegDate),
+                            licenseExpiryDate: parseOptionalDate(row.licenseExpiryDate),
+                            probationEndDate: parseOptionalDate(row.probationEndDate),
+                        },
+                    });
+                    /** 2️⃣ Permanent Address */
+                    if (row.permanentLine1) {
+                        const existingPermanent = yield prisma.address.findFirst({
+                            where: {
+                                employeeId: employee.id,
+                                type: "PERMANENT",
+                            },
+                        });
+                        if (existingPermanent) {
+                            yield prisma.address.update({
+                                where: { id: existingPermanent.id },
+                                data: {
+                                    line1: row.permanentLine1,
+                                    line2: row.permanentLine2 || null,
+                                    city: row.permanentCity || "",
+                                    state: row.permanentState || "",
+                                    zipCode: row.permanentZip
+                                        ? String(row.permanentZip)
+                                        : "",
+                                    country: row.permanentCountry || "",
+                                },
+                            });
+                        }
+                        else {
+                            yield prisma.address.create({
+                                data: {
+                                    employeeId: employee.id,
+                                    type: "PERMANENT",
+                                    line1: row.permanentLine1,
+                                    line2: row.permanentLine2 || null,
+                                    city: row.permanentCity || "",
+                                    state: row.permanentState || "",
+                                    zipCode: row.permanentZip
+                                        ? String(row.permanentZip)
+                                        : "",
+                                    country: row.permanentCountry || "",
+                                },
+                            });
+                        }
+                    }
+                    /** 3️⃣ Temporary Address */
+                    if (row.temporaryLine1) {
+                        const existingTemporary = yield prisma.address.findFirst({
+                            where: {
+                                employeeId: employee.id,
+                                type: "TEMPORARY",
+                            },
+                        });
+                        if (existingTemporary) {
+                            yield prisma.address.update({
+                                where: { id: existingTemporary.id },
+                                data: {
+                                    line1: row.temporaryLine1,
+                                    line2: row.temporaryLine2 || null,
+                                    city: row.temporaryCity || "",
+                                    state: row.temporaryState || "",
+                                    zipCode: row.temporaryZip
+                                        ? String(row.temporaryZip)
+                                        : "",
+                                    country: row.temporaryCountry || "",
+                                },
+                            });
+                        }
+                        else {
+                            yield prisma.address.create({
+                                data: {
+                                    employeeId: employee.id,
+                                    type: "TEMPORARY",
+                                    line1: row.temporaryLine1,
+                                    line2: row.temporaryLine2 || null,
+                                    city: row.temporaryCity || "",
+                                    state: row.temporaryState || "",
+                                    zipCode: row.temporaryZip
+                                        ? String(row.temporaryZip)
+                                        : "",
+                                    country: row.temporaryCountry || "",
+                                },
+                            });
+                        }
+                    }
+                    logs.push(`Row ${i + 1}: SUCCESS (${code})`);
+                }
+                catch (error) {
+                    errorRows.push(Object.assign({ rowNumber: i + 1, employeeCode: code, error: error.message }, row));
+                    logs.push(`Row ${i + 1}: FAILED → ${error.message}`);
+                }
+            }
+            return res.json({
+                totalRows: rows.length,
+                successCount: rows.length - errorRows.length,
+                failedCount: errorRows.length,
+                logs,
+            });
+        }));
+    }
+    catch (e) {
+        console.error(e);
+        return res.status(500).json({ error: "Bulk update failed" });
+    }
+});
+exports.bulkUpdateEmployeeExtras = bulkUpdateEmployeeExtras;
+const bulkUploadLeaveBalance = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const form = (0, formidable_1.default)({ multiples: false, keepExtensions: true });
+        form.parse(req, (err, fields, files) => __awaiter(void 0, void 0, void 0, function* () {
+            if (err) {
+                return res.status(500).json({ error: "File parsing error" });
+            }
+            const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
+            if (!fileObj) {
+                return res.status(400).json({ error: "No file uploaded" });
+            }
+            const workbook = xlsx_1.default.readFile(fileObj.filepath);
+            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+            const rows = xlsx_1.default.utils.sheet_to_json(sheet);
+            const logs = [];
+            const errorRows = [];
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                try {
+                    const code = String(row.employeeCode).trim();
+                    if (!code)
+                        throw new Error("employeeCode missing");
+                    const employee = yield prisma.employee.findUnique({
+                        where: { employeeCode: code },
+                    });
+                    if (!employee)
+                        throw new Error("Employee not found");
+                    const year = Number(row.year);
+                    const category = row.category;
+                    let leaveTypeId = null;
+                    let permissionType = null;
+                    if (category === "LEAVE") {
+                        if (!row.leaveType) {
+                            throw new Error("leaveType required for LEAVE");
+                        }
+                        const leaveType = yield prisma.leaveType.findUnique({
+                            where: { name: row.leaveType },
+                        });
+                        if (!leaveType) {
+                            throw new Error(`Invalid leaveType: ${row.leaveType}`);
+                        }
+                        leaveTypeId = leaveType.id;
+                        if (!leaveTypeId) {
+                            throw new Error("leaveTypeId missing for LEAVE");
+                        }
+                    }
+                    if (category === "PERMISSION") {
+                        if (!row.permissionType) {
+                            throw new Error("permissionType required for PERMISSION");
+                        }
+                        permissionType = row.permissionType;
+                    }
+                    const totalAllowed = Number(row.totalAllowed || 0);
+                    const used = Number(row.used || 0);
+                    const halfDayUsed = Number(row.halfDayUsed || 0);
+                    // Upsert logic
+                    // await prisma.employeeLeaveBalance.upsert({
+                    //   where:
+                    //     category === "LEAVE"
+                    //       ? {
+                    //         employeeId_leaveTypeId_year: {
+                    //           employeeId: employee.id,
+                    //           leaveTypeId: leaveTypeId,
+                    //           year,
+                    //         },
+                    //       }
+                    //       : {
+                    //         employeeId_permissionType_year: {
+                    //           employeeId: employee.id,
+                    //           permissionType,
+                    //           year,
+                    //         },
+                    //       },
+                    //   update: {
+                    //     totalAllowed,
+                    //     used,
+                    //     halfDayUsed,
+                    //   },
+                    //   create: {
+                    //     employeeId: employee.id,
+                    //     leaveTypeId: leaveTypeId,
+                    //     permissionType,
+                    //     category,
+                    //     year,
+                    //     totalAllowed,
+                    //     used,
+                    //     halfDayUsed,
+                    //   },
+                    // });
+                    if (category === "LEAVE") {
+                        if (!leaveTypeId) {
+                            throw new Error("leaveTypeId missing for LEAVE");
+                        }
+                        yield prisma.employeeLeaveBalance.upsert({
+                            where: {
+                                employeeId_leaveTypeId_year: {
+                                    employeeId: employee.id,
+                                    leaveTypeId: leaveTypeId, // must be number
+                                    year,
+                                },
+                            },
+                            update: {
+                                totalAllowed,
+                                used,
+                                halfDayUsed,
+                            },
+                            create: {
+                                employeeId: employee.id,
+                                leaveTypeId: leaveTypeId,
+                                permissionType: null,
+                                category,
+                                year,
+                                totalAllowed,
+                                used,
+                                halfDayUsed,
+                            },
+                        });
+                    }
+                    else if (category === "PERMISSION") {
+                        if (!permissionType) {
+                            throw new Error("permissionType missing for PERMISSION");
+                        }
+                        yield prisma.employeeLeaveBalance.upsert({
+                            where: {
+                                employeeId_permissionType_year: {
+                                    employeeId: employee.id,
+                                    permissionType: permissionType,
+                                    year,
+                                },
+                            },
+                            update: {
+                                totalAllowed,
+                                used,
+                                halfDayUsed,
+                            },
+                            create: {
+                                employeeId: employee.id,
+                                leaveTypeId: null,
+                                permissionType: permissionType,
+                                category,
+                                year,
+                                totalAllowed,
+                                used,
+                                halfDayUsed,
+                            },
+                        });
+                    }
+                    logs.push(`Row ${i + 1}: SUCCESS (${code})`);
+                }
+                catch (e) {
+                    logs.push(`Row ${i + 1}: FAILED → ${e.message}`);
+                    errorRows.push(Object.assign({ row: i + 1, error: e.message }, row));
+                }
+            }
+            return res.json({
+                totalRows: rows.length,
+                failed: errorRows.length,
+                logs,
+            });
+        }));
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Upload failed" });
+    }
+});
+exports.bulkUploadLeaveBalance = bulkUploadLeaveBalance;

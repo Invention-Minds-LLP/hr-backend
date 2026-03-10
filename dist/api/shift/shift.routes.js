@@ -10,6 +10,13 @@ router.get("/templates", authMiddleware_1.authenticateToken, shift_controller_1.
 router.get("/templates/:id", authMiddleware_1.authenticateToken, shift_controller_1.getShiftTemplateById);
 router.put("/templates/:id", authMiddleware_1.authenticateToken, shift_controller_1.updateShiftTemplate);
 router.delete("/templates/:id", authMiddleware_1.authenticateToken, shift_controller_1.deleteShiftTemplate);
+router.get("/weekoffs", shift_controller_1.getApprovedWeekOffs);
+router.get("/employee-shifts", authMiddleware_1.authenticateToken, shift_controller_1.listEmployeeShifts);
+router.put("/employee-shifts/:assignmentId", authMiddleware_1.authenticateToken, shift_controller_1.updateEmployeeShift);
+router.post('/assign-fixed', authMiddleware_1.authenticateToken, shift_controller_1.assignFixed);
+router.get("/employees", authMiddleware_1.authenticateToken, shift_controller_1.getManagerEmployees);
+router.get("/manager/shift-templates", authMiddleware_1.authenticateToken, shift_controller_1.getManagerShiftTemplates);
+router.get("/manager/rotation-patterns", authMiddleware_1.authenticateToken, shift_controller_1.listManagerPatterns);
 /* Shift Assignment Routes */
 router.post("/assignments", authMiddleware_1.authenticateToken, shift_controller_1.assignShift);
 router.get("/assignments", authMiddleware_1.authenticateToken, shift_controller_1.getShiftAssignments);
@@ -22,4 +29,15 @@ router.post('/rotation-patterns/:patternId/items', authMiddleware_1.authenticate
 router.post('/rotation-patterns/:patternId/items/bulk', authMiddleware_1.authenticateToken, shift_controller_1.addRotationItemsBulk);
 // Assign rotational to employee
 router.post('/assign-rotational', authMiddleware_1.authenticateToken, shift_controller_1.assignRotational);
+router.post(" /request", shift_controller_1.requestShiftChange);
+// router.patch("  /approve/:id", updateShiftApproval);
+router.post('/request', authMiddleware_1.authenticateToken, shift_controller_1.requestShiftChange);
+router.post('/monthly-request', authMiddleware_1.authenticateToken, shift_controller_1.requestMonthlyShift);
+router.post('/monthly/status', authMiddleware_1.authenticateToken, shift_controller_1.getMonthlyShiftStatus);
+router.get('/daily-range', authMiddleware_1.authenticateToken, shift_controller_1.getEmployeeDailyShiftsForRange);
+router.post('/approve/:id', authMiddleware_1.authenticateToken, shift_controller_1.approveShiftChange);
+router.get('/approvals/inbox', authMiddleware_1.authenticateToken, shift_controller_1.listApprovalsInbox);
+router.get('/approvals/mine', authMiddleware_1.authenticateToken, shift_controller_1.listMyShiftRequests);
+router.get('/approvals/employee/:employeeId', authMiddleware_1.authenticateToken, shift_controller_1.listEmployeeShiftRequests);
+router.get('/weekly-month', authMiddleware_1.authenticateToken, shift_controller_1.getEmployeeWeeklyShiftsForMonth);
 exports.default = router;

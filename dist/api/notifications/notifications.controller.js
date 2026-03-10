@@ -8,8 +8,11 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteNotification = exports.markAsRead = exports.getNotifications = exports.createNotification = exports.broadcastNotification = exports.registerForNotifications = void 0;
+exports.sendPushNotification = exports.removeDeviceToken = exports.saveDeviceToken = exports.deleteNotification = exports.markAsRead = exports.getNotifications = exports.createNotification = exports.broadcastNotification = exports.registerForNotifications = void 0;
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
@@ -74,6 +77,8 @@ const createNotification = (employeeId, message) => __awaiter(void 0, void 0, vo
         });
         // Immediately broadcast it to the correct employee
         (0, exports.broadcastNotification)(notification);
+        // 🔹 Mobile Push
+        yield (0, exports.sendPushNotification)(employeeId, message);
         return notification;
     }
     catch (error) {
@@ -130,3 +135,54 @@ const deleteNotification = (req, res) => __awaiter(void 0, void 0, void 0, funct
     }
 });
 exports.deleteNotification = deleteNotification;
+const saveDeviceToken = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const { employeeId, token, platform } = req.body;
+    if (!employeeId || !token) {
+        return res.status(400).json({ error: 'Missing data' });
+    }
+    yield prisma_1.prisma.deviceToken.upsert({
+        where: { token },
+        update: { employeeId },
+        create: { employeeId, token, platform }
+    });
+    res.json({ success: true });
+});
+exports.saveDeviceToken = saveDeviceToken;
+const removeDeviceToken = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const { token } = req.body;
+    if (!token) {
+        return res.status(400).json({ error: "Token required" });
+    }
+    yield prisma_1.prisma.deviceToken.deleteMany({
+        where: { token }
+    });
+    res.json({ success: true });
+});
+exports.removeDeviceToken = removeDeviceToken;
+const firebase_1 = __importDefault(require("../../lib/firebase"));
+const sendPushNotification = (employeeId, message) => __awaiter(void 0, void 0, void 0, function* () {
+    const tokens = yield prisma_1.prisma.deviceToken.findMany({
+        where: { employeeId }
+    });
+    if (!tokens.length)
+        return;
+    const payload = {
+        notification: {
+            title: 'New Notification',
+            body: message,
+        },
+        data: {
+            route: '/notifications'
+        }
+    };
+    const response = yield firebase_1.default.messaging().sendEachForMulticast(Object.assign({ tokens: tokens.map(t => t.token) }, payload));
+    // Cleanup invalid tokens
+    response.responses.forEach((r, i) => __awaiter(void 0, void 0, void 0, function* () {
+        if (!r.success) {
+            yield prisma_1.prisma.deviceToken.delete({
+                where: { token: tokens[i].token }
+            });
+        }
+    }));
+});
+exports.sendPushNotification = sendPushNotification;

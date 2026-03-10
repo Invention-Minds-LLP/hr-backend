@@ -67,6 +67,7 @@ function getAssignedTest(req, res) {
 // body: { attemptId, assignedTestId, responses, score }
 function submitAttempt(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
+        var _a;
         const { attemptId, assignedTestId, responses, score } = req.body;
         try {
             yield prisma_1.prisma.$transaction([
@@ -83,6 +84,34 @@ function submitAttempt(req, res) {
                     data: { status: 'Completed', completedAt: new Date() },
                 }),
             ]);
+            // 2️⃣ Fetch employee + test details
+            const assigned = yield prisma_1.prisma.assignedTest.findUnique({
+                where: { id: Number(assignedTestId) },
+                include: {
+                    employee: {
+                        select: { id: true, firstName: true, lastName: true }
+                    },
+                    test: {
+                        select: { name: true }
+                    }
+                }
+            });
+            if (assigned === null || assigned === void 0 ? void 0 : assigned.employee) {
+                const emp = assigned.employee;
+                const employeeName = `${emp.firstName} ${emp.lastName}`;
+                const testName = ((_a = assigned.test) === null || _a === void 0 ? void 0 : _a.name) || "Test";
+                // 🔔 Notify employee
+                // await createNotification(
+                //   emp.id,
+                //   `You have successfully completed the ${testName}.`
+                // );
+                // 🔔 Notify HR
+                const hrIds = yield getHRIds();
+                const message = `${employeeName} has completed the ${testName}.`;
+                // for (const hrId of hrIds) {
+                //   await createNotification(hrId, message);
+                // }
+            }
             res.json({ ok: true });
         }
         catch (e) {
@@ -423,3 +452,15 @@ const evaluateAttempt = (req, res) => __awaiter(void 0, void 0, void 0, function
     }
 });
 exports.evaluateAttempt = evaluateAttempt;
+function getHRIds() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const hrs = yield prisma_1.prisma.employee.findMany({
+            where: {
+                departmentId: 1,
+                employmentStatus: 'ACTIVE'
+            },
+            select: { id: true }
+        });
+        return hrs.map(h => h.id);
+    });
+}

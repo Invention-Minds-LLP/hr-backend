@@ -12,12 +12,16 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.loginCandidate = exports.setCandidatePassword = exports.listAllUsers = exports.adminResetPassword = exports.resetMyPassword = exports.loginUser = exports.createUser = void 0;
+exports.syncUsersFromEmployees = exports.logout = exports.verifyOtp = exports.loginInit = exports.loginCandidate = exports.setCandidatePassword = exports.listAllUsers = exports.adminResetPassword = exports.resetMyPassword = exports.loginUser = exports.createUser = void 0;
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+const employee_service_1 = require("../../services/employee.service");
+const userAuthService = new employee_service_1.UserAuthService();
+const otp_service_1 = require("../../services/otp.service");
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
+const sms_controller_1 = require("../sms/sms.controller");
 // REGISTER / CREATE USER (linked to Employee)
 const createUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
@@ -78,6 +82,7 @@ exports.createUser = createUser;
 // LOGIN USER
 const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a;
+    console.log("Login attempt:", req.body);
     const ipAddress = getClientIp(req);
     const userAgent = req.headers["user-agent"] || undefined;
     try {
@@ -93,7 +98,8 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
                 departmentId: true,
                 photoUrl: true,
                 designation: true,
-                roleId: true
+                roleId: true,
+                gender: true
             }
         });
         if (!employee)
@@ -114,6 +120,7 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
             deptId: employee.departmentId,
             employeeCode: user.employeeCode,
             username: user.username,
+            roleId: employee.roleId
         };
         const token = jsonwebtoken_1.default.sign(payload, process.env.JWT_SECRET, { expiresIn: "12h" });
         // Update last login
@@ -133,6 +140,7 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
             designation: ((_a = employee === null || employee === void 0 ? void 0 : employee.designation) === null || _a === void 0 ? void 0 : _a.name) || '',
             photoUrl: employee.photoUrl || null,
             roleId: employee.roleId,
+            gender: employee.gender
         });
     }
     catch (error) {
@@ -204,16 +212,30 @@ const listAllUsers = (_req, res) => __awaiter(void 0, void 0, void 0, function* 
     try {
         const users = yield prisma_1.prisma.user.findMany({
             orderBy: { createdAt: "desc" },
-            include: {
+            select: {
+                id: true,
+                employeeCode: true,
+                username: true,
+                role: true,
+                lastLogin: true,
+                createdAt: true,
+                updatedAt: true,
+                // ✅ employee details only
                 employee: {
                     select: {
                         employeeCode: true,
                         firstName: true,
                         lastName: true,
                         departmentId: true,
-                        designation: true
+                        designation: {
+                            select: {
+                                id: true,
+                                name: true
+                            }
+                        }
                     }
                 }
+                // ❌ NOT returning: passwordHash, refreshTokens, loginHistory
             }
         });
         res.json(users);
@@ -286,3 +308,141 @@ const loginCandidate = (req, res) => __awaiter(void 0, void 0, void 0, function*
     }
 });
 exports.loginCandidate = loginCandidate;
+const loginInit = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const { empId, password } = req.body;
+        const user = yield userAuthService.validateCredentials(empId, password);
+        if (!user) {
+            return res.status(401).json({ message: 'Invalid credentials' });
+        }
+        const phone = (_a = user.employee) === null || _a === void 0 ? void 0 : _a.phone;
+        if (!phone) {
+            return res.status(400).json({ message: 'Phone number not found' });
+        }
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        console.log(`Generated OTP for empId ${empId}: ${otp}`);
+        yield otp_service_1.otpService.generate(empId, otp);
+        yield (0, sms_controller_1.sendOtpSms)({
+            patientName: ((_b = user.employee) === null || _b === void 0 ? void 0 : _b.firstName) || 'Employee',
+            otp,
+            service: 'Employee Login',
+            phoneNumber: phone
+        });
+        res.json({
+            success: true,
+            empId
+        });
+    }
+    catch (err) {
+        res.status(500).json({ message: 'OTP sending failed' });
+    }
+});
+exports.loginInit = loginInit;
+const verifyOtp = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const ipAddress = getClientIp(req);
+    const userAgent = req.headers["user-agent"] || undefined;
+    try {
+        const { empId, otp } = req.body;
+        const isValid = yield otp_service_1.otpService.verify(empId, otp);
+        if (!isValid) {
+            return res.status(401).json({ message: 'Invalid or expired OTP' });
+        }
+        const user = yield prisma_1.prisma.user.findUnique({
+            where: { employeeCode: empId }
+        });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        // OTP success → finalize login
+        const response = yield userAuthService.finalizeLogin(user.id, ipAddress, userAgent);
+        res.json(Object.assign({}, response));
+    }
+    catch (err) {
+        res.status(500).json({ message: 'OTP verification failed' });
+    }
+});
+exports.verifyOtp = verifyOtp;
+const logout = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { refreshToken } = req.body;
+        if (!refreshToken) {
+            return res.status(400).json({ message: 'Refresh token required' });
+        }
+        // delete refresh token from DB
+        yield prisma_1.prisma.refreshToken.deleteMany({
+            where: { token: refreshToken }
+        });
+        return res.json({ message: 'Logged out successfully' });
+    }
+    catch (error) {
+        console.error('Logout error:', error);
+        res.status(500).json({ message: 'Logout failed' });
+    }
+});
+exports.logout = logout;
+const syncUsersFromEmployees = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        // 1) Get employees who DO NOT have users
+        const employeesWithoutUsers = yield prisma_1.prisma.employee.findMany({
+            where: {
+                User: null // 👈 because Employee → User? relation exists
+            },
+            select: {
+                employeeCode: true,
+                firstName: true,
+                lastName: true,
+                roleId: true
+            }
+        });
+        if (employeesWithoutUsers.length === 0) {
+            return res.json({
+                message: "All employees already have users",
+                created: 0
+            });
+        }
+        let createdCount = 0;
+        for (const emp of employeesWithoutUsers) {
+            // password = employeeCode
+            const passwordHash = yield bcryptjs_1.default.hash(emp.employeeCode, 10);
+            // generate username
+            let username = `${emp.firstName}.${emp.lastName}`
+                .toLowerCase()
+                .replace(/\s+/g, "");
+            let suffix = 1;
+            while (yield prisma_1.prisma.user.findUnique({ where: { username } })) {
+                username = `${emp.firstName}.${emp.lastName}${suffix}`
+                    .toLowerCase()
+                    .replace(/\s+/g, "");
+                suffix++;
+            }
+            // resolve role
+            const roleRow = yield prisma_1.prisma.role.findUnique({
+                where: { id: emp.roleId },
+                select: { name: true }
+            });
+            if (!roleRow) {
+                console.warn(`Skipping ${emp.employeeCode}: role not found`);
+                continue;
+            }
+            yield prisma_1.prisma.user.create({
+                data: {
+                    employeeCode: emp.employeeCode,
+                    username,
+                    passwordHash,
+                    role: roleRow.name
+                }
+            });
+            createdCount++;
+        }
+        return res.json({
+            message: "User sync completed",
+            created: createdCount
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "User sync failed" });
+    }
+});
+exports.syncUsersFromEmployees = syncUsersFromEmployees;

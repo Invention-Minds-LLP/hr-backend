@@ -17,7 +17,6 @@ const express_async_handler_1 = __importDefault(require("express-async-handler")
 // import { PrismaClient, PermissionStatus } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
-const notifications_controller_1 = require("../notifications/notifications.controller");
 // --- File POSH case
 exports.createPoshCase = (0, express_async_handler_1.default)((req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const { accusedId, description } = req.body;
@@ -32,9 +31,12 @@ exports.createPoshCase = (0, express_async_handler_1.default)((req, res) => __aw
         },
         select: { id: true }
     });
-    for (const hr of hrEmployees) {
-        yield (0, notifications_controller_1.createNotification)(hr.id, 'New posh submitted — requires acknowledgment.');
-    }
+    // for (const hr of hrEmployees) {
+    //   await createNotification(
+    //     hr.id,
+    //     'New posh submitted — requires acknowledgment.'
+    //   );
+    // }
     res.json(posh);
 }));
 // --- List POSH cases

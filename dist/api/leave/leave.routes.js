@@ -8,6 +8,10 @@ router.post("/", authMiddleware_1.authenticateToken, leave_controller_1.createLe
 router.get("/", authMiddleware_1.authenticateToken, leave_controller_1.getLeaveRequests);
 router.post("/types", authMiddleware_1.authenticateToken, leave_controller_1.createLeaveType);
 router.get("/types", authMiddleware_1.authenticateToken, leave_controller_1.getLeaveTypes);
+router.post("/leave-balances", leave_controller_1.createLeaveBalances);
+router.post("/:leaveId/prescription", leave_controller_1.uploadPrescription);
+router.get('/casual/monthly-usage', authMiddleware_1.authenticateToken, leave_controller_1.getMonthlyCasualUsage);
+router.get("/comp-off/credits", leave_controller_1.getCompOffCredits);
 router.put("/update-leave-type/:id", leave_controller_1.updateLeaveType);
 router.patch("/:id/status", authMiddleware_1.authenticateToken, leave_controller_1.updateLeaveStatus);
 router.get('/:id/dashboard', authMiddleware_1.authenticateToken, leave_controller_1.getLeaveDashboard);

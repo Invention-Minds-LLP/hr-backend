@@ -11,4 +11,5 @@ router.post("/", authMiddleware_1.authenticateToken, permission_controller_1.cre
 router.get("/", authMiddleware_1.authenticateToken, permission_controller_1.getPermissionRequests);
 router.patch("/:id/status", authMiddleware_1.authenticateToken, permission_controller_1.updatePermissionStatus);
 router.get('/balance/:employeeId', authMiddleware_1.authenticateToken, permission_controller_1.getPermissionBalance);
+router.get('/monthly-usage/:employeeId', authMiddleware_1.authenticateToken, permission_controller_1.getMonthlyPermissionUsage);
 exports.default = router;

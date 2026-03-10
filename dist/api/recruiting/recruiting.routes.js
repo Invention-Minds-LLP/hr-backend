@@ -9,11 +9,11 @@ const rc = new recruiting_controller_1.RecruitingController();
 exports.recruitingRouter = (0, express_1.Router)();
 // Jobs
 exports.recruitingRouter.post('/jobs', authMiddleware_1.authenticateToken, rc.createJob);
-exports.recruitingRouter.get('/jobs', authMiddleware_1.authenticateToken, rc.listJobs);
+exports.recruitingRouter.get('/jobs', rc.listJobs);
 exports.recruitingRouter.patch('/jobs/:id/status', authMiddleware_1.authenticateToken, rc.changeJobStatus);
 // Candidates & Applications
 exports.recruitingRouter.post('/candidates', authMiddleware_1.authenticateToken, rc.createCandidate);
-exports.recruitingRouter.post('/applications', authMiddleware_1.authenticateToken, rc.createApplication);
+exports.recruitingRouter.post('/applications', rc.createApplication);
 exports.recruitingRouter.get('/applications', authMiddleware_1.authenticateToken, rc.listApplications);
 exports.recruitingRouter.patch('/applications/:id/status', authMiddleware_1.authenticateToken, rc.moveApplication);
 // Interviews

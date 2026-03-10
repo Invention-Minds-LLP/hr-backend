@@ -69,7 +69,7 @@ const getEmployeeUsageSummary = (req, res) => __awaiter(void 0, void 0, void 0, 
                 permissions: {
                     where: { status: client_1.PermissionStatus.APPROVED },
                 },
-                designation: true
+                designation: true,
             },
         });
         const summary = employees.map(emp => {
@@ -109,6 +109,8 @@ const getEmployeeUsageSummary = (req, res) => __awaiter(void 0, void 0, void 0, 
                 designation: designationName,
                 employmentType: emp.employmentType,
                 shiftType: ((_c = emp.shifts[0]) === null || _c === void 0 ? void 0 : _c.shift.shiftType) || 'N/A',
+                gender: emp.gender,
+                photoUrl: emp.photoUrl,
                 totalLeaveDays,
                 totalWFHDays,
                 totalPermissionHours,

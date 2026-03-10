@@ -49,19 +49,19 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
     });
 
 
-    if (!balance) {
-      return res.status(400).json({ error: "Permission balance not configured." });
-    }
+    // if (!balance) {
+    //   return res.status(400).json({ error: "Permission balance not configured." });
+    // }
 
-    if (!balance.isUnlimited) {
-      const remaining = balance.totalAllowed - balance.used;
+    // if (!balance.isUnlimited) {
+    //   const remaining = balance.totalAllowed - balance.used;
 
-      if (remaining < unitsRequested) {
-        return res.status(400).json({
-          error: `You have only ${remaining} permission(s) remaining for ${permissionType}`
-        });
-      }
-    }
+    //   if (remaining < unitsRequested) {
+    //     return res.status(400).json({
+    //       error: `You have only ${remaining} permission(s) remaining for ${permissionType}`
+    //     });
+    //   }
+    // }
 
     const request = await prisma.permissionRequest.create({
       data: {

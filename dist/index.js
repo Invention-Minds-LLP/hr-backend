@@ -39,6 +39,10 @@ const incident_routes_1 = __importDefault(require("./api/incident/incident.route
 const helmet_1 = __importDefault(require("helmet"));
 const scheduler_1 = require("./schedulers/scheduler");
 const designation_routes_1 = __importDefault(require("./api/designation/designation.routes"));
+const sms_routes_1 = __importDefault(require("./api/sms/sms.routes"));
+const mobile_auth_routes_1 = __importDefault(require("./api/mobile-auth/mobile-auth.routes"));
+const holidays_routes_1 = __importDefault(require("./api/holidays/holidays.routes"));
+const geo_tracking_routes_1 = __importDefault(require("./api/geo-tracking/geo-tracking.routes"));
 const port = 3002;
 dotenv_1.default.config();
 const app = (0, express_1.default)();
@@ -67,9 +71,16 @@ const allowedOrigins = [
     'http://localhost:4300', // Angular web
     'http://192.168.3.25:4300', // LAN testing
     'https://demo.hrproindia.in',
-    'http://223.30.118.2:4300',
     'http://localhost', // Capacitor Android
-    'capacitor://localhost' // Capacitor iOS
+    'https://localhost',
+    'capacitor://localhost', // Capacitor iOS
+    'http://localhost:8100',
+    'https://hrminds.imapps.in',
+    'https://hrmindsjmrh.imapps.in',
+    'http://localhost:4200',
+    'https://rashtrotthanahospital.com',
+    'http://192.168.8.189:4300',
+    'https://www.rashtrotthanahospital.com'
 ];
 app.use((0, cors_1.default)({
     origin: function (origin, callback) {
@@ -84,7 +95,7 @@ app.use((0, cors_1.default)({
         }
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 app.use(express_1.default.json());
@@ -120,6 +131,10 @@ app.use('/api/trainings', training_routes_1.default);
 app.use('/api/attendance', attendance_routes_1.default);
 app.use('/api/incidents', incident_routes_1.default);
 app.use("/api/designation", designation_routes_1.default);
+app.use("/api/sms", sms_routes_1.default);
+app.use("/api/auth", mobile_auth_routes_1.default);
+app.use("/api/holidays", holidays_routes_1.default);
+app.use("/api/geo-tracking", geo_tracking_routes_1.default);
 // Default route
 app.get("/", (req, res) => {
     res.send("✅ HR Management API is running!");

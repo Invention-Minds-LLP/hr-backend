@@ -181,6 +181,31 @@ const submitFullForm = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 }))
             });
         }
+        if (!data.finalReview) {
+            // get employee info
+            const employee = yield prisma_1.prisma.employee.findUnique({
+                where: { id: data.employeeId },
+                select: { firstName: true, lastName: true, employeeCode: true }
+            });
+            const employeeName = employee
+                ? `${employee.firstName} ${employee.lastName}`
+                : `Employee #${data.employeeCode}`;
+            // get HR employees (departmentId = 1 OR roleId = HR)
+            const hrUsers = yield prisma_1.prisma.employee.findMany({
+                where: {
+                    departmentId: 1, // adjust if your HR dept id is different
+                    employmentStatus: 'ACTIVE'
+                },
+                select: { id: true }
+            });
+            const hrIds = hrUsers.map(u => u.id);
+            const messages = `HOD has submitted appraisal for ${employeeName} for ${data.cycle} – ${data.summaries[0].period}. Please review`;
+            // if (hrIds.length) {
+            //   for (const hrId of hrIds) {
+            //     await createNotification(hrId, messages)
+            //   }
+            // }
+        }
         // 3) Save final review
         if (data.finalReview) {
             yield prisma_1.prisma.performanceFinalReview.create({
@@ -252,7 +277,9 @@ const getAllSummaries = (req, res) => __awaiter(void 0, void 0, void 0, function
                         lastName: true,
                         email: true,
                         dateOfJoining: true,
-                        reportingManager: true
+                        reportingManager: true,
+                        gender: true,
+                        photoUrl: true,
                     }
                 },
                 department: {

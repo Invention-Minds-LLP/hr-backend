@@ -24,6 +24,7 @@ router.put('/:id/hr-hold', authMiddleware_1.authenticateToken, resignation_contr
 router.post('/:id/handover-tasks', authMiddleware_1.authenticateToken, resignation_controller_1.addHandoverTasks);
 router.patch('/:id/handover-tasks/:taskId', authMiddleware_1.authenticateToken, resignation_controller_1.updateTask);
 router.post('/:id/clearance', authMiddleware_1.authenticateToken, resignation_controller_1.upsertClearance);
+router.post('/:id/applicable-departments', authMiddleware_1.authenticateToken, resignation_controller_1.setApplicableDepartments);
 router.post('/:id/exit-interview', authMiddleware_1.authenticateToken, resignation_controller_1.scheduleExitInterview);
 router.post("/exit-interview", authMiddleware_1.authenticateToken, resignation_controller_1.createExitInterview); // submit responses
 router.get("/exit-interview/:id", authMiddleware_1.authenticateToken, resignation_controller_1.getExitInterview); // get one
@@ -31,4 +32,5 @@ router.get("/exit-interview/:id", authMiddleware_1.authenticateToken, resignatio
 router.post('/:id/final-settlement', authMiddleware_1.authenticateToken, resignation_controller_1.setFinalSettlement);
 router.post('/:id/complete', authMiddleware_1.authenticateToken, resignation_controller_1.markCompleted);
 router.post('/:id/clearance-certificate', authMiddleware_1.authenticateToken, resignation_controller_1.generateClearanceCertificate);
+router.patch("/:id/clearances/items", authMiddleware_1.authenticateToken, resignation_controller_1.bulkUpdateClearanceItems);
 exports.default = router;

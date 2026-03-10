@@ -86,36 +86,45 @@ const createAppraisalsForEmployees = (employeeIds_1, cycle_1, ...args_1) => __aw
         if (!mgrPhone)
             return;
         const employeeName = [emp.firstName, emp.lastName].filter(Boolean).join(" ");
-        try {
-            yield (0, leave_controller_1.sendWhatsAppTemplate)({
-                to: mgrPhone,
-                templateId: APPRAISAL_CREATED_TEMPLATE_ID,
-                placeholders: [employeeName] // add cycle if your template expects it
-            });
-        }
-        catch (e) {
-            console.error("Appraisal create WA (manager) failed:", e);
-        }
+        // try {
+        //   await sendWhatsAppTemplate({
+        //     to: mgrPhone,
+        //     templateId: APPRAISAL_CREATED_TEMPLATE_ID,
+        //     placeholders: [employeeName] // add cycle if your template expects it
+        //   });
+        // } catch (e) {
+        //   console.error("Appraisal create WA (manager) failed:", e);
+        // }
         const message = `A new appraisal has been created for ${employeeName} and assigned to you for review.\nKindly acknowledge and take appropriate action.`;
-        try {
-            yield (0, notifications_controller_1.createNotification)(mgr.id, message); // ✅ send SSE + DB notification
-        }
-        catch (e) {
-            console.error("Appraisal in-app notification failed:", e);
-        }
+        // try {
+        //   await createNotification(mgr.id, message); // ✅ send SSE + DB notification
+        // } catch (e) {
+        //   console.error("Appraisal in-app notification failed:", e);
+        // }
     })));
     return created;
 });
 exports.createAppraisalsForEmployees = createAppraisalsForEmployees;
+// function getEmployeeCycle(doj: Date, now: Date) {
+//   const diffMonths = monthsDiff(doj, now);
+//   if (diffMonths < 3) return null; // not eligible yet
+//   const cycleIndex = Math.floor(diffMonths / 3) + 1; // 1,2,3,4...
+//   const year = now.getFullYear();
+//   return {
+//     cycleIndex,
+//     cycleName: `Cycle ${cycleIndex} ${year}`
+//   };
+// }
 function getEmployeeCycle(doj, now) {
     const diffMonths = monthsDiff(doj, now);
     if (diffMonths < 3)
-        return null; // not eligible yet
-    const cycleIndex = Math.floor(diffMonths / 3) + 1; // 1,2,3,4...
-    const year = now.getFullYear();
+        return null;
+    const yearIndex = Math.floor(diffMonths / 12) + 1;
+    const cycleInYear = Math.floor((diffMonths % 12) / 3) + 1;
     return {
-        cycleIndex,
-        cycleName: `Cycle ${cycleIndex} ${year}`
+        yearIndex,
+        cycleIndex: cycleInYear,
+        cycleName: `Year ${yearIndex} - Cycle ${cycleInYear}`
     };
 }
 function monthsDiff(from, to) {
@@ -169,8 +178,7 @@ const initQuarterlyAppraisalScheduler = () => {
                     continue;
                 const { cycleIndex, cycleName } = cycleInfo;
                 // ❌ Only 4 cycles per year
-                if (cycleIndex > 4)
-                    continue;
+                // if (cycleIndex > 4) continue;
                 // ❌ Skip if already exists
                 const exists = yield prisma_1.prisma.appraisalForm.findFirst({
                     where: {
@@ -206,6 +214,8 @@ const getAllAppraisalsWithManagerReview = (req, res) => __awaiter(void 0, void 0
                         email: true,
                         dateOfJoining: true,
                         reportingManager: true,
+                        gender: true,
+                        photoUrl: true
                     }
                 },
                 managerReview: true // include ONLY ManagerAppraisal
@@ -232,6 +242,7 @@ const getAllAppraisalsWithManagerReview = (req, res) => __awaiter(void 0, void 0
 });
 exports.getAllAppraisalsWithManagerReview = getAllAppraisalsWithManagerReview;
 const saveManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     try {
         const { appraisalId, qualityOfWorkRating, qualityOfWorkComments, knowledgeOfJobRating, knowledgeOfJobComments, teamworkRating, teamworkComments, independenceRating, independenceComments, recordsRating, recordsComments, guestServiceRating, guestServiceComments, safetyRating, safetyComments, attendanceRating, attendanceComments, leadershipRating, leadershipComments, overallScore, comments, recommendations, finalDecision, finalComments } = req.body;
         yield prisma_1.prisma.managerAppraisal.upsert({
@@ -272,6 +283,40 @@ const saveManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, functi
                 status: 'Reviewed'
             }
         });
+        // 3️⃣ Fetch employee + manager details
+        const appraisal = yield prisma_1.prisma.appraisalForm.findUnique({
+            where: { id: appraisalId },
+            include: {
+                employee: {
+                    select: {
+                        firstName: true,
+                        lastName: true,
+                        employeeCode: true,
+                        reportingManager: true
+                    }
+                }
+            }
+        });
+        if ((_a = appraisal === null || appraisal === void 0 ? void 0 : appraisal.employee) === null || _a === void 0 ? void 0 : _a.reportingManager) {
+            const manager = yield prisma_1.prisma.employee.findUnique({
+                where: { id: appraisal.employee.reportingManager },
+                select: { firstName: true, lastName: true }
+            });
+            const empName = `${appraisal.employee.firstName} ${appraisal.employee.lastName}`;
+            const empCode = appraisal.employee.employeeCode;
+            const managerName = manager
+                ? `${manager.firstName} ${manager.lastName}`
+                : 'Manager';
+            const message = `${managerName} submitted appraisal for ${empName} (${empCode}).`;
+            // 4️⃣ Send notification to all HRs
+            const hrEmployees = yield prisma_1.prisma.employee.findMany({
+                where: { departmentId: 1 },
+                select: { id: true },
+            });
+            // for (const hr of hrEmployees) {
+            //   await createNotification(hr.id, message);
+            // }
+        }
         res.json({ message: 'Manager review saved successfully' });
     }
     catch (error) {
@@ -313,6 +358,9 @@ const sendAppraisalCountReminders = (cycles) => __awaiter(void 0, void 0, void 0
     let sent = 0;
     yield Promise.all(Array.from(buckets.values()).map((b) => __awaiter(void 0, void 0, void 0, function* () {
         const phone = phoneById.get(b.managerId);
+        const message = `You have ${b.count} pending appraisal(s) for the ${b.cycle} cycle. Please review them.`;
+        console.log("Appraisal reminder:", message, managerIds);
+        yield (0, notifications_controller_1.createNotification)(b.managerId, message);
         if (!phone)
             return;
         try {

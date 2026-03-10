@@ -13,7 +13,6 @@ exports.bulkMarkTrainingAttendance = exports.getTrainingAttendance = exports.mar
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
-const notifications_controller_1 = require("../notifications/notifications.controller");
 /* ======================================================
    TRAINING CRUD + ASSIGNMENT
    ====================================================== */
@@ -69,6 +68,53 @@ exports.createTraining = createTraining;
 /**
  * Assign employees to training + auto-assign mandatory tests
  */
+// export const assignTraining = async (req: Request, res: Response) => {
+//   try {
+//     const { trainingId, employeeIds, assignedBy } = req.body;
+//     const training = await prisma.training.findUnique({
+//       where: { id: trainingId },
+//       include: { trainingTests: true },
+//     });
+//     if (!training) return res.status(404).json({ error: "Training not found" });
+//     const mandatoryTests = training.trainingTests.filter((t) => t.isMandatory);
+//     const assignments = [];
+//     for (const empId of employeeIds) {
+//       const assignment = await prisma.trainingAssignment.create({
+//         data: {
+//           trainingId,
+//           employeeId: empId,
+//           assignedBy,
+//           status: "NotStarted",
+//         },
+//       });
+//       for (const test of mandatoryTests) {
+//         await prisma.assignedTest.create({
+//           data: {
+//             testId: test.testId,
+//             employeeId: empId,
+//             assignedBy,
+//             status: "NotStarted",
+//             trainingAssignmentId: assignment.id,
+//             testDate: test.testDate ? new Date(test.testDate) : null,
+//             deadlineDate: test.deadlineDate ? new Date(test.deadlineDate) : null,
+//           },
+//         });
+//       }
+//       await createNotification(
+//         empId,
+//         `You have been assigned to the training: ${training.title}`
+//       );
+//       assignments.push(assignment);
+//     }
+//     res.status(201).json({
+//       message: "Training assigned successfully",
+//       assignments,
+//     });
+//   } catch (error) {
+//     console.error("❌ Failed to assign training:", error);
+//     res.status(500).json({ error: "Failed to assign training" });
+//   }
+// };
 const assignTraining = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { trainingId, employeeIds, assignedBy } = req.body;
@@ -76,11 +122,25 @@ const assignTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
             where: { id: trainingId },
             include: { trainingTests: true },
         });
-        if (!training)
+        if (!training) {
             return res.status(404).json({ error: "Training not found" });
+        }
         const mandatoryTests = training.trainingTests.filter((t) => t.isMandatory);
-        const assignments = [];
+        const assignedEmployees = [];
+        const alreadyAssignedEmployees = [];
         for (const empId of employeeIds) {
+            // 🔍 Check existing assignment
+            const existing = yield prisma_1.prisma.trainingAssignment.findFirst({
+                where: {
+                    trainingId,
+                    employeeId: empId,
+                },
+            });
+            if (existing) {
+                alreadyAssignedEmployees.push(empId);
+                continue; // skip this employee
+            }
+            // ✅ Create assignment
             const assignment = yield prisma_1.prisma.trainingAssignment.create({
                 data: {
                     trainingId,
@@ -89,6 +149,7 @@ const assignTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     status: "NotStarted",
                 },
             });
+            // Assign mandatory tests
             for (const test of mandatoryTests) {
                 yield prisma_1.prisma.assignedTest.create({
                     data: {
@@ -102,12 +163,16 @@ const assignTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     },
                 });
             }
-            yield (0, notifications_controller_1.createNotification)(empId, `You have been assigned to the training: ${training.title}`);
-            assignments.push(assignment);
+            // await createNotification(
+            //   empId,
+            //   `You have been assigned to the training: ${training.title}`
+            // );
+            assignedEmployees.push(empId);
         }
-        res.status(201).json({
-            message: "Training assigned successfully",
-            assignments,
+        return res.status(201).json({
+            message: "Training assignment completed",
+            assignedEmployees,
+            alreadyAssignedEmployees,
         });
     }
     catch (error) {
@@ -178,7 +243,10 @@ const markTrainingCompleted = (req, res) => __awaiter(void 0, void 0, void 0, fu
                 progress: 100,
             },
         });
-        yield (0, notifications_controller_1.createNotification)(employeeId, `🎉 You have successfully completed the training!`);
+        // await createNotification(
+        //   employeeId,
+        //   `🎉 You have successfully completed the training!`
+        // );
         res.json(assignment);
     }
     catch (error) {
@@ -230,7 +298,19 @@ const submitTrainingFeedback = (req, res) => __awaiter(void 0, void 0, void 0, f
                 suggestions,
             },
         });
-        yield (0, notifications_controller_1.createNotification)(assignment.assignedBy, `📋 New feedback received for training ID ${trainingId} from employee ${employeeId}`);
+        const emp = yield prisma_1.prisma.employee.findUnique({
+            where: { id: employeeId },
+            select: { firstName: true, lastName: true }
+        });
+        const training = yield prisma_1.prisma.training.findUnique({
+            where: { id: trainingId },
+            select: { title: true }
+        });
+        const employeeName = `${(emp === null || emp === void 0 ? void 0 : emp.firstName) || ""} ${(emp === null || emp === void 0 ? void 0 : emp.lastName) || ""}`.trim();
+        // await createNotification(
+        //   assignment.assignedBy,
+        //   `📋 ${employeeName} has submitted feedback for the training: ${training?.title || "Training"}.`
+        // );
         res.status(201).json(feedbackRecord);
     }
     catch (error) {
@@ -374,6 +454,14 @@ const markTrainingAttendance = (req, res) => __awaiter(void 0, void 0, void 0, f
                 }
             });
         }
+        const training = yield prisma_1.prisma.training.findUnique({
+            where: { id: Number(trainingId) },
+            select: { title: true }
+        });
+        // await createNotification(
+        //   employeeId,
+        //   `Your attendance for the training "${training?.title || 'Training'}" has been marked as: ${status}.`
+        // );
         res.json({
             message: "Attendance marked successfully",
             data: record,
@@ -431,6 +519,14 @@ const bulkMarkTrainingAttendance = (req, res) => __awaiter(void 0, void 0, void 
                     markedBy,
                 }
             });
+            const training = yield prisma_1.prisma.training.findUnique({
+                where: { id: Number(trainingId) },
+                select: { title: true }
+            });
+            // await createNotification(
+            //   entry.employeeId,
+            //   `Your attendance for the training "${training?.title || 'Training'}" has been marked as: ${entry.status}.`
+            // );
         }
         res.json({ message: "Bulk attendance updated" });
     }
