@@ -1276,6 +1276,7 @@ const updateLeaveStatus = (req, res) => __awaiter(void 0, void 0, void 0, functi
             }
             // ledger balance check
             const ledgerBalance = yield getLastLedgerBalanceTx(tx, updatedLeave.employeeId, updatedLeave.leaveTypeId, year);
+            console.log(ledgerBalance, requestedUnits);
             if (requestedUnits > ledgerBalance) {
                 return { kind: "ERR", status: 400, body: { error: "Insufficient balance (ledger)" } };
             }

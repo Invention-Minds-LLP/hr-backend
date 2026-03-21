@@ -1433,7 +1433,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
 
         // ledger balance check
         const ledgerBalance = await getLastLedgerBalanceTx(tx, updatedLeave.employeeId, updatedLeave.leaveTypeId, year);
-        if (requestedUnits > ledgerBalance) {
+        if (requestedUnits >= ledgerBalance) {
           return { kind: "ERR" as const, status: 400, body: { error: "Insufficient balance (ledger)" } };
         }
 

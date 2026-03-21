@@ -50,17 +50,17 @@ const createPermissionRequest = (req, res) => __awaiter(void 0, void 0, void 0, 
                 year
             }
         });
-        if (!balance) {
-            return res.status(400).json({ error: "Permission balance not configured." });
-        }
-        if (!balance.isUnlimited) {
-            const remaining = balance.totalAllowed - balance.used;
-            if (remaining < unitsRequested) {
-                return res.status(400).json({
-                    error: `You have only ${remaining} permission(s) remaining for ${permissionType}`
-                });
-            }
-        }
+        // if (!balance) {
+        //   return res.status(400).json({ error: "Permission balance not configured." });
+        // }
+        // if (!balance.isUnlimited) {
+        //   const remaining = balance.totalAllowed - balance.used;
+        //   if (remaining < unitsRequested) {
+        //     return res.status(400).json({
+        //       error: `You have only ${remaining} permission(s) remaining for ${permissionType}`
+        //     });
+        //   }
+        // }
         const request = yield prisma_1.prisma.permissionRequest.create({
             data: {
                 employeeId,

@@ -42,7 +42,7 @@ const sendOtpSms = (_a) => __awaiter(void 0, [_a], void 0, function* ({ patientN
         const message = `Dear ${patientName}, ${otp} is your One Time Password from Rashtrotthana Hospital for ${service} service. Expires in 2 mins. Please do not share this OTP with anyone.`;
         const url = `${apiUrl}/${sender}/${phoneNumber}/${encodeURIComponent(message)}/TXT?apikey=${apiKey}&dltentityid=${dltEntityId}&dlttempid=${dltTemplateId}`;
         const response = yield axios_1.default.get(url);
-        console.log("✅ OTP SMS sent successfully", {
+        console.log("OTP SMS sent successfully", {
             phoneNumber,
             service,
             responseData: response.data,
@@ -50,14 +50,14 @@ const sendOtpSms = (_a) => __awaiter(void 0, [_a], void 0, function* ({ patientN
         return response;
     }
     catch (error) {
-        console.error("❌ OTP SMS sending failed", {
+        console.error("OTP SMS sending failed", {
             phoneNumber,
             service,
             message: error === null || error === void 0 ? void 0 : error.message,
             status: (_b = error === null || error === void 0 ? void 0 : error.response) === null || _b === void 0 ? void 0 : _b.status,
             data: (_c = error === null || error === void 0 ? void 0 : error.response) === null || _c === void 0 ? void 0 : _c.data,
         });
-        throw error; // rethrow so caller can handle it
+        throw error;
     }
 });
 exports.sendOtpSms = sendOtpSms;
