@@ -23,6 +23,8 @@ router.get('', authenticateToken,ctrl.getDashboard);
 router.get('/list', authenticateToken,ctrl.getList);
 router.get('/recruiting', authenticateToken,ctrl.getRecruiting);
 router.post('/ot/approve-reject', authenticateToken,ctrl.approveOrRejectOT);
+router.get('/ot/manager-pending', authenticateToken, ctrl.getManagerOtPending);
+router.post('/ot/manager-approve-reject', authenticateToken,ctrl.approveOrRejectOTManager);
 // 1. Unmarked attendance
 router.post("/unmarked/message", authenticateToken,messageUnmarked);
 router.post("/unmarked/exception", authenticateToken,markUnmarkedException);

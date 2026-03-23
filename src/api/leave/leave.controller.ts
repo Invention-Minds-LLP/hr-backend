@@ -5,7 +5,6 @@ import axios from "axios";
 import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
 import cron from "node-cron";
-import { da } from "date-fns/locale";
 import { Prisma } from "@prisma/client";
 import formidable from "formidable";
 import { File } from "formidable";
@@ -17,11 +16,11 @@ import { Client } from "basic-ftp";
 import path from "path";
 
 const FTP_CONFIG = {
-  host: "srv680.main-hosting.eu",  // Your FTP hostname
-  user: "u948610439.hrproindia.in",       // Your FTP username
-  password: "Bsrenuk@1993",   // Your FTP password
-  secure: false                    // Set to true if using FTPS
-}
+  host: process.env.FTP_HOST ?? "",
+  user: process.env.FTP_USER ?? "",
+  password: process.env.FTP_PASSWORD ?? "",
+  secure: false,
+};
 
 type Tx = Prisma.TransactionClient;
 
@@ -78,6 +77,12 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     }
     if (isHalfDay && !halfDaySession) {
       return res.status(400).json({ error: "halfDaySession is required for half-day" });
+    }
+
+    if (lt.name === "CL" && requestedUnits > 2) {
+      return res.status(400).json({
+        error: "Casual Leave (CL) can be applied for a maximum of 2 days at a time",
+      });
     }
 
     if (lt.name !== "CO") {
@@ -1433,7 +1438,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
 
         // ledger balance check
         const ledgerBalance = await getLastLedgerBalanceTx(tx, updatedLeave.employeeId, updatedLeave.leaveTypeId, year);
-        if (requestedUnits >= ledgerBalance) {
+        if (requestedUnits > ledgerBalance) {
           return { kind: "ERR" as const, status: 400, body: { error: "Insufficient balance (ledger)" } };
         }
 
@@ -1793,14 +1798,14 @@ export async function getLeaveDashboard(req: Request, res: Response) {
   try {
     const employeeId = Number(req.params.id);
     const today = req.query.date ? new Date(String(req.query.date)) : new Date();
-    const y = today.getFullYear();
-    const yearStart = new Date(y, 0, 1);
-    const yearEnd = new Date(y, 11, 31, 23, 59, 59);
-    const monthStart = new Date(y, today.getMonth(), 1);
-    const monthEnd = new Date(y, today.getMonth() + 1, 0, 23, 59, 59);
+    const fyYear = getFinancialYear(today);
+    const yearStart = new Date(fyYear, 3, 1);                    // April 1 of FY
+    const yearEnd   = new Date(fyYear + 1, 2, 31, 23, 59, 59);  // March 31 end of FY
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    const monthEnd   = new Date(today.getFullYear(), today.getMonth() + 1, 0, 23, 59, 59);
 
-    // Entitlement for this year
-    const policy = await prisma.entitlementPolicy.findFirst({ where: { year: y } });
+    // Entitlement for this financial year
+    const policy = await prisma.entitlementPolicy.findFirst({ where: { year: fyYear } });
     const entitlement = policy?.leaveEntitlement ?? 0;
 
     // Approved leave requests (clamped to year)
@@ -2125,16 +2130,17 @@ export const getLeaveBalance = async (req: Request, res: Response) => {
   }
 };
 
-export const initLeaveEndSchedular = () => {
+export const initLeaveEndScheduler = () => {
   cron.schedule("0 9 * * *", async () => {
     console.log("Running leave reminder cron...");
 
-    const today = new Date();
+    const today = atStartOfDay(new Date());
+    const todayEnd = atEndOfDay(new Date());
 
     const leaves = await prisma.leaveRequest.findMany({
       where: {
         status: "APPROVED",
-        endDate: today
+        endDate: { gte: today, lte: todayEnd },
       },
       include: {
         employee: true,
@@ -2513,14 +2519,22 @@ async function rebuildYearlySummaryTx(
   const credited = months.reduce((s, m) => s + Number(m.credited ?? 0), 0);
   const used = months.reduce((s, m) => s + Number(m.used ?? 0), 0);
   const lapsed = months.reduce((s, m) => s + Number(m.lapsed ?? 0), 0);
-  const closing = opening + credited - used - lapsed; // (lapsed already part of used)
+
+  // Sum encashment debits from the ledger for this year
+  const encashmentEntries = await tx.leaveLedger.findMany({
+    where: { employeeId, leaveTypeId, year, action: "ENCASHMENT" },
+    select: { debit: true },
+  });
+  const encashed = encashmentEntries.reduce((s, e) => s + Number(e.debit ?? 0), 0);
+
+  const closing = opening + credited - used - lapsed - encashed;
 
   await tx.leaveYearlySummary.upsert({
     where: {
       employeeId_leaveTypeId_year: { employeeId, leaveTypeId, year },
     },
-    update: { opening, credited, used, lapsed, closing },
-    create: { employeeId, leaveTypeId, year, opening, credited, used, lapsed, closing },
+    update: { opening, credited, used, lapsed, encashed, closing },
+    create: { employeeId, leaveTypeId, year, opening, credited, used, lapsed, encashed, closing },
   });
 
   return { opening, credited, used, lapsed, closing };
@@ -2608,11 +2622,10 @@ async function insertLedgerTx(
   });
 }
 export const initELAccrualCron = () => {
-  cron.schedule("10 2 * * *", async () => {
+  cron.schedule("10 2 1 * *", async () => {
     const today = atStartOfDay(new Date());
     const year = getFinancialYear(today);
     const month = today.getMonth() + 1;
-    if (today.getDate() !== 1) return;
 
     try {
       // 1️⃣ EL Leave Type
@@ -2635,10 +2648,16 @@ export const initELAccrualCron = () => {
       const workingDaysRequired = policy.workingDaysRequired ?? 0;
       const maxBalance = policy.maxBalance ?? null;
 
-      // 3️⃣ Employees
+      // 3️⃣ Employees — only those who have completed 1 year of service
+      const oneYearAgo = new Date(today);
+      oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
       const employees = await prisma.employee.findMany({
-        where: { employmentStatus: "ACTIVE" },
-        select: { id: true }
+        where: {
+          employmentStatus: "ACTIVE",
+          dateOfJoining: { lte: oneYearAgo },  // joined at least 1 year ago
+        },
+        select: { id: true },
       });
 
       // 4️⃣ Loop employees
@@ -3262,217 +3281,220 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
   }
 };
 
+// ── Core rollover logic — called by cron AND manual trigger ──────────────────
+export async function runFYRollover(
+  overrideYear?: number
+): Promise<{ processed: number; skipped: number; errors: string[] }> {
+  const today = new Date();
+  const newYear = overrideYear ?? getFinancialYear(today);
+  const prevYear = newYear - 1;
+  const month = 4; // April — first month of Indian FY
+
+  let processed = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+
+  const [employees, leaveTypes] = await Promise.all([
+    prisma.employee.findMany({
+      where: { employmentStatus: "ACTIVE" },
+      select: { id: true },
+    }),
+    prisma.leaveType.findMany(),
+  ]);
+
+  console.log('hi')
+
+  const leaveTypeMap: Record<string, number> = {};
+  leaveTypes.forEach(lt => { leaveTypeMap[lt.name.toUpperCase()] = lt.id; });
+
+  for (const emp of employees) {
+    try {
+      // ── Idempotency: read-only check outside any transaction ──────────────
+      const alreadyProcessed = await prisma.leaveLedger.findFirst({
+        where: { employeeId: emp.id, year: newYear, action: "OPENING_BALANCE", source: "SYSTEM" },
+        select: { id: true },
+      });
+      if (alreadyProcessed) { skipped++; continue; }
+
+      // =====================================================
+      // 🔹 CL — NO CARRY FORWARD (policy: lapses at year-end)
+      // ── Small tx: writes only. Rebuilds happen outside. ──
+      // =====================================================
+      const clId = leaveTypeMap["CL"];
+      let clLapsedPrev = false;
+      if (clId) {
+        await prisma.$transaction(async (tx) => {
+          // Use ledger balance as source of truth — balance table may be out of sync
+          const prevCLLedger = await getLastLedgerBalanceTx(tx, emp.id, clId, prevYear);
+          const prevCLRemaining = Math.max(0, prevCLLedger);
+          if (prevCLRemaining > 0) {
+            await insertLedgerTx(tx, {
+              employeeId: emp.id, leaveTypeId: clId, year: prevYear, month: 3,
+              credit: 0, debit: prevCLRemaining, balanceAfter: 0,
+              action: "LAPSE", referenceType: "LAPSE", source: "SYSTEM", remarks: "CL year-end lapse",
+            });
+            clLapsedPrev = true;
+          }
+          const totalCL = 12;
+          await tx.employeeLeaveBalance.upsert({
+            where: { employeeId_leaveTypeId_year: { employeeId: emp.id, leaveTypeId: clId, year: newYear } },
+            update: { totalAllowed: totalCL, used: 0, halfDayUsed: 0 },
+            create: { employeeId: emp.id, leaveTypeId: clId, category: "LEAVE", year: newYear, totalAllowed: totalCL, used: 0, halfDayUsed: 0 },
+          });
+          const clPrevBal = await getLastLedgerBalanceTx(tx, emp.id, clId, newYear);
+          await insertLedgerTx(tx, {
+            employeeId: emp.id, leaveTypeId: clId, year: newYear, month,
+            credit: totalCL, debit: 0, balanceAfter: clPrevBal + totalCL,
+            action: "OPENING_BALANCE", referenceType: "MANUAL", source: "SYSTEM", remarks: "CL yearly allocation",
+          });
+        }, { timeout: 8000 });
+
+        // Rebuild OUTSIDE transaction (avoids P2028 / P1017 timeout)
+        if (clLapsedPrev) {
+          await rebuildMonthlySummaryTx(prisma, emp.id, clId, prevYear, 3);
+          await rebuildYearlySummaryTx(prisma, emp.id, clId, prevYear);
+        }
+        await rebuildMonthlySummaryTx(prisma, emp.id, clId, newYear, month);
+        await rebuildYearlySummaryTx(prisma, emp.id, clId, newYear);
+      }
+
+      // =====================================================
+      // 🔹 SL — CARRY FORWARD MAX 60 DAYS
+      // =====================================================
+      const slId = leaveTypeMap["SL"];
+      let slLapsedPrev = false;
+      if (slId) {
+        await prisma.$transaction(async (tx) => {
+          // Use ledger balance as source of truth — balance table may be out of sync
+          const prevSLLedger = await getLastLedgerBalanceTx(tx, emp.id, slId, prevYear);
+          const slPrevRemaining = Math.max(0, prevSLLedger);
+          const slCarry  = Math.min(slPrevRemaining, 60);
+          const slLapsed = slPrevRemaining - slCarry;
+
+          if (slLapsed > 0) {
+            await insertLedgerTx(tx, {
+              employeeId: emp.id, leaveTypeId: slId, year: prevYear, month: 3,
+              credit: 0, debit: slLapsed, balanceAfter: prevSLLedger - slLapsed,
+              action: "LAPSE", referenceType: "LAPSE", source: "SYSTEM",
+              remarks: "SL year-end lapse (excess over 60-day carry limit)",
+            });
+            slLapsedPrev = true;
+          }
+          const totalSL = 12 + slCarry;
+          await tx.employeeLeaveBalance.upsert({
+            where: { employeeId_leaveTypeId_year: { employeeId: emp.id, leaveTypeId: slId, year: newYear } },
+            update: { totalAllowed: totalSL, used: 0, halfDayUsed: 0 },
+            create: { employeeId: emp.id, leaveTypeId: slId, category: "LEAVE", year: newYear, totalAllowed: totalSL, used: 0, halfDayUsed: 0 },
+          });
+          const slPrevBal = await getLastLedgerBalanceTx(tx, emp.id, slId, newYear);
+          await insertLedgerTx(tx, {
+            employeeId: emp.id, leaveTypeId: slId, year: newYear, month,
+            credit: totalSL, debit: 0, balanceAfter: slPrevBal + totalSL,
+            action: "OPENING_BALANCE", referenceType: "MANUAL", source: "SYSTEM",
+            remarks: `SL yearly allocation (12 fresh + ${slCarry} carried)`,
+          });
+        }, { timeout: 8000 });
+
+        if (slLapsedPrev) {
+          await rebuildMonthlySummaryTx(prisma, emp.id, slId, prevYear, 3);
+          await rebuildYearlySummaryTx(prisma, emp.id, slId, prevYear);
+        }
+        await rebuildMonthlySummaryTx(prisma, emp.id, slId, newYear, month);
+        await rebuildYearlySummaryTx(prisma, emp.id, slId, newYear);
+      }
+
+      // =====================================================
+      // 🔹 EL — POLICY-BASED CARRY FORWARD
+      // =====================================================
+      const elId = leaveTypeMap["EL"];
+      let elLapsedPrev = false;
+      if (elId) {
+        // Fetch policy OUTSIDE tx (read-only, no need to hold a connection)
+        const elPolicy = await getActivePolicy(elId, today);
+
+        await prisma.$transaction(async (tx) => {
+          // Use ledger balance as source of truth — balance table may be out of sync
+          const prevELLedger = await getLastLedgerBalanceTx(tx, emp.id, elId, prevYear);
+          const elPrevRemaining = Math.max(0, prevELLedger);
+
+          let elCarry = 0;
+          if (elPolicy?.carryForward) {
+            elCarry = elPolicy.maxCarryForward
+              ? Math.min(elPrevRemaining, elPolicy.maxCarryForward)
+              : elPrevRemaining;
+          }
+
+          const elLapsed = elPrevRemaining - elCarry;
+          if (elLapsed > 0) {
+            await insertLedgerTx(tx, {
+              employeeId: emp.id, leaveTypeId: elId, year: prevYear, month: 3,
+              credit: 0, debit: elLapsed, balanceAfter: prevELLedger - elLapsed,
+              action: "LAPSE", referenceType: "LAPSE", source: "SYSTEM",
+              remarks: "EL year-end lapse (excess over carry limit)",
+            });
+            elLapsedPrev = true;
+          }
+
+          await tx.employeeLeaveBalance.upsert({
+            where: { employeeId_leaveTypeId_year: { employeeId: emp.id, leaveTypeId: elId, year: newYear } },
+            update: { totalAllowed: elCarry, used: 0, halfDayUsed: 0 },
+            create: { employeeId: emp.id, leaveTypeId: elId, category: "LEAVE", year: newYear, totalAllowed: elCarry, used: 0, halfDayUsed: 0 },
+          });
+
+          if (elCarry > 0) {
+            const elPrevBal = await getLastLedgerBalanceTx(tx, emp.id, elId, newYear);
+            await insertLedgerTx(tx, {
+              employeeId: emp.id, leaveTypeId: elId, year: newYear, month,
+              credit: elCarry, debit: 0, balanceAfter: elPrevBal + elCarry,
+              action: "OPENING_BALANCE", referenceType: "MANUAL", source: "SYSTEM",
+              remarks: "EL carry forward",
+            });
+          }
+        }, { timeout: 8000 });
+
+        if (elLapsedPrev) {
+          await rebuildMonthlySummaryTx(prisma, emp.id, elId, prevYear, 3);
+          await rebuildYearlySummaryTx(prisma, emp.id, elId, prevYear);
+        }
+        await rebuildMonthlySummaryTx(prisma, emp.id, elId, newYear, month);
+        await rebuildYearlySummaryTx(prisma, emp.id, elId, newYear);
+      }
+
+      processed++;
+    } catch (err: any) {
+      errors.push(`emp ${emp.id}: ${err?.message ?? "unknown error"}`);
+      console.error(`❌ FY rollover failed for emp ${emp.id}:`, err);
+    }
+  }
+
+  return { processed, skipped, errors };
+}
+
+// ── Cron wrapper ─────────────────────────────────────────────────────────────
 export const initFinancialYearRolloverCron = () => {
   cron.schedule("0 2 1 4 *", async () => {
     console.log("🚀 Running FY Rollover Cron...");
-
-    const today = new Date();
-    const newYear = getFinancialYear(today);
-    const prevYear = newYear - 1;
-    const month = 4; // April
-
-    try {
-      const [employees, leaveTypes] = await Promise.all([
-        prisma.employee.findMany({
-          where: { employmentStatus: "ACTIVE" },
-          select: { id: true }
-        }),
-        prisma.leaveType.findMany()
-      ]);
-
-      const leaveTypeMap: Record<string, number> = {};
-      leaveTypes.forEach(lt => {
-        leaveTypeMap[lt.name.toUpperCase()] = lt.id;
-      });
-
-      for (const emp of employees) {
-
-        await prisma.$transaction(async (tx) => {
-
-          // =====================================================
-          // 🔹 CL (NO CARRY FORWARD)
-          // =====================================================
-          const clId = leaveTypeMap["CL"];
-
-          if (clId) {
-            const totalCL = 12;
-
-            await tx.employeeLeaveBalance.upsert({
-              where: {
-                employeeId_leaveTypeId_year: {
-                  employeeId: emp.id,
-                  leaveTypeId: clId,
-                  year: newYear
-                }
-              },
-              update: { totalAllowed: totalCL, used: 0, halfDayUsed: 0 },
-              create: {
-                employeeId: emp.id,
-                leaveTypeId: clId,
-                category: "LEAVE",
-                year: newYear,
-                totalAllowed: totalCL,
-                used: 0,
-                halfDayUsed: 0
-              }
-            });
-
-            const prevBalance = await getLastLedgerBalanceTx(tx, emp.id, clId, newYear);
-            const newBalance = prevBalance + totalCL;
-
-            await insertLedgerTx(tx, {
-              employeeId: emp.id,
-              leaveTypeId: clId,
-              year: newYear,
-              month,
-              credit: totalCL,
-              debit: 0,
-              balanceAfter: newBalance,
-              action: "OPENING_BALANCE",
-              referenceType: "MANUAL",
-              source: "SYSTEM",
-              remarks: "CL yearly allocation"
-            });
-
-            await rebuildMonthlySummaryTx(tx, emp.id, clId, newYear, month);
-            await rebuildYearlySummaryTx(tx, emp.id, clId, newYear);
-          }
-
-          // =====================================================
-          // 🔹 SL (CARRY FORWARD MAX 60)
-          // =====================================================
-          const slId = leaveTypeMap["SL"];
-
-          if (slId) {
-            const prev = await tx.employeeLeaveBalance.findFirst({
-              where: { employeeId: emp.id, leaveTypeId: slId, year: prevYear }
-            });
-
-            const prevRemaining = Math.max(
-              0,
-              (prev?.totalAllowed ?? 0) - computeTotalUsed(prev || { used: 0, halfDayUsed: 0 })
-            );
-
-            const carry = Math.min(prevRemaining, 60);
-            const totalSL = 12 + carry;
-
-            await tx.employeeLeaveBalance.upsert({
-              where: {
-                employeeId_leaveTypeId_year: {
-                  employeeId: emp.id,
-                  leaveTypeId: slId,
-                  year: newYear
-                }
-              },
-              update: { totalAllowed: totalSL, used: 0, halfDayUsed: 0 },
-              create: {
-                employeeId: emp.id,
-                leaveTypeId: slId,
-                category: "LEAVE",
-                year: newYear,
-                totalAllowed: totalSL,
-                used: 0,
-                halfDayUsed: 0
-              }
-            });
-
-            const prevBalance = await getLastLedgerBalanceTx(tx, emp.id, slId, newYear);
-            const newBalance = prevBalance + totalSL;
-
-            await insertLedgerTx(tx, {
-              employeeId: emp.id,
-              leaveTypeId: slId,
-              year: newYear,
-              month,
-              credit: totalSL,
-              debit: 0,
-              balanceAfter: newBalance,
-              action: "OPENING_BALANCE",
-              referenceType: "MANUAL",
-              source: "SYSTEM",
-              remarks: "SL yearly allocation with carry"
-            });
-
-            await rebuildMonthlySummaryTx(tx, emp.id, slId, newYear, month);
-            await rebuildYearlySummaryTx(tx, emp.id, slId, newYear);
-          }
-
-          // =====================================================
-          // 🔹 EL (POLICY BASED CARRY)
-          // =====================================================
-          const elId = leaveTypeMap["EL"];
-
-          if (elId) {
-            const policy = await getActivePolicy(elId, today);
-
-            const prev = await tx.employeeLeaveBalance.findFirst({
-              where: { employeeId: emp.id, leaveTypeId: elId, year: prevYear }
-            });
-
-            const prevRemaining = Math.max(
-              0,
-              (prev?.totalAllowed ?? 0) - computeTotalUsed(prev || { used: 0, halfDayUsed: 0 })
-            );
-
-            let carry = 0;
-
-            if (policy?.carryForward) {
-              carry = policy.maxCarryForward
-                ? Math.min(prevRemaining, policy.maxCarryForward)
-                : prevRemaining;
-            }
-
-            await tx.employeeLeaveBalance.upsert({
-              where: {
-                employeeId_leaveTypeId_year: {
-                  employeeId: emp.id,
-                  leaveTypeId: elId,
-                  year: newYear
-                }
-              },
-              update: { totalAllowed: carry, used: 0, halfDayUsed: 0 },
-              create: {
-                employeeId: emp.id,
-                leaveTypeId: elId,
-                category: "LEAVE",
-                year: newYear,
-                totalAllowed: carry,
-                used: 0,
-                halfDayUsed: 0
-              }
-            });
-
-            const prevBalance = await getLastLedgerBalanceTx(tx, emp.id, elId, newYear);
-            const newBalance = prevBalance + carry;
-
-            await insertLedgerTx(tx, {
-              employeeId: emp.id,
-              leaveTypeId: elId,
-              year: newYear,
-              month,
-              credit: carry,
-              debit: 0,
-              balanceAfter: newBalance,
-              action: "OPENING_BALANCE",
-              referenceType: "MANUAL",
-              source: "SYSTEM",
-              remarks: "EL carry forward"
-            });
-
-            await rebuildMonthlySummaryTx(tx, emp.id, elId, newYear, month);
-            await rebuildYearlySummaryTx(tx, emp.id, elId, newYear);
-          }
-
-        }, { timeout: 15000 });
-
-      }
-
-      console.log("✅ FY rollover completed successfully");
-
-    } catch (err) {
-      console.error("❌ FY rollover failed:", err);
-    }
+    const result = await runFYRollover();
+    console.log(`✅ FY rollover done — processed: ${result.processed}, skipped: ${result.skipped}, errors: ${result.errors.length}`);
+    if (result.errors.length) console.error("FY rollover errors:", result.errors);
   });
+};
+
+// ── Manual trigger (admin endpoint handler) ───────────────────────────────────
+export const triggerFYRollover = async (req: Request, res: Response) => {
+  try {
+    const overrideYear = req.body?.year ? Number(req.body.year) : undefined;
+    console.log(`🔧 Manual FY rollover triggered${overrideYear ? ` for year ${overrideYear}` : ""}`);
+    const result = await runFYRollover(overrideYear);
+    return res.json({
+      message: "FY rollover completed",
+      year: overrideYear ?? getFinancialYear(new Date()),
+      ...result,
+    });
+  } catch (err: any) {
+    console.error("Manual FY rollover failed:", err);
+    return res.status(500).json({ error: "FY rollover failed", message: err?.message });
+  }
 };
 
 

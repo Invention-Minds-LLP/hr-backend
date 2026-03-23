@@ -1,6 +1,6 @@
 import { initSurveyScheduler } from "../api/survey/survery.controller";
 import { initNoticePeriodSchedular } from "../api/resignation/resignation.controller";
-import { initLeaveEndSchedular } from "../api/leave/leave.controller";
+import { initLeaveEndScheduler } from "../api/leave/leave.controller";
 import { initQuarterlyAppraisalScheduler, sendAppraisalCountReminders } from "../api/appraisal/appraisal.controller";
 import { startShiftCron } from "../api/shift/shift.controller";
 import cron from 'node-cron';
@@ -10,7 +10,7 @@ import { initFinancialYearRolloverCron, initELAccrualCron, initNewJoineeLeaveAll
 export async function startSchedulers() {
   initSurveyScheduler();
   initNoticePeriodSchedular();
-  initLeaveEndSchedular();
+  initLeaveEndScheduler();
   initQuarterlyAppraisalScheduler();
   startShiftCron();
   // sendAppraisalCountReminders();

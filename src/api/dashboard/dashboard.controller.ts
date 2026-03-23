@@ -78,7 +78,8 @@ function combineDateAndTime(baseDate: Date, timeTemplate: Date) {
     return dt;
 }
 function fmtDate(d?: Date | null) {
-    return d ? d.toLocaleDateString('en-IN', { timeZone: IST, day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+    if (!d) return '—';
+    return d.toLocaleDateString('en-IN', { timeZone: IST, day: '2-digit', month: '2-digit', year: 'numeric' }).replace(/\//g, '-');
 }
 function fmtTime(d?: Date | null) {
     return d ? d.toLocaleTimeString('en-IN', { timeZone: IST, hour: '2-digit', minute: '2-digit' }) : '—';
@@ -933,9 +934,9 @@ export class DashboardController {
 
         ];
 
-        // now add OT pending
+        // now add OT pending (HR sees only manager-approved records)
         const otPending = await prisma.overtimeApproval.count({
-            where: { status: 'PENDING', date: yesterdayStart }
+            where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart } as any
         });
 
         attention.push({
@@ -944,6 +945,25 @@ export class DashboardController {
             severity: otPending ? 'warn' : 'good',
             modal: 'otPending',
         });
+
+        // Manager sees OT pending their own approval
+        const userRoleId = (req as any).user?.roleId;
+        const userEmpId = (req as any).user?.empId;
+        if (userRoleId === 3 && userEmpId) {
+            const managerOtPending = await prisma.overtimeApproval.count({
+                where: {
+                    managerStatus: 'PENDING',
+                    date: yesterdayStart,
+                    employee: { reportingManager: userEmpId },
+                } as any,
+            });
+            attention.push({
+                label: 'OT pending your approval (yesterday)',
+                count: managerOtPending,
+                severity: managerOtPending ? 'warn' : 'good',
+                modal: 'managerOtPending',
+            });
+        }
 
 
         res.json({
@@ -1852,7 +1872,7 @@ export class DashboardController {
         }
         if (key === 'otPending') {
             const items = await prisma.overtimeApproval.findMany({
-                where: { status: 'PENDING', date: yesterdayStart },
+                where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart } as any,
                 include: {
                     employee: { select: { firstName: true, lastName: true, employeeCode: true, Department: { select: { name: true } } } }
                 }
@@ -1880,6 +1900,41 @@ export class DashboardController {
             });
         }
 
+
+        if (key === 'managerOtPending') {
+            const userEmpId = (req as any).user?.empId;
+            const items = await prisma.overtimeApproval.findMany({
+                where: {
+                    managerStatus: 'PENDING',
+                    date: yesterdayStart,
+                    ...(userEmpId ? { employee: { reportingManager: userEmpId } } : {}),
+                } as any,
+                include: {
+                    employee: { select: { firstName: true, lastName: true, employeeCode: true, Department: { select: { name: true } } } }
+                }
+            });
+
+            const rows = items.map(o => ({
+                id: o.id,
+                data: [
+                    `${o.employee.firstName} ${o.employee.lastName}`,
+                    o.employee.employeeCode || '—',
+                    o.employee.Department?.name || '—',
+                    fmtTime(o.scheduledEnd),
+                    fmtTime(o.checkOut),
+                    `${Math.floor(o.minutes / 60)}h ${o.minutes % 60}m`,
+                    'PENDING',
+                ]
+            }));
+
+            return res.json({
+                title: 'OT Pending Your Approval (Yesterday)',
+                cols: ['Employee', 'EMP ID', 'Dept', 'Sched End', 'Checked Out', 'OT Duration', 'Status'],
+                rows,
+                actions: ['Approve selected', 'Reject selected'],
+                selectable: true
+            });
+        }
 
         // fallback to your existing attention lists
         return res.json(base[key] ?? { title: 'Not found', cols: [], rows: [] });
@@ -1917,7 +1972,7 @@ export class DashboardController {
         }
 
         const updated = await prisma.overtimeApproval.updateMany({
-            where: { id: { in: ids }, status: 'PENDING' },
+            where: { id: { in: ids }, status: 'PENDING', managerStatus: 'APPROVED' } as any,
             data: {
                 status: action,
                 approvedAt: new Date(),
@@ -1925,6 +1980,76 @@ export class DashboardController {
         });
 
         res.json({ ok: true, updated: updated.count });
+    });
+
+    getManagerOtPending = asyncHandler(async (req, res) => {
+        const userEmpId = (req as any).user?.empId;
+
+        const items = await prisma.overtimeApproval.findMany({
+            where: {
+                managerStatus: 'PENDING',
+                ...(userEmpId ? { employee: { reportingManager: userEmpId } } : {}),
+            } as any,
+            include: {
+                employee: {
+                    select: {
+                        firstName: true,
+                        lastName: true,
+                        employeeCode: true,
+                        Department: { select: { name: true } },
+                    }
+                }
+            },
+            orderBy: { date: 'desc' },
+        });
+
+        const rows = items.map(o => ({
+            id: o.id,
+            employeeName: `${o.employee.firstName} ${o.employee.lastName}`,
+            employeeCode: o.employee.employeeCode || '—',
+            department: o.employee.Department?.name || '—',
+            date: o.date,
+            scheduledEnd: o.scheduledEnd,
+            checkOut: o.checkOut,
+            minutes: o.minutes,
+            managerStatus: (o as any).managerStatus,
+        }));
+
+        res.json(rows);
+    });
+
+    approveOrRejectOTManager = asyncHandler(async (req, res) => {
+        const { ids, action } = req.body as { ids: number[]; action: 'APPROVE' | 'REJECT' };
+        const userEmpId = (req as any).user?.empId;
+
+        if (!ids?.length) {
+            return res.status(400).json({ error: 'No OT IDs provided' });
+        }
+
+        if (action === 'APPROVE') {
+            // Manager approves → move to HR queue (status stays PENDING, managerStatus = APPROVED)
+            const updated = await prisma.overtimeApproval.updateMany({
+                where: { id: { in: ids }, managerStatus: 'PENDING' } as any,
+                data: {
+                    managerStatus: 'APPROVED',
+                    managerApprovedAt: new Date(),
+                    managerId: userEmpId ?? null,
+                } as any,
+            });
+            return res.json({ ok: true, updated: updated.count });
+        } else {
+            // Manager rejects → both statuses set to REJECTED
+            const updated = await prisma.overtimeApproval.updateMany({
+                where: { id: { in: ids }, managerStatus: 'PENDING' } as any,
+                data: {
+                    managerStatus: 'REJECTED',
+                    managerApprovedAt: new Date(),
+                    managerId: userEmpId ?? null,
+                    status: 'REJECTED',
+                } as any,
+            });
+            return res.json({ ok: true, updated: updated.count });
+        }
     });
 
 
@@ -2671,9 +2796,7 @@ export class DashboardController {
                 e.employeeCode || '—',
                 e.Department?.name || '—',
                 e.reportingManager ? `Mgr #${e.reportingManager}` : '—',
-                e.probationEndDate
-                    ? e.probationEndDate.toLocaleDateString('en-IN', { timeZone: IST, month: 'short', day: '2-digit', year: 'numeric' })
-                    : '—',
+                fmtDate(e.probationEndDate),
             ]
         }));
 
@@ -2684,9 +2807,7 @@ export class DashboardController {
                 d.employee.employeeCode || '—',
                 d.employee.Department?.name || '—',
                 d.type || d.category,
-                d.expiryDate
-                    ? d.expiryDate.toLocaleDateString('en-IN', { timeZone: IST, month: 'short', day: '2-digit', year: 'numeric' })
-                    : '—',
+                fmtDate(d.expiryDate),
                 'Expiring',
             ]
         }));
@@ -3181,7 +3302,7 @@ export const notifyExpiringDocs = async (req: Request, res: Response) => {
         await prisma.notification.createMany({
             data: docs.map((doc) => ({
                 employeeId: doc.employeeId,
-                message: `Your document "${doc.title}" is expiring on ${doc.expiryDate?.toLocaleDateString()}.`,
+                message: `Your document "${doc.title}" is expiring on ${fmtDate(doc.expiryDate)}.`,
                 channel: "EMAIL",
             })),
         });

@@ -1115,16 +1115,19 @@ model InterviewHRReview {
 }
 
 model OvertimeApproval {
-  id           Int       @id @default(autoincrement())
-  employeeId   Int
-  date         DateTime
-  minutes      Int
-  status       String
-  createdAt    DateTime  @default(now())
-  approvedAt   DateTime?
-  scheduledEnd DateTime?
-  checkOut     DateTime?
-  employee     Employee  @relation(fields: [employeeId], references: [id])
+  id                Int       @id @default(autoincrement())
+  employeeId        Int
+  date              DateTime
+  minutes           Int
+  status            String
+  createdAt         DateTime  @default(now())
+  approvedAt        DateTime?
+  scheduledEnd      DateTime?
+  checkOut          DateTime?
+  managerStatus     String    @default("PENDING")
+  managerApprovedAt DateTime?
+  managerId         Int?
+  employee          Employee  @relation(fields: [employeeId], references: [id])
 
   @@unique([employeeId, date], name: "employeeId_date")
 }

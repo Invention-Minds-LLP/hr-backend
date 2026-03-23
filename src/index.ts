@@ -35,7 +35,6 @@ import attendanceCalendarRoutes from "./api/attendance/attendance.routes";
 import { initSurveyScheduler } from "./api/survey/survery.controller";
 import { initNoticePeriodSchedular } from "./api/resignation/resignation.controller";
 import incidentRouter from "./api/incident/incident.routes";
-import { initLeaveEndSchedular } from "./api/leave/leave.controller";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { startSchedulers } from "./schedulers/scheduler";
@@ -44,6 +43,7 @@ import smsRoutes from "./api/sms/sms.routes";
 import mobileAuthRoutes from "./api/mobile-auth/mobile-auth.routes";
 import holidayRoutes from "./api/holidays/holidays.routes";
 import geoTrackingRoutes from "./api/geo-tracking/geo-tracking.routes";
+import exportRoutes from "./api/export/export.routes";
 
 
 
@@ -150,6 +150,7 @@ app.use("/api/sms", smsRoutes);
 app.use("/api/auth", mobileAuthRoutes);
 app.use("/api/holidays", holidayRoutes);
 app.use("/api/geo-tracking", geoTrackingRoutes)
+app.use("/api/export", exportRoutes)
 
 
 // Default route
