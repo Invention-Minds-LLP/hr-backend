@@ -301,7 +301,8 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
         deptId: employee.departmentId,
         designation: employee.designation?.name || '',
         photoUrl: employee.photoUrl || null,
-        roleId: employee.roleId
+        roleId: employee.roleId,
+        gender: employee.gender || ''
     });
 
 };

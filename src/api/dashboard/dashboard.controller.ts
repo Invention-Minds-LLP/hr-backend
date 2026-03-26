@@ -3096,10 +3096,10 @@ export const messageUnmarked = async (req: Request, res: Response) => {
     try {
         const { employeeIds, message } = req.body;
         // TODO: integrate with notification/email service
-        // console.log("Message to unmarked employees:", employeeIds, message);
-        // for (const empId of employeeIds) {
-        //     createNotification(empId,message)
-        // }
+        console.log("Message to unmarked employees:", employeeIds, message);
+        for (const empId of employeeIds) {
+            createNotification(empId,message)
+        }
         res.json({ success: true, notified: employeeIds.length });
         return;
     } catch (err) {
@@ -3429,16 +3429,16 @@ export const nudgePanel = async (req: Request, res: Response) => {
         }
 
         // 3️⃣ Send notifications
-        // await prisma.notification.createMany({
-        //   data: ids.map(id => ({
-        //     employeeId: id,
-        //     message: "Please submit interview feedback.",
-        //     channel: "PUSH" // or EMAIL/SMS depending on your system
-        //   }))
-        // });
-        // for (const id of ids) {
-        //     await createNotification(id, "Please submit interview feedback.");
-        // }
+        await prisma.notification.createMany({
+          data: ids.map(id => ({
+            employeeId: id,
+            message: "Please submit interview feedback.",
+            channel: "PUSH" // or EMAIL/SMS depending on your system
+          }))
+        });
+        for (const id of ids) {
+            await createNotification(id, "Please submit interview feedback.");
+        }
 
 
         return res.json({ success: true, nudged: ids.length });

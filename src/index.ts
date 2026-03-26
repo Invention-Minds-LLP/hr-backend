@@ -44,6 +44,9 @@ import mobileAuthRoutes from "./api/mobile-auth/mobile-auth.routes";
 import holidayRoutes from "./api/holidays/holidays.routes";
 import geoTrackingRoutes from "./api/geo-tracking/geo-tracking.routes";
 import exportRoutes from "./api/export/export.routes";
+import forcePresentRoutes from "./api/force-present/force-present.routes";
+import hrCorrectionsRoutes from "./api/hr-corrections/hr-corrections.routes";
+import payrollRoutes from "./api/payroll/payroll.routes";
 
 
 
@@ -151,6 +154,9 @@ app.use("/api/auth", mobileAuthRoutes);
 app.use("/api/holidays", holidayRoutes);
 app.use("/api/geo-tracking", geoTrackingRoutes)
 app.use("/api/export", exportRoutes)
+app.use("/api/force-present", forcePresentRoutes);
+app.use("/api/hr-corrections", hrCorrectionsRoutes);
+app.use("/api/payroll", payrollRoutes);
 
 
 // Default route

@@ -139,7 +139,7 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
       const message = `${employeeName} has requested ${permissionType} permission on ${dayLabel}${timeRange ? ` (${timeRange})` : ""
         }. Kindly review and take appropriate action.`;
 
-      // await createNotification(notifyTo, message);
+      await createNotification(notifyTo, message);
 
       // if (approver?.phone) {
       //   try {
@@ -635,10 +635,10 @@ export const updatePermissionStatus = async (req: Request, res: Response) => {
     const end = updated.endTime ? fmtTime(updated.endTime) : '';
     const type = updated.permissionType ?? '';
 
-    // await createNotification(
-    //   updated.employeeId,
-    //   `Your ${type} permission on ${day} (${start}-${end}) has been ${updated.status}.`
-    // );
+    await createNotification(
+      updated.employeeId,
+      `Your ${type} permission on ${day} (${start}-${end}) has been ${updated.status}.`
+    );
 
     // try {
     //   await sendWhatsAppTemplate({

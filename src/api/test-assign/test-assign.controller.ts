@@ -66,11 +66,11 @@ export const assignTestToEmployees = async (req: Request, res: Response) => {
         const message = `You have been assigned the ${testName} scheduled on ${dateLabel} at ${timeLabel}.\nKindly ensure to complete it as instructed.`;
 
         // --- In-App Notification
-        // try {
-        //   await createNotification(emp.id, message); // creates + broadcasts
-        // } catch (e) {
-        //   console.error("Test assign in-app notification failed:", e);
-        // }
+        try {
+          await createNotification(emp.id, message);
+        } catch (e) {
+          console.error("Test assign in-app notification failed:", e);
+        }
         // try {
         //   await sendWhatsAppTemplate({
         //     to,

@@ -11,7 +11,7 @@ export async function startSchedulers() {
   initSurveyScheduler();
   initNoticePeriodSchedular();
   initLeaveEndScheduler();
-  initQuarterlyAppraisalScheduler();
+  // initQuarterlyAppraisalScheduler();
   startShiftCron();
   // sendAppraisalCountReminders();
   startAttendanceScheduler();

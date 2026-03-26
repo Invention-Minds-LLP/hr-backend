@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 // import { PrismaClient, PermissionStatus } from "@prisma/client";
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
+import { createNotification } from "../notifications/notifications.controller";
 
 
 export const createIncident = async (req: any, res: Response) => {
@@ -23,6 +24,15 @@ export const createIncident = async (req: any, res: Response) => {
         attachment: attachment || null,
       },
     });
+
+    // 🔔 Notify HR department
+    const hrEmployees = await prisma.employee.findMany({
+      where: { departmentId: 1 },
+      select: { id: true }
+    });
+    for (const hr of hrEmployees) {
+      await createNotification(hr.id, `New incident reported: "${title}" — requires review.`);
+    }
 
     res.json({ message: "Incident created successfully", data: incident });
   } catch (err) {

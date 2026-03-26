@@ -102,15 +102,7 @@ export const createRequisition = async (req: Request, res: Response) => {
     });
 
     if (deptManager?.id && deptManager.id !== raisedBy) {
-      // await prisma.notification.create({
-      //   data: {
-      //     employeeId: creator.reportingManager,
-      //     message: `New manpower requisition created for ${title || designation || "a position"}.`,
-      //     channel: "PUSH"
-      //   }
-      // });
-      console.log(`Notification would be sent to manager ID ${deptManager.id} about new requisition.`);
-      // await createNotification(deptManager.id, `New manpower requisition created for ${title || designation || "a position"}. Kindly look into it.`);
+      await createNotification(deptManager.id, `New manpower requisition created for ${title || designation || 'a position'}. Kindly review and take appropriate action.`);
     }
 
 
@@ -342,7 +334,7 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
           select: { id: true }
         });
         if (coo) {
-          // await createNotification(coo.id, "A requisition has been approved by HOD and needs your approval.");
+          await createNotification(coo.id, "A manpower requisition has been approved by HOD and needs your approval.");
         }
       }
 
@@ -352,21 +344,20 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
           where: { role: { id: 1 } },
           select: { id: true }
         });
-
-        // for (const hr of hrs) {
-        //   await createNotification(hr.id, "A requisition has been approved by COO and is ready for HR processing.");
-        // }
+        for (const hr of hrs) {
+          await createNotification(hr.id, "A manpower requisition has been approved by COO and is ready for HR processing.");
+        }
       }
 
       // Rejected at any step → notify creator
-      // if (reject && createdBy) {
-      //   await createNotification(createdBy, "Your manpower requisition has been rejected.");
-      // }
+      if (reject && createdBy) {
+        await createNotification(Number(createdBy), "Your manpower requisition has been rejected.");
+      }
 
       // HR processed → notify creator
-      // if (step === "HR" && !reject && createdBy) {
-      //   await createNotification(createdBy, "Your manpower requisition has been processed by HR.");
-      // }
+      if (step === "HR" && !reject && createdBy) {
+        await createNotification(Number(createdBy), "Your manpower requisition has been processed by HR and a job opening has been created.");
+      }
 
     } catch (notifyErr) {
       console.error("Notification error:", notifyErr);

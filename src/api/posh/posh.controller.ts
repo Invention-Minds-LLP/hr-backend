@@ -21,12 +21,12 @@ export const createPoshCase = asyncHandler(async (req: Request, res: Response) =
   });
   
 
-  // for (const hr of hrEmployees) {
-  //   await createNotification(
-  //     hr.id,
-  //     'New posh submitted — requires acknowledgment.'
-  //   );
-  // }
+  for (const hr of hrEmployees) {
+    await createNotification(
+      hr.id,
+      'New posh submitted — requires acknowledgment.'
+    );
+  }
   res.json(posh);
 });
 
@@ -45,6 +45,15 @@ export const addHearing = asyncHandler(async (req: Request, res: Response) => {
   const hearing = await prisma.poshHearing.create({
     data: { poshId, date, notes, outcome }
   });
+
+  // 🔔 Notify complainant and accused
+  const posh = await prisma.poshCase.findUnique({ where: { id: poshId }, select: { complainantId: true, accusedId: true } });
+  if (posh) {
+    const msg = `A hearing has been scheduled for your POSH case on ${new Date(date).toLocaleDateString('en-IN')}.`;
+    await createNotification(posh.complainantId, msg);
+    if (posh.accusedId) await createNotification(posh.accusedId, msg);
+  }
+
   res.json(hearing);
 });
 
@@ -56,6 +65,12 @@ export const updatePoshStatus = asyncHandler(async (req: Request, res: Response)
     where: { id: poshId },
     data: { status, committeeNote }
   });
+
+  // 🔔 Notify complainant and accused of status update
+  const msg = `Your POSH case status has been updated to: ${status}.`;
+  await createNotification(posh.complainantId, msg);
+  if (posh.accusedId) await createNotification(posh.accusedId, msg);
+
   res.json(posh);
 });
 

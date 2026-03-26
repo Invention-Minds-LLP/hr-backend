@@ -3,6 +3,7 @@ import { PrismaClient, WFHStatus } from "@prisma/client";
 const prisma = new PrismaClient();
 import { sendWhatsAppTemplate } from "../leave/leave.controller";
 import { daysInclusive } from "../leave/leave.controller";
+import { createNotification } from "../notifications/notifications.controller";
 
 
 const WFH_APPLY_TEMPLATE_ID = '890419';
@@ -59,6 +60,16 @@ export const createWFHRequest = async (req: Request, res: Response) => {
         notifyError = e?.message || "WhatsApp send failed";
         console.error("WFH notify (manager) failed:", e);
       }
+    }
+
+    // 🔔 In-app notification to manager/incharge
+    const notifyTo = newWFH.employee.inchargeId ?? newWFH.employee.reportingManager;
+    if (notifyTo) {
+      const empName = [newWFH.employee.firstName, newWFH.employee.lastName].filter(Boolean).join(' ');
+      await createNotification(
+        notifyTo,
+        `${empName} has applied for WFH from ${fmtDate(newWFH.startDate)} to ${fmtDate(newWFH.endDate)}. Please review and take action.`
+      );
     }
 
     res.status(201).json(newWFH);
@@ -245,6 +256,15 @@ export const updateWFHStatus = async (req: Request, res: Response) => {
     //     console.error('WFH status WA send failed:', e?.message || e);
     //   }
     // }
+
+    // 🔔 Notify employee when a final decision is reached
+    if (updatedWFH.status === WFHStatus.APPROVED || updatedWFH.status === WFHStatus.REJECTED) {
+      const empName = [employee?.firstName, employee?.lastName].filter(Boolean).join(' ');
+      await createNotification(
+        updatedWFH.employeeId,
+        `Your WFH request from ${fmtDate(updatedWFH.startDate)} to ${fmtDate(updatedWFH.endDate)} has been ${updatedWFH.status === WFHStatus.APPROVED ? 'Approved' : 'Declined'}.`
+      );
+    }
 
     res.json(updatedWFH);
   } catch (error) {

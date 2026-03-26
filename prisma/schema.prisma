@@ -134,6 +134,14 @@ model Employee {
   locationSessions         LocationSession[]
   leaveAccruals            LeaveAccrual[]
   leaveLedgers             LeaveLedger[]
+  forcePresentActions      ForcePresentAction[]
+  punchCorrections         PunchCorrectionLog[]
+  leaveBalanceAdjustments  LeaveBalanceAdjustmentLog[]
+  attendanceOverrides      AttendanceOverrideLog[]
+  weekOffHolidayOverrides  WeekOffHolidayOverrideLog[]
+  appraisalOverrides       AppraisalOverrideLog[]
+  salaryStructure          SalaryStructure?
+  payslips                 Payslip[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -262,7 +270,13 @@ model Attendance {
   approvedAt         DateTime?
   approvedBy         Int?
   attendanceApproval String?
-  employee           Employee  @relation(fields: [employeeId], references: [id])
+  isForcedPresent      Boolean   @default(false)
+  forcePresentId       Int?
+  isPunchCorrected     Boolean   @default(false)
+  punchCorrectionId    Int?
+  isOverridden         Boolean   @default(false)
+  overrideId           Int?
+  employee             Employee  @relation(fields: [employeeId], references: [id])
 
   @@unique([employeeId, date])
   @@index([employeeId, date])
@@ -277,6 +291,96 @@ model AttendanceSyncLog {
   message String?
 }
 
+model ForcePresentAction {
+  id                 Int          @id @default(autoincrement())
+  employeeId         Int
+  date               DateTime
+  leaveRequestId     Int?
+  daysRestored       Float        @default(1)
+  compOffGranted     Boolean      @default(false)
+  performedBy        Int
+  reason             String
+  createdAt          DateTime     @default(now())
+  employee           Employee     @relation(fields: [employeeId], references: [id])
+  leaveRequest       LeaveRequest? @relation(fields: [leaveRequestId], references: [id])
+}
+
+model PunchCorrectionLog {
+  id             Int       @id @default(autoincrement())
+  employeeId     Int
+  date           DateTime
+  originalIn     DateTime?
+  originalOut    DateTime?
+  correctedIn    DateTime?
+  correctedOut   DateTime?
+  correctionType String
+  reason         String
+  performedBy    Int
+  createdAt      DateTime  @default(now())
+  employee       Employee  @relation(fields: [employeeId], references: [id])
+}
+
+model LeaveBalanceAdjustmentLog {
+  id            Int       @id @default(autoincrement())
+  employeeId    Int
+  leaveTypeId   Int
+  year          Int
+  adjustType    String
+  days          Float
+  balanceBefore Float
+  balanceAfter  Float
+  reason        String
+  performedBy   Int
+  createdAt     DateTime  @default(now())
+  employee      Employee  @relation(fields: [employeeId], references: [id])
+  leaveType     LeaveType @relation(fields: [leaveTypeId], references: [id])
+}
+
+model AttendanceOverrideLog {
+  id             Int      @id @default(autoincrement())
+  employeeId     Int
+  date           DateTime
+  originalStatus String?
+  newStatus      String
+  reason         String
+  performedBy    Int
+  createdAt      DateTime @default(now())
+  employee       Employee @relation(fields: [employeeId], references: [id])
+}
+
+model WeekOffHolidayOverrideLog {
+  id           Int      @id @default(autoincrement())
+  employeeId   Int
+  date         DateTime
+  overrideType String
+  prevStatus   String?
+  newStatus    String
+  autoCompOff  Boolean  @default(false)
+  reason       String
+  performedBy  Int
+  createdAt    DateTime @default(now())
+  employee     Employee @relation(fields: [employeeId], references: [id])
+}
+
+model AppraisalOverrideLog {
+  id                Int      @id @default(autoincrement())
+  appraisalFormId   Int
+  employeeId        Int
+  cycle             String
+  prevOverallScore  Float?
+  newOverallScore   Float?
+  prevFinalDecision String?
+  newFinalDecision  String?
+  prevStatus        String?
+  newStatus         String?
+  prevComments      String?
+  newComments       String?
+  reason            String
+  performedBy       Int
+  createdAt         DateTime @default(now())
+  employee          Employee @relation(fields: [employeeId], references: [id])
+}
+
 model LeaveType {
   id                   Int                    @id @default(autoincrement())
   name                 String                 @unique
@@ -285,8 +389,9 @@ model LeaveType {
   EmployeeLeaveBalance EmployeeLeaveBalance[]
   LeaveRequest         LeaveRequest[]
   policies             LeavePolicy[]
-  leaveAccruals        LeaveAccrual[]
-  leaveLedgers         LeaveLedger[]
+  leaveAccruals           LeaveAccrual[]
+  leaveLedgers            LeaveLedger[]
+  balanceAdjustmentLogs   LeaveBalanceAdjustmentLog[]
 }
 
 enum HalfDaySession {
@@ -321,6 +426,10 @@ model LeaveRequest {
   inChargeDecision  ApprovalDecision @default(PENDING)
   inChargeNote      String?
    prescriptionUrl   String?
+  cancelledAt       DateTime?
+  cancelledBy       Int?
+  cancellationReason String?
+  forcePresentActions ForcePresentAction[]
   employee          Employee         @relation(fields: [employeeId], references: [id])
   leaveType         LeaveType        @relation(fields: [leaveTypeId], references: [id])
 
@@ -384,6 +493,8 @@ model PermissionRequest {
   hrNote            String?
   inChargeDecidedAt DateTime?
   inChargeDecision  ApprovalDecision  @default(PENDING)
+  isHROverride      Boolean           @default(false)
+  hrOverrideReason  String?
   employee          Employee          @relation(fields: [employeeId], references: [id])
 
   @@index([employeeId], map: "PermissionRequest_employeeId_fkey")
@@ -1127,6 +1238,9 @@ model OvertimeApproval {
   managerStatus     String    @default("PENDING")
   managerApprovedAt DateTime?
   managerId         Int?
+  manuallyEntered   Boolean   @default(false)
+  manualEntryBy     Int?
+  manualEntryReason String?
   employee          Employee  @relation(fields: [employeeId], references: [id])
 
   @@unique([employeeId, date], name: "employeeId_date")
@@ -1679,14 +1793,17 @@ model Sabbatical {
 }
 
 model CompOffCredit {
-  id         Int       @id @default(autoincrement())
-  employeeId Int
-  workDate   DateTime
-  expiryDate DateTime
-  used       Boolean   @default(false)
-  usedOn     DateTime?
-  leaveId    Int?
-  createdAt  DateTime  @default(now())
+  id            Int       @id @default(autoincrement())
+  employeeId    Int
+  workDate      DateTime
+  expiryDate    DateTime
+  used          Boolean   @default(false)
+  usedOn        DateTime?
+  leaveId       Int?
+  isManualGrant Boolean   @default(false)
+  grantedBy     Int?
+  grantReason   String?
+  createdAt     DateTime  @default(now())
 
   employee Employee @relation(fields: [employeeId], references: [id])
 
@@ -1939,6 +2056,7 @@ enum LedgerAction {
   ENCASHMENT // EL encash
   ADJUSTMENT // manual correction
   OPENING_BALANCE // excel import
+  CANCELLATION // leave cancelled (force present or manual)
 }
 
 enum LedgerSource {
@@ -2212,4 +2330,81 @@ enum TrainingStatus {
 enum BalanceCategory {
   LEAVE
   PERMISSION
+}
+
+// ─── Payroll ────────────────────────────────────────────────────────────────
+
+model SalaryStructure {
+  id                Int      @id @default(autoincrement())
+  employeeId        Int      @unique
+  basic             Float    @default(0)
+  hra               Float    @default(0)
+  medicalAllowance  Float    @default(0)
+  travelAllowance   Float    @default(0)
+  specialAllowance  Float    @default(0)
+  otherAllowances   Float    @default(0)
+  pfApplicable      Boolean  @default(true)
+  esiApplicable     Boolean  @default(true)
+  ptApplicable      Boolean  @default(true)
+  tdsMonthly        Float    @default(0)
+  effectiveFrom     DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now()) @updatedAt
+  employee          Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId])
+}
+
+model PayrollRun {
+  id          Int       @id @default(autoincrement())
+  month       Int
+  year        Int
+  status      String    @default("DRAFT")
+  notes       String?
+  processedBy Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+  payslips    Payslip[]
+
+  @@unique([month, year])
+  @@index([status])
+}
+
+model Payslip {
+  id               Int        @id @default(autoincrement())
+  employeeId       Int
+  payrollRunId     Int
+  month            Int
+  year             Int
+  workingDays      Int        @default(0)
+  presentDays      Float      @default(0)
+  leaveDays        Float      @default(0)
+  lopDays          Float      @default(0)
+  overtimeHours    Float      @default(0)
+  overtimePay      Float      @default(0)
+  basic            Float      @default(0)
+  hra              Float      @default(0)
+  medicalAllowance Float      @default(0)
+  travelAllowance  Float      @default(0)
+  specialAllowance Float      @default(0)
+  otherAllowances  Float      @default(0)
+  grossEarnings    Float      @default(0)
+  pfEmployee       Float      @default(0)
+  pfEmployer       Float      @default(0)
+  esiEmployee      Float      @default(0)
+  esiEmployer      Float      @default(0)
+  professionalTax  Float      @default(0)
+  tds              Float      @default(0)
+  totalDeductions  Float      @default(0)
+  netPay           Float      @default(0)
+  remarks          String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @default(now()) @updatedAt
+  employee         Employee   @relation(fields: [employeeId], references: [id])
+  payrollRun       PayrollRun @relation(fields: [payrollRunId], references: [id])
+
+  @@unique([employeeId, payrollRunId])
+  @@index([employeeId])
+  @@index([payrollRunId])
+  @@index([year, month])
 }

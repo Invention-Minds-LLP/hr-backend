@@ -21,12 +21,12 @@ export const createGrievance = asyncHandler(async (req: Request, res: Response) 
     });
     
   
-    // for (const hr of hrEmployees) {
-    //   await createNotification(
-    //     hr.id,
-    //     'New grievance submitted — requires acknowledgment'
-    //   );
-    // }
+    for (const hr of hrEmployees) {
+      await createNotification(
+        hr.id,
+        'New grievance submitted — requires acknowledgment'
+      );
+    }
   res.json(grievance);
 });
 
@@ -41,11 +41,18 @@ export const listGrievances = asyncHandler(async (_req: Request, res: Response) 
 // --- Add comment
 export const addGrievanceComment = asyncHandler(async (req: Request, res: Response) => {
   const grievanceId = Number(req.params.id);
-  const {  comment } = req.body;
+  const { comment } = req.body;
   let employeeId = Number(req.body.employeeId);
   const c = await prisma.grievanceComment.create({
     data: { grievanceId, employeeId, comment }
   });
+
+  // 🔔 Notify the grievance owner (not the commenter)
+  const grievance = await prisma.grievance.findUnique({ where: { id: grievanceId }, select: { employeeId: true } });
+  if (grievance && grievance.employeeId !== employeeId) {
+    await createNotification(grievance.employeeId, `A new comment has been added to your grievance.`);
+  }
+
   res.json(c);
 });
 
@@ -57,6 +64,10 @@ export const updateGrievanceStatus = asyncHandler(async (req: Request, res: Resp
     where: { id: grievanceId },
     data: { status }
   });
+
+  // 🔔 Notify the grievance owner
+  await createNotification(g.employeeId, `Your grievance status has been updated to: ${status}.`);
+
   res.json(g);
 });
 export const createAcknowledgement = async (req: Request, res: Response) => {

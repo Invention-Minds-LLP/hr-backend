@@ -63,12 +63,16 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     });
 
 
-    if (!balance) {
+    // Allow advance applications for the next FY when rollover hasn't run yet
+    // (e.g., applying for April leave while still in March)
+    const currentFY = getFinancialYear(new Date());
+    const isAdvanceNextFY = !balance && year === currentFY + 1;
+
+    if (!balance && !isAdvanceNextFY) {
       return res.status(400).json({
         error: `Leave balance not configured for ${year}`
       });
     }
-
 
     // const year = start.getFullYear();
     const requestedUnits = isHalfDay ? 0.5 : daysInclusive(start, end);
@@ -85,7 +89,7 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       });
     }
 
-    if (lt.name !== "CO") {
+    if (lt.name !== "CO" && !isAdvanceNextFY) {
       const bal = await getBalance(Number(employeeId), Number(leaveTypeId), year);
       if (!bal) return res.status(400).json({ error: `Leave balance not configured for ${year}` });
 
@@ -193,9 +197,9 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       leaveRequest.startDate
     )} to ${fmtDate(leaveRequest.endDate)}. Please review and take action.`;
 
-    // for (const id of recipients) {
-    //   await createNotification(id, message);
-    // }
+    for (const id of recipients) {
+      await createNotification(id, message);
+    }
 
     if (notifyTo) {
       const approver = await prisma.employee.findUnique({
@@ -1544,6 +1548,21 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
     // cleanup helper key
     if (body?.__touched) delete body.__touched;
 
+    // 🔔 Notify employee of final decision
+    if (body?.status === 'APPROVED' || body?.status === 'REJECTED') {
+      try {
+        const start = fmtDate(body.startDate);
+        const end   = fmtDate(body.endDate);
+        const days  = daysInclusive(new Date(body.startDate), new Date(body.endDate));
+        await createNotification(
+          body.employeeId,
+          `Your leave request from ${start} to ${end} (${days} day(s)) has been ${body.status}.`
+        );
+      } catch (err) {
+        console.error("Leave status notification failed:", err);
+      }
+    }
+
     return res.status(result.status).json(body);
   } catch (error) {
     console.error("Error updating leave:", error);
@@ -2165,10 +2184,10 @@ export const initLeaveEndScheduler = () => {
         const emp = leave.employee;
         const message = `Hello ${emp.firstName}, today is the *last day of your approved leave*. Please be prepared to report tomorrow.`;
         try {
-          // await createNotification(
-          //   emp.id,
-          //   message
-          // );
+          await createNotification(
+            emp.id,
+            message
+          );
         } catch (err) {
           console.error("Error creating notification:", err);
         }
@@ -2256,7 +2275,7 @@ export const updateLeaveType = async (req: Request, res: Response) => {
     // In-app notification
     const message = `Your leave type for the leave from ${start} to ${end} has been changed to "${newLeaveType.name}".`;
 
-    // await createNotification(employee.id, message);
+    await createNotification(employee.id, message);
 
 
     res.json({
@@ -2449,23 +2468,34 @@ async function rebuildMonthlySummaryTx(
   employeeId: number,
   leaveTypeId: number,
   year: number,
-  month: number
+  month: number,
+  openingOverride?: number
 ) {
-  // previous month
-  const { year: prevYear, month: prevMonth } = getPrevMonthFY(year, month);
+  let opening: number;
 
-  const prev = await tx.leaveMonthlySummary.findUnique({
-    where: {
-      employeeId_leaveTypeId_year_month: {
-        employeeId,
-        leaveTypeId,
-        year: prevYear,
-        month: prevMonth,
+  if (openingOverride !== undefined) {
+    // Caller knows the correct opening (e.g. rollover passing pre-lapse balance)
+    opening = openingOverride;
+  } else if (month === 4) {
+    // Start of financial year — each FY ledger starts from 0.
+    // The OPENING_BALANCE credit in April is captured in `credited` below,
+    // so opening must be 0. Using March-prev-year closing would double-count
+    // any carried balance.
+    opening = 0;
+  } else {
+    const { year: prevYear, month: prevMonth } = getPrevMonthFY(year, month);
+    const prev = await tx.leaveMonthlySummary.findUnique({
+      where: {
+        employeeId_leaveTypeId_year_month: {
+          employeeId,
+          leaveTypeId,
+          year: prevYear,
+          month: prevMonth,
+        },
       },
-    },
-  });
-
-  const opening = prev?.closing ?? 0;
+    });
+    opening = prev?.closing ?? 0;
+  }
 
   const entries = await tx.leaveLedger.findMany({
     where: { employeeId, leaveTypeId, year, month },
@@ -3322,15 +3352,17 @@ export async function runFYRollover(
       // =====================================================
       const clId = leaveTypeMap["CL"];
       let clLapsedPrev = false;
+      let clPrevRemaining = 0;
       if (clId) {
         await prisma.$transaction(async (tx) => {
           // Use ledger balance as source of truth — balance table may be out of sync
           const prevCLLedger = await getLastLedgerBalanceTx(tx, emp.id, clId, prevYear);
-          const prevCLRemaining = Math.max(0, prevCLLedger);
-          if (prevCLRemaining > 0) {
+          clPrevRemaining = Math.max(0, prevCLLedger);
+
+          if (clPrevRemaining > 0) {
             await insertLedgerTx(tx, {
               employeeId: emp.id, leaveTypeId: clId, year: prevYear, month: 3,
-              credit: 0, debit: prevCLRemaining, balanceAfter: 0,
+              credit: 0, debit: clPrevRemaining, balanceAfter: 0,
               action: "LAPSE", referenceType: "LAPSE", source: "SYSTEM", remarks: "CL year-end lapse",
             });
             clLapsedPrev = true;
@@ -3351,7 +3383,9 @@ export async function runFYRollover(
 
         // Rebuild OUTSIDE transaction (avoids P2028 / P1017 timeout)
         if (clLapsedPrev) {
-          await rebuildMonthlySummaryTx(prisma, emp.id, clId, prevYear, 3);
+          // Pass clPrevRemaining as openingOverride so March opening is correct
+          // even when earlier monthly summaries are missing.
+          await rebuildMonthlySummaryTx(prisma, emp.id, clId, prevYear, 3, clPrevRemaining);
           await rebuildYearlySummaryTx(prisma, emp.id, clId, prevYear);
         }
         await rebuildMonthlySummaryTx(prisma, emp.id, clId, newYear, month);
@@ -3363,11 +3397,12 @@ export async function runFYRollover(
       // =====================================================
       const slId = leaveTypeMap["SL"];
       let slLapsedPrev = false;
+      let slPrevRemaining = 0;
       if (slId) {
         await prisma.$transaction(async (tx) => {
           // Use ledger balance as source of truth — balance table may be out of sync
           const prevSLLedger = await getLastLedgerBalanceTx(tx, emp.id, slId, prevYear);
-          const slPrevRemaining = Math.max(0, prevSLLedger);
+          slPrevRemaining = Math.max(0, prevSLLedger);
           const slCarry  = Math.min(slPrevRemaining, 60);
           const slLapsed = slPrevRemaining - slCarry;
 
@@ -3396,7 +3431,7 @@ export async function runFYRollover(
         }, { timeout: 8000 });
 
         if (slLapsedPrev) {
-          await rebuildMonthlySummaryTx(prisma, emp.id, slId, prevYear, 3);
+          await rebuildMonthlySummaryTx(prisma, emp.id, slId, prevYear, 3, slPrevRemaining);
           await rebuildYearlySummaryTx(prisma, emp.id, slId, prevYear);
         }
         await rebuildMonthlySummaryTx(prisma, emp.id, slId, newYear, month);
@@ -3408,6 +3443,7 @@ export async function runFYRollover(
       // =====================================================
       const elId = leaveTypeMap["EL"];
       let elLapsedPrev = false;
+      let elPrevRemaining = 0;
       if (elId) {
         // Fetch policy OUTSIDE tx (read-only, no need to hold a connection)
         const elPolicy = await getActivePolicy(elId, today);
@@ -3415,7 +3451,7 @@ export async function runFYRollover(
         await prisma.$transaction(async (tx) => {
           // Use ledger balance as source of truth — balance table may be out of sync
           const prevELLedger = await getLastLedgerBalanceTx(tx, emp.id, elId, prevYear);
-          const elPrevRemaining = Math.max(0, prevELLedger);
+          elPrevRemaining = Math.max(0, prevELLedger);
 
           let elCarry = 0;
           if (elPolicy?.carryForward) {
@@ -3453,7 +3489,7 @@ export async function runFYRollover(
         }, { timeout: 8000 });
 
         if (elLapsedPrev) {
-          await rebuildMonthlySummaryTx(prisma, emp.id, elId, prevYear, 3);
+          await rebuildMonthlySummaryTx(prisma, emp.id, elId, prevYear, 3, elPrevRemaining);
           await rebuildYearlySummaryTx(prisma, emp.id, elId, prevYear);
         }
         await rebuildMonthlySummaryTx(prisma, emp.id, elId, newYear, month);
@@ -3478,6 +3514,75 @@ export const initFinancialYearRolloverCron = () => {
     console.log(`✅ FY rollover done — processed: ${result.processed}, skipped: ${result.skipped}, errors: ${result.errors.length}`);
     if (result.errors.length) console.error("FY rollover errors:", result.errors);
   });
+};
+
+// ── Purge wrong rollover data + re-run ───────────────────────────────────────
+export const purgeAndRerunFYRollover = async (req: Request, res: Response) => {
+  const year: number = req.body?.year ? Number(req.body.year) : 2026;
+  const prevYear = year - 1;
+
+  try {
+    console.log(`🗑️ Purging FY ${year} rollover data (prev year lapse entries from ${prevYear})...`);
+
+    // 1. Delete all ledger entries for the target year (opening balances etc.)
+    const deletedLedger2026 = await prisma.leaveLedger.deleteMany({
+      where: { year },
+    });
+
+    // 2. Delete LAPSE entries added for prevYear month=3 during the wrong rollover
+    const deletedLapse2025 = await prisma.leaveLedger.deleteMany({
+      where: {
+        year: prevYear,
+        month: 3,
+        action: 'LAPSE',
+        source: 'SYSTEM',
+      },
+    });
+
+    // 3. Delete EmployeeLeaveBalance for target year
+    const deletedBalance = await prisma.employeeLeaveBalance.deleteMany({
+      where: { year },
+    });
+
+    // 4. Delete monthly/yearly summaries for target year
+    const deletedMonthly2026 = await prisma.leaveMonthlySummary.deleteMany({
+      where: { year },
+    });
+    const deletedYearly2026 = await prisma.leaveYearlySummary.deleteMany({
+      where: { year },
+    });
+
+    // 5. Delete prevYear month=3 summaries (rebuilt wrongly during bad rollover)
+    const deletedMonthly2025 = await prisma.leaveMonthlySummary.deleteMany({
+      where: { year: prevYear, month: 3 },
+    });
+    const deletedYearly2025 = await prisma.leaveYearlySummary.deleteMany({
+      where: { year: prevYear },
+    });
+
+    console.log(`✅ Purge complete — ledger:${deletedLedger2026.count}, lapse:${deletedLapse2025.count}, balance:${deletedBalance.count}, monthly2026:${deletedMonthly2026.count}, yearly2026:${deletedYearly2026.count}, monthly2025march:${deletedMonthly2025.count}, yearly2025:${deletedYearly2025.count}`);
+
+    // 6. Re-run rollover with clean data
+    console.log(`🚀 Re-running FY rollover for year ${year}...`);
+    const result = await runFYRollover(year);
+
+    return res.json({
+      message: `FY ${year} data purged and rollover re-run successfully`,
+      purged: {
+        ledger2026: deletedLedger2026.count,
+        lapse2025: deletedLapse2025.count,
+        balance2026: deletedBalance.count,
+        monthly2026: deletedMonthly2026.count,
+        yearly2026: deletedYearly2026.count,
+        monthly2025March: deletedMonthly2025.count,
+        yearly2025: deletedYearly2025.count,
+      },
+      rollover: result,
+    });
+  } catch (err: any) {
+    console.error('Purge + re-run failed:', err);
+    return res.status(500).json({ error: 'Purge failed', message: err?.message });
+  }
 };
 
 // ── Manual trigger (admin endpoint handler) ───────────────────────────────────

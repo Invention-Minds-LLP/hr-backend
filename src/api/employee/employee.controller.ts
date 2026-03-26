@@ -3372,19 +3372,19 @@ export const initSabbaticalReminderScheduler = () => {
 
       const message = `Your sabbatical ends on ${sab.endDate.toDateString()}. Please contact HR.`;
 
-      // await createNotification(emp.id, message);
+      await createNotification(emp.id, message);
 
       const hrUsers = await prisma.employee.findMany({
         where: { roleId: 1, employmentStatus: "ACTIVE" },
         select: { id: true }
       });
 
-      // for (const hr of hrUsers) {
-      //   await createNotification(
-      //     hr.id,
-      //     `${emp.firstName}'s sabbatical ends on ${sab.endDate.toDateString()}`
-      //   );
-      // }
+      for (const hr of hrUsers) {
+        await createNotification(
+          hr.id,
+          `${emp.firstName}'s sabbatical ends on ${sab.endDate.toDateString()}`
+        );
+      }
     }
   });
 };

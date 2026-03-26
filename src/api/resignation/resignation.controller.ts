@@ -101,9 +101,9 @@ export async function createResignation(req: Request, res: Response) {
 
       const message = `New resignation submitted by Employee ${emp.firstName} ${emp.lastName} (${emp.employeeCode}).`;
 
-      // for (const id of notifyIds) {
-      //   await createNotification(id, message);
-      // }
+      for (const id of notifyIds) {
+        await createNotification(id, message);
+      }
     } catch (err) {
       console.error("Resignation notification failed:", err);
     }
@@ -326,9 +326,9 @@ export async function managerApprove(req: Request, res: Response) {
       const hrIds = await getHRIds();
       const message = `Manager has approved the resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
 
-      // for (const hrId of hrIds) {
-      //   await createNotification(hrId, message);
-      // }
+      for (const hrId of hrIds) {
+        await createNotification(hrId, message);
+      }
     } catch (err) {
       console.error("Manager action notification failed:", err);
     }
@@ -367,9 +367,10 @@ export async function managerReject(req: Request, res: Response) {
       const hrIds = await getHRIds();
       const message = `Manager has rejected the resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
 
-      // for (const hrId of hrIds) {
-      //   await createNotification(hrId, message);
-      // }
+      for (const hrId of hrIds) {
+        await createNotification(hrId, message);
+      }
+      await createNotification(upd.employeeId, `Your resignation has been rejected by your manager.`);
     } catch (err) {
       console.error("Manager action notification failed:", err);
     }
@@ -441,12 +442,11 @@ export async function hrApprove(req: Request, res: Response) {
     }
 
     // 🔔 Notify employee about HR approval
-    // try {
-    //   const message = `Your resignation has been approved. Please complete exit formalities.`;
-    //   await createNotification(upd.employeeId, message);
-    // } catch (err) {
-    //   console.error("HR approval notification failed:", err);
-    // }
+    try {
+      await createNotification(upd.employeeId, `Your resignation has been approved by HR. Please complete exit formalities.`);
+    } catch (err) {
+      console.error("HR approval notification failed:", err);
+    }
     const defaultDepts = await prisma.department.findMany({
       where: { isDefaultClearance: true },
       select: { id: true },
@@ -482,12 +482,11 @@ export async function hrReject(req: Request, res: Response) {
         status: 'REJECTED'
       }
     });
-    // try {
-    //   const message = `Your resignation has been rejected by HR.`;
-    //   await createNotification(upd.employeeId, message);
-    // } catch (err) {
-    //   console.error("HR rejection notification failed:", err);
-    // }
+    try {
+      await createNotification(upd.employeeId, `Your resignation has been rejected by HR.`);
+    } catch (err) {
+      console.error("HR rejection notification failed:", err);
+    }
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -502,12 +501,11 @@ export async function hrCancel(req: Request, res: Response) {
       where: { id },
       data: { status: 'CANCELLED' }
     });
-    // try {
-    //   const message = `Your resignation has been cancelled by HR.`;
-    //   await createNotification(upd.employeeId, message);
-    // } catch (err) {
-    //   console.error("HR cancel notification failed:", err);
-    // }
+    try {
+      await createNotification(upd.employeeId, `Your resignation has been cancelled by HR.`);
+    } catch (err) {
+      console.error("HR cancel notification failed:", err);
+    }
     res.json(upd);
   } catch (e) {
     console.error(e);
