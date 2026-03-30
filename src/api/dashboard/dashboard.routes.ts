@@ -21,6 +21,7 @@ const ctrl = new DashboardController();
 
 router.get('', authenticateToken,ctrl.getDashboard);
 router.get('/list', authenticateToken,ctrl.getList);
+router.get('/missing-docs', ctrl.downloadMissingDocs);
 router.get('/recruiting', authenticateToken,ctrl.getRecruiting);
 router.post('/ot/approve-reject', authenticateToken,ctrl.approveOrRejectOT);
 router.get('/ot/manager-pending', authenticateToken, ctrl.getManagerOtPending);

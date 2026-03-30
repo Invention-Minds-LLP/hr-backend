@@ -142,6 +142,7 @@ model Employee {
   appraisalOverrides       AppraisalOverrideLog[]
   salaryStructure          SalaryStructure?
   payslips                 Payslip[]
+  attendancePunches        AttendancePunch[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -1438,7 +1439,7 @@ model Grievance {
   id                       Int                        @id @default(autoincrement())
   employeeId               Int
   title                    String
-  description              String
+  description              String @db.LongText
   category                 String?
   status                   GrievanceStatus            @default(OPEN)
   createdAt                DateTime                   @default(now())
@@ -1455,7 +1456,7 @@ model GrievanceComment {
   id          Int       @id @default(autoincrement())
   grievanceId Int
   employeeId  Int
-  comment     String
+  comment     String @db.LongText
   createdAt   DateTime  @default(now())
   employee    Employee  @relation(fields: [employeeId], references: [id])
   grievance   Grievance @relation(fields: [grievanceId], references: [id])
@@ -1468,9 +1469,9 @@ model PoshCase {
   id                       Int                        @id @default(autoincrement())
   complainantId            Int
   accusedId                Int
-  description              String
+  description              String @db.LongText
   status                   PoshStatus                 @default(FILED)
-  committeeNote            String?
+  committeeNote            String? @db.LongText
   createdAt                DateTime                   @default(now())
   updatedAt                DateTime                   @default(now()) @updatedAt
   ComplaintAcknowledgement ComplaintAcknowledgement[]
@@ -1487,8 +1488,8 @@ model PoshHearing {
   id        Int      @id @default(autoincrement())
   poshId    Int
   date      DateTime
-  notes     String?
-  outcome   String?
+  notes     String? @db.LongText
+  outcome   String? @db.LongText
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
   poshCase  PoshCase @relation(fields: [poshId], references: [id])
@@ -1499,7 +1500,7 @@ model PoshHearing {
 model Training {
   id                 Int                  @id @default(autoincrement())
   title              String
-  description        String?
+  description        String? @db.LongText
   objectives         String?              @db.Text
   trainerType        String?
   trainerId          Int?
@@ -1570,7 +1571,7 @@ model TrainingFeedback {
   trainingId     Int
   employeeId     Int
   rating         Int?
-  feedback       String?
+  feedback       String? @db.LongText
   trainerRating  Int?
   contentQuality Int?
   relevance      Int?
@@ -1642,7 +1643,7 @@ model Incident {
   employeeId  Int
   reportedBy  Int
   title       String
-  description String   @db.Text
+  description String   @db.LongText
   status      String
   attachment  String?
   createdAt   DateTime @default(now())
@@ -2407,4 +2408,22 @@ model Payslip {
   @@index([employeeId])
   @@index([payrollRunId])
   @@index([year, month])
+}
+
+model AttendancePunch {
+  id           Int      @id @default(autoincrement())
+  employeeId   Int
+  type         String   // CHECK_IN, CHECK_OUT
+  activityType String   // OFFICE, CLIENT_VISIT, FIELD_WORK
+  timestamp    DateTime @default(now())
+  latitude     Float
+  longitude    Float
+  address      String?
+  photoUrl     String?  @db.Text
+  notes        String?
+  createdAt    DateTime @default(now())
+  employee     Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId, timestamp])
+  @@index([employeeId])
 }

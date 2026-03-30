@@ -3,6 +3,7 @@ import { PrismaClient, Announcement, ClearanceType, Prisma, ApplicationStatus } 
 import { differenceInCalendarDays } from 'date-fns';
 import { startOfMonth, endOfMonth } from 'date-fns';
 import { createNotification } from '../notifications/notifications.controller';
+import * as ExcelJS from 'exceljs';
 import { create } from 'qrcode';
 
 const prisma = new PrismaClient();
@@ -86,6 +87,53 @@ function fmtTime(d?: Date | null) {
 }
 
 type ListRow = { id: number; data: string[] };
+function getMandatoryDocsForEmployee(emp: any): string[] {
+    const mandatoryDocs: string[] = [];
+    const employeeType = emp.employeeType;
+    const experienceType = (emp.experienceType || '').toUpperCase();
+    const isFresher = experienceType === 'FRESHER';
+
+    if (!isFresher) {
+        if (employeeType === 'CLINICAL') {
+            mandatoryDocs.push('REGISTRATION_CERT');
+        } else if (employeeType === 'NONCLINICAL') {
+            mandatoryDocs.push('SALARY_CERT', 'VERIFICATION_CERT');
+        }
+    }
+
+    mandatoryDocs.push('AADHAAR', 'PAN', 'BANK');
+
+    (emp.qualifications || []).forEach((q: any) => {
+        switch ((q.degree || '').toUpperCase()) {
+            case 'SSLC':
+                mandatoryDocs.push('SSLC');
+                break;
+            case 'PU':
+                mandatoryDocs.push('PU');
+                break;
+            case 'DIPLOMA':
+                mandatoryDocs.push('DIPLOMA');
+                break;
+            case 'BACHELOR':
+            case 'MASTER':
+            case 'PHD':
+                mandatoryDocs.push('DEGREE');
+                break;
+        }
+    });
+
+    return [...new Set(mandatoryDocs)];
+}
+
+function getMissingMandatoryDocs(emp: any): string[] {
+    const requiredDocs = getMandatoryDocsForEmployee(emp);
+
+    const uploadedDocTypes = (emp.documents || []).map((d: any) =>
+        (d.title || '').toUpperCase()
+    );
+
+    return requiredDocs.filter(doc => !uploadedDocTypes.includes(doc));
+}
 
 interface List {
     title: string;
@@ -891,16 +939,23 @@ export class DashboardController {
                     where: { id: { in: employeeIds } },
                     select: {
                         id: true,
+                        employeeType: true,
+                        experienceType: true,
                         documents: {
                             select: { title: true }
+                        },
+                        qualifications: {
+                            select: { degree: true }
                         }
+
                     },
                 });
                 const mandatoryDocs = ['AADHAAR', 'PAN', 'BANK'];
-                return allEmp.filter(emp => {
-                    const docTitles = emp.documents.map(d => d.title?.toUpperCase());
-                    return mandatoryDocs.some(req => !docTitles.includes(req));
+                const missingDocs = allEmp.filter(emp => {
+                    const missing = getMissingMandatoryDocs(emp);
+                    return missing.length > 0;
                 }).length;
+                 return missingDocs;
             })(),
         ]);
 
@@ -1026,7 +1081,55 @@ export class DashboardController {
         });
     });
 
+    downloadMissingDocs = asyncHandler(async (req, res) => {
+        const employees = await prisma.employee.findMany({
+            where: { employmentStatus: 'ACTIVE' },
+            include: {
+                documents: true,
+                qualifications: true,
+            },
+        });
 
+        const rows = employees
+            .map(emp => {
+                const missing = getMissingMandatoryDocs(emp);
+
+                return {
+                    employeeName: `${emp.firstName} ${emp.lastName}`,
+                    employeeCode: emp.employeeCode,
+                    employeeType: emp.employeeType,
+                    experienceType: emp.experienceType || '-',
+                    missingDocs: missing.join(', '),
+                };
+            })
+            .filter(row => row.missingDocs.length > 0);
+
+        // Create Excel
+        const workbook = new ExcelJS.Workbook();
+        const sheet = workbook.addWorksheet('Missing Documents');
+
+        sheet.columns = [
+            { header: 'Employee Name', key: 'employeeName', width: 25 },
+            { header: 'Employee Code', key: 'employeeCode', width: 20 },
+            { header: 'Employee Type', key: 'employeeType', width: 15 },
+                { header: 'Experience Type', key: 'experienceType', width: 20 },
+            { header: 'Missing Documents', key: 'missingDocs', width: 40 },
+        ];
+
+        sheet.addRows(rows);
+
+        res.setHeader(
+            'Content-Type',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        );
+        res.setHeader(
+            'Content-Disposition',
+            'attachment; filename=missing_documents.xlsx'
+        );
+
+        await workbook.xlsx.write(res);
+        res.end();
+    });
 
 
     /** GET /api/dashboard/list?key=unmarked|approvals|probation|docs|feedback|clearances */
@@ -3098,7 +3201,7 @@ export const messageUnmarked = async (req: Request, res: Response) => {
         // TODO: integrate with notification/email service
         console.log("Message to unmarked employees:", employeeIds, message);
         for (const empId of employeeIds) {
-            createNotification(empId,message)
+            createNotification(empId, message)
         }
         res.json({ success: true, notified: employeeIds.length });
         return;
@@ -3430,11 +3533,11 @@ export const nudgePanel = async (req: Request, res: Response) => {
 
         // 3️⃣ Send notifications
         await prisma.notification.createMany({
-          data: ids.map(id => ({
-            employeeId: id,
-            message: "Please submit interview feedback.",
-            channel: "PUSH" // or EMAIL/SMS depending on your system
-          }))
+            data: ids.map(id => ({
+                employeeId: id,
+                message: "Please submit interview feedback.",
+                channel: "PUSH" // or EMAIL/SMS depending on your system
+            }))
         });
         for (const id of ids) {
             await createNotification(id, "Please submit interview feedback.");
