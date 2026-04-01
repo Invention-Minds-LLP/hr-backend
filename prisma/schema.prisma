@@ -143,6 +143,7 @@ model Employee {
   salaryStructure          SalaryStructure?
   payslips                 Payslip[]
   attendancePunches        AttendancePunch[]
+  weeklyPerformanceReports WeeklyPerformanceReport[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -2223,6 +2224,28 @@ enum TaskStatus {
   DONE
 }
 
+enum WeeklyReportStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum DailyTaskStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+  BLOCKED
+  CARRIED_FORWARD
+}
+
 enum ClearanceType {
   IT
   FINANCE
@@ -2426,4 +2449,75 @@ model AttendancePunch {
 
   @@index([employeeId, timestamp])
   @@index([employeeId])
+}
+
+model WeeklyPerformanceReport {
+  id                Int                @id @default(autoincrement())
+  employeeId        Int
+  weekStartDate     DateTime
+  weekEndDate       DateTime
+  weekLabel         String?
+  status            WeeklyReportStatus @default(DRAFT)
+  employeeSummary   String?            @db.Text
+
+  inChargeDecision  ApprovalDecision   @default(PENDING)
+  inChargeDecidedAt DateTime?
+  inChargeNote      String?            @db.Text
+  inChargeRating    Int?
+
+  hodDecision       ApprovalDecision   @default(PENDING)
+  hodDecidedAt      DateTime?
+  hodNote           String?            @db.Text
+  hodRating         Int?
+
+  hrDecision        ApprovalDecision   @default(PENDING)
+  hrDecidedAt       DateTime?
+  hrNote            String?            @db.Text
+  hrRating          Int?
+
+  approvedBy        Int?
+  approvedDate      DateTime?
+  declinedBy        Int?
+  declinedDate      DateTime?
+  declineReason     String?
+
+  submittedAt       DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @default(now()) @updatedAt
+
+  previousWeekId    Int?
+
+  employee          Employee           @relation(fields: [employeeId], references: [id])
+  dailyTasks        WeeklyTaskEntry[]
+
+  @@unique([employeeId, weekStartDate])
+  @@index([employeeId])
+  @@index([weekStartDate])
+  @@index([status])
+}
+
+model WeeklyTaskEntry {
+  id                 Int                     @id @default(autoincrement())
+  reportId           Int
+  taskDate           DateTime
+  taskDescription    String                  @db.Text
+  category           String?
+  priority           TaskPriority            @default(MEDIUM)
+  taskStatus         DailyTaskStatus         @default(NOT_STARTED)
+  percentComplete    Int                     @default(0)
+  assignedById       Int?
+  deadline           DateTime?
+  completionDate     DateTime?
+  remarks            String?                 @db.Text
+  isCarriedForward   Boolean                 @default(false)
+  carriedFromEntryId Int?
+
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @default(now()) @updatedAt
+
+  report             WeeklyPerformanceReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId])
+  @@index([taskDate])
+  @@index([assignedById])
 }

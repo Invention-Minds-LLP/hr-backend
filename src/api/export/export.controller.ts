@@ -1682,11 +1682,209 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
         break;
       }
 
+      // ─── CONSOLIDATED EMPLOYEE DETAILS ─────────────────────────────────────
+      case 'consolidated-employee': {
+        const [employees, addresses, qualifications, documents, emergencyContacts] =
+          await Promise.all([
+            prisma.employee.findMany({
+              include: {
+                Department: true,
+                Branch: true,
+                designation: true,
+                role: true,
+              },
+            }),
+            prisma.address.findMany(),
+            prisma.qualification.findMany(),
+            prisma.document.findMany(),
+            prisma.emergencyContact.findMany(),
+          ]);
+
+        const empMap = await getEmployeeMap();
+
+        // Group related records by employeeId
+        const addrByEmp = new Map<number, typeof addresses>();
+        for (const a of addresses) {
+          const arr = addrByEmp.get(a.employeeId) ?? [];
+          arr.push(a);
+          addrByEmp.set(a.employeeId, arr);
+        }
+
+        const qualByEmp = new Map<number, typeof qualifications>();
+        for (const q of qualifications) {
+          const arr = qualByEmp.get(q.employeeId) ?? [];
+          arr.push(q);
+          qualByEmp.set(q.employeeId, arr);
+        }
+
+        const docByEmp = new Map<number, typeof documents>();
+        for (const d of documents) {
+          const arr = docByEmp.get(d.employeeId) ?? [];
+          arr.push(d);
+          docByEmp.set(d.employeeId, arr);
+        }
+
+        const ecByEmp = new Map<number, typeof emergencyContacts>();
+        for (const c of emergencyContacts) {
+          const arr = ecByEmp.get(c.employeeId) ?? [];
+          arr.push(c);
+          ecByEmp.set(c.employeeId, arr);
+        }
+
+        // Determine max counts to create enough columns
+        let maxAddr = 0, maxQual = 0, maxDoc = 0, maxEc = 0, maxVacc = 0;
+        for (const e of employees) {
+          maxAddr = Math.max(maxAddr, addrByEmp.get(e.id)?.length ?? 0);
+          maxQual = Math.max(maxQual, qualByEmp.get(e.id)?.length ?? 0);
+          maxDoc = Math.max(maxDoc, docByEmp.get(e.id)?.length ?? 0);
+          maxEc = Math.max(maxEc, ecByEmp.get(e.id)?.length ?? 0);
+          const vacc = e.vaccinations ? JSON.parse(e.vaccinations as string) : [];
+          maxVacc = Math.max(maxVacc, Array.isArray(vacc) ? vacc.length : 0);
+        }
+
+        // Build headers
+        const consolidatedHeaders: string[] = [
+          // Master
+          'Employee Code', 'Reference Code', 'First Name', 'Last Name', 'Full Name',
+          'Gender', 'Date of Birth', 'Age', 'Mobile Number', 'Alternate Mobile Number',
+          'Email Address', 'Department', 'Branch', 'Designation', 'Role',
+          'Reporting Manager', 'In Charge', 'Date of Joining', 'Employment Type',
+          'Employment Status', 'Probation End Date', 'Years of Experience', 'Marital Status',
+          'Father Name', 'Mother Name', 'PAN Number', 'Aadhaar Number', 'UAN Number',
+          'License Number', 'License Registration Date', 'License Expiry Date',
+          'Blood Group', 'Height', 'Weight', 'BMI',
+          'Blood Pressure', 'Blood Sugar', 'Cholesterol',
+          'Smoking', 'Alcohol', 'Exercise Frequency',
+          'Allergies', 'Chronic Conditions', 'Past Surgeries',
+          'Vision Type', 'Uses Glasses', 'Vision Remarks',
+          'Has Disability', 'Disability Type', 'Disability Description',
+          'Preferred Hospital', 'Primary Physician', 'Emergency Notes',
+          'Pre-Employment Check Date',
+          'Created On', 'Last Updated On',
+        ];
+
+        // Address columns
+        for (let i = 1; i <= maxAddr; i++) {
+          consolidatedHeaders.push(
+            `Address ${i} Type`, `Address ${i} Line 1`, `Address ${i} Line 2`,
+            `Address ${i} City`, `Address ${i} State`, `Address ${i} Postal Code`, `Address ${i} Country`,
+          );
+        }
+        // Qualification columns
+        for (let i = 1; i <= maxQual; i++) {
+          consolidatedHeaders.push(
+            `Qualification ${i} Degree`, `Qualification ${i} Degree Name`,
+            `Qualification ${i} Institution`, `Qualification ${i} Year of Passing`,
+            `Qualification ${i} Grade`,
+          );
+        }
+        // Emergency Contact columns
+        for (let i = 1; i <= maxEc; i++) {
+          consolidatedHeaders.push(
+            `Emergency Contact ${i} Name`, `Emergency Contact ${i} Number`,
+            `Emergency Contact ${i} Relationship`,
+          );
+        }
+        // Document columns
+        for (let i = 1; i <= maxDoc; i++) {
+          consolidatedHeaders.push(
+            `Document ${i} Title`, `Document ${i} Type`, `Document ${i} Category`,
+            `Document ${i} Issue Date`, `Document ${i} Expiry Date`,
+          );
+        }
+        // Vaccination columns
+        for (let i = 1; i <= maxVacc; i++) {
+          consolidatedHeaders.push(
+            `Vaccination ${i} Name`, `Vaccination ${i} Date`, `Vaccination ${i} Dose`,
+            `Vaccination ${i} Certificate`,
+          );
+        }
+
+        // Build rows
+        const consolidatedRows = employees.map(e => {
+          const row: (string | number | boolean | null | undefined)[] = [
+            // Master
+            e.employeeCode, e.referenceCode ?? '', e.firstName, e.lastName,
+            `${e.firstName} ${e.lastName}`, e.gender, fmt(e.dob), e.age ?? '',
+            e.phone, e.alternatePhone ?? '', e.email,
+            e.Department.name, e.Branch.name, e.designation?.name ?? '', e.role.name,
+            e.reportingManager ? (empMap.get(e.reportingManager) ?? e.reportingManager) : '',
+            e.inchargeId ? (empMap.get(e.inchargeId) ?? e.inchargeId) : '',
+            fmt(e.dateOfJoining), e.employmentType, e.employmentStatus,
+            fmt(e.probationEndDate), e.totalYearsOfExperience ?? '',
+            e.marital ?? '', e.fatherName ?? '', e.motherName ?? '',
+            e.panNumber ?? '', e.aadharNumber ?? '', e.uanNumber ?? '',
+            e.licenseNumber ?? '', fmt(e.licenseRegDate), fmt(e.licenseExpiryDate),
+            e.bloodGroup ?? '', e.height ?? '', e.weight ?? '', e.bmi ?? '',
+            e.bloodPressure ?? '', e.bloodSugar ?? '', e.cholesterol ?? '',
+            e.smoking ? 'Yes' : 'No', e.alcohol ? 'Yes' : 'No', e.exerciseFrequency ?? '',
+            e.allergies ?? '', e.chronicConditions ?? '', e.pastSurgeries ?? '',
+            e.visionType ?? '', e.usesGlasses ? 'Yes' : 'No', e.visionRemarks ?? '',
+            e.hasDisability ? 'Yes' : 'No', e.disabilityType ?? '', e.disabilityDescription ?? '',
+            e.preferredHospital ?? '', e.primaryPhysician ?? '', e.emergencyNotes ?? '',
+            fmt(e.preEmploymentCheckDate),
+            fmt(e.createdAt), fmt(e.updatedAt),
+          ];
+
+          // Addresses
+          const empAddrs = addrByEmp.get(e.id) ?? [];
+          for (let i = 0; i < maxAddr; i++) {
+            const a = empAddrs[i];
+            row.push(
+              a?.type ?? '', a?.line1 ?? '', a?.line2 ?? '',
+              a?.city ?? '', a?.state ?? '', a?.zipCode ?? '', a?.country ?? '',
+            );
+          }
+          // Qualifications
+          const empQuals = qualByEmp.get(e.id) ?? [];
+          for (let i = 0; i < maxQual; i++) {
+            const q = empQuals[i];
+            row.push(
+              q?.degree ?? '', q?.degreeName ?? '',
+              q?.institution ?? '', q?.year ?? '', q?.grade ?? '',
+            );
+          }
+          // Emergency Contacts
+          const empEcs = ecByEmp.get(e.id) ?? [];
+          for (let i = 0; i < maxEc; i++) {
+            const c = empEcs[i];
+            row.push(c?.name ?? '', c?.phone ?? '', c?.relationship ?? '');
+          }
+          // Documents
+          const empDocs = docByEmp.get(e.id) ?? [];
+          for (let i = 0; i < maxDoc; i++) {
+            const d = empDocs[i];
+            row.push(
+              d?.title ?? '', d?.type ?? '', d?.category ?? '',
+              fmt(d?.issueDate), fmt(d?.expiryDate),
+            );
+          }
+          // Vaccinations
+          const vaccArr = e.vaccinations ? JSON.parse(e.vaccinations as string) : [];
+          const vaccList: any[] = Array.isArray(vaccArr) ? vaccArr : [];
+          for (let i = 0; i < maxVacc; i++) {
+            const v = vaccList[i];
+            row.push(
+              v?.name ?? v?.vaccineName ?? '',
+              v?.date ?? v?.vaccinationDate ?? '',
+              v?.dose ?? v?.doseNumber ?? '',
+              v?.proofUrl ?? v?.certificate ?? '',
+            );
+          }
+
+          return row;
+        });
+
+        sendExcel(res, 'Consolidated_Employee_Details', consolidatedHeaders, consolidatedRows);
+        break;
+      }
+
       // ─── UNKNOWN ──────────────────────────────────────────────────────────────
       default:
         res.status(400).json({
           error: `Unknown export table: "${table}"`,
           available: [
+            'consolidated-employee',
             'employee-master', 'employee-addresses', 'emergency-contacts', 'qualifications',
             'employee-documents', 'attendance', 'leave-requests', 'leave-balance',
             'leave-monthly-summary', 'leave-yearly-summary', 'leave-accrual-details',

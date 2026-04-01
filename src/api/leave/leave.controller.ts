@@ -3154,7 +3154,15 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
       // PROCESS EACH ROW
       // =========================
       const processRow = async (row: any, index: number) => {
-        const code = row.employeeCode || row["Emp Code"];
+        // Normalize: find the employee code regardless of header casing/spacing
+        const code = row.employeeCode
+          || row["Emp Code"]
+          || row["emp code"]
+          || row["EmpCode"]
+          || row["empCode"]
+          || row["Employee Code"]
+          || row["employee code"]
+          || Object.entries(row).find(([k]) => k.trim().toLowerCase().replace(/\s+/g, '') === 'empcode')?.[1];
 
         console.log(code)
 
@@ -3315,7 +3323,7 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
 export async function runFYRollover(
   overrideYear?: number
 ): Promise<{ processed: number; skipped: number; errors: string[] }> {
-  const today = new Date();
+  const today = atStartOfDay(new Date());
   const newYear = overrideYear ?? getFinancialYear(today);
   const prevYear = newYear - 1;
   const month = 4; // April — first month of Indian FY
@@ -3454,10 +3462,13 @@ export async function runFYRollover(
           elPrevRemaining = Math.max(0, prevELLedger);
 
           let elCarry = 0;
+          console.log(`EL rollover for emp ${emp.id}: prevRemaining=${elPrevRemaining}, policy carryForward=${elPolicy?.carryForward}, maxCarryForward=${elPolicy?.maxCarryForward}`);
           if (elPolicy?.carryForward) {
             elCarry = elPolicy.maxCarryForward
               ? Math.min(elPrevRemaining, elPolicy.maxCarryForward)
               : elPrevRemaining;
+
+          console.log(`EL policy for emp ${emp.id}: carryForward=${elPolicy.carryForward}, maxCarryForward=${elPolicy.maxCarryForward}, prevRemaining=${elPrevRemaining}, calculatedCarry=${elCarry}`);
           }
 
           const elLapsed = elPrevRemaining - elCarry;

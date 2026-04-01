@@ -48,6 +48,7 @@ import forcePresentRoutes from "./api/force-present/force-present.routes";
 import hrCorrectionsRoutes from "./api/hr-corrections/hr-corrections.routes";
 import payrollRoutes from "./api/payroll/payroll.routes";
 import mobileAttendanceRoutes from "./api/mobile-attendance/mobile-attendance.routes";
+import weeklyTrackerRoutes from "./api/weekly-tracker/weekly-tracker.routes";
 
 
 
@@ -159,6 +160,7 @@ app.use("/api/force-present", forcePresentRoutes);
 app.use("/api/hr-corrections", hrCorrectionsRoutes);
 app.use("/api/payroll", payrollRoutes);
 app.use("/api/mobile-attendance", mobileAttendanceRoutes);
+app.use("/api/weekly-tracker", weeklyTrackerRoutes);
 
 
 // Default route
