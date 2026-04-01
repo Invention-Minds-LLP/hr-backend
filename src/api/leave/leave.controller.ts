@@ -1899,8 +1899,8 @@ type Person = {
   endDate: string;   // ISO
 };
 
-function atStartOfDay(d: Date) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
-function atEndOfDay(d: Date) { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; }
+function atStartOfDay(d: Date) { const x = new Date(d); x.setUTCHours(0, 0, 0, 0); return x; }
+function atEndOfDay(d: Date) { const x = new Date(d); x.setUTCHours(23, 59, 59, 999); return x; }
 
 function startOfISOWeek(d: Date) { // Monday as week start
   const x = atStartOfDay(d);
