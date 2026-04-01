@@ -3124,8 +3124,8 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
       // =========================
       // 🔧 PREP DATA
       // =========================
-      const year = getFinancialYear(new Date());
-      const month = new Date().getMonth() + 1;
+      const year = fields.year ? Number(fields.year) : getFinancialYear(new Date());
+      const month = fields.month ? Number(fields.month) : new Date().getMonth() + 1;
 
       const [leaveTypes, employees] = await Promise.all([
         prisma.leaveType.findMany(),
