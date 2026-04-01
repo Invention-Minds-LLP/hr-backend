@@ -2,17 +2,18 @@ import { Router } from "express";
 import {
   createDesignation,
   getDesignations,
-  getDesignationById
+  getDesignationById,
+  updateDesignation,
+  deleteDesignation,
 } from "./designation.controller";
+import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
 
-/* ==========================
-   DESIGNATION ROUTES
-   ========================== */
-
-router.post("/", createDesignation);        // Create designation
-router.get("/", getDesignations);            // Get all designations
-router.get("/:id", getDesignationById);      // Get designation by id
+router.post("/", authenticateToken, createDesignation);
+router.get("/", authenticateToken, getDesignations);
+router.get("/:id", authenticateToken, getDesignationById);
+router.put("/:id", authenticateToken, updateDesignation);
+router.delete("/:id", authenticateToken, deleteDesignation);
 
 export default router;
