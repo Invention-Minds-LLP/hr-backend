@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { createLeaveBalances, createLeaveRequest, createLeaveType, getBlockedDates, getCompOffCredits, getLeaveBalance, getLeaveDashboard, getLeaveRequests, getLeaveTypes, getMonthlyCasualUsage, getWhoIsOnLeaveBuckets, getWhoIsOnLeaveToday, updateLeaveStatus, updateLeaveType, uploadPrescription, triggerFYRollover, purgeAndRerunFYRollover } from "./leave.controller";
+import { createLeaveBalances, createLeaveRequest, createLeaveType, getBlockedDates, getCompOffCredits, getLeaveBalance, getLeaveDashboard, getLeaveRequests, getLeaveTypes, getMonthlyCasualUsage, getWhoIsOnLeaveBuckets, getWhoIsOnLeaveToday, updateLeaveStatus, updateLeaveType, uploadPrescription, triggerFYRollover, purgeAndRerunFYRollover, triggerELAccrual } from "./leave.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
@@ -29,5 +29,6 @@ router.get('/balance/:employeeId', authenticateToken, getLeaveBalance);
 
 router.post("/admin/fy-rollover", triggerFYRollover);
 router.post("/admin/fy-rollover-purge", purgeAndRerunFYRollover);
+router.post("/admin/el-accrual", triggerELAccrual);
 
 export default router;

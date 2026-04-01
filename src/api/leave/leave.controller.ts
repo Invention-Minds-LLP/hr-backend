@@ -14,6 +14,7 @@ import { PermissionType } from "@prisma/client";
 import fs from "fs";
 import { Client } from "basic-ftp";
 import path from "path";
+import { max } from "date-fns";
 
 const FTP_CONFIG = {
   host: process.env.FTP_HOST ?? "",
@@ -2651,168 +2652,211 @@ async function insertLedgerTx(
     },
   });
 }
-export const initELAccrualCron = () => {
-  cron.schedule("10 2 1 * *", async () => {
-    const today = atStartOfDay(new Date());
-    const year = getFinancialYear(today);
-    const month = today.getMonth() + 1;
+// ── Core EL accrual logic — called by cron AND manual trigger ──────────────
+async function runELAccrual(overrideYear?: number, overrideMonth?: number) {
+  const today = atStartOfDay(new Date());
+  const year = overrideYear ?? getFinancialYear(today);
+  const month = overrideMonth ?? (today.getMonth() + 1);
 
+  // 1️⃣ EL Leave Type
+  const el = await prisma.leaveType.findFirst({
+    where: { name: "EL" },
+    select: { id: true }
+  });
+
+  if (!el) return { error: "EL leave type not found" };
+
+  // 2️⃣ Policy
+  const policy = await getActivePolicy(el.id, today);
+  console.log("Active EL policy:", policy);
+  if (!policy) return { error: "No active EL policy found" };
+
+  if (policy.accrualType !== "MONTHLY") return { error: "EL policy is not MONTHLY accrual" };
+
+  const monthlyCredit = Number(policy.accrualRate ?? 0);
+  if (!monthlyCredit) return { error: "EL accrual rate is 0" };
+
+  const workingDaysRequired = policy.workingDaysRequired ?? 0;
+  const maxBalance = policy.maxBalance ?? null;
+
+  // 3️⃣ Employees — only those who have completed 1 year of service
+  const oneYearAgo = new Date(today);
+  oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
+  const employees = await prisma.employee.findMany({
+    where: {
+      employmentStatus: "ACTIVE",
+      dateOfJoining: { lte: oneYearAgo },
+    },
+    select: { id: true },
+  });
+
+  let credited = 0, skipped = 0;
+  const errors: string[] = [];
+
+  // 4️⃣ Loop employees
+  for (const emp of employees) {
     try {
-      // 1️⃣ EL Leave Type
-      const el = await prisma.leaveType.findFirst({
-        where: { name: "EL" },
-        select: { id: true }
-      });
+      let didCredit = false;
 
-      if (!el) return;
-
-      // 2️⃣ Policy
-      const policy = await getActivePolicy(el.id, today);
-      if (!policy) return;
-
-      if (policy.accrualType !== "MONTHLY") return;
-
-      const monthlyCredit = Number(policy.accrualRate ?? 0);
-      if (!monthlyCredit) return;
-
-      const workingDaysRequired = policy.workingDaysRequired ?? 0;
-      const maxBalance = policy.maxBalance ?? null;
-
-      // 3️⃣ Employees — only those who have completed 1 year of service
-      const oneYearAgo = new Date(today);
-      oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-
-      const employees = await prisma.employee.findMany({
-        where: {
-          employmentStatus: "ACTIVE",
-          dateOfJoining: { lte: oneYearAgo },  // joined at least 1 year ago
-        },
-        select: { id: true },
-      });
-
-      // 4️⃣ Loop employees
-      for (const emp of employees) {
-        await prisma.$transaction(async (tx) => {
-          // ❗ Skip if already credited
-          const exists = await tx.leaveAccrual.findUnique({
-            where: {
-              employeeId_leaveTypeId_year_month: {
-                employeeId: emp.id,
-                leaveTypeId: el.id,
-                year,
-                month
-              }
-            }
-          });
-
-          if (exists) return;
-
-          // 4.1️⃣ Get shift config ONCE
-          const shift = await tx.shiftApproval.findFirst({
-            where: {
+      await prisma.$transaction(async (tx) => {
+        // ❗ Skip if already credited
+        const exists = await tx.leaveAccrual.findUnique({
+          where: {
+            employeeId_leaveTypeId_year_month: {
               employeeId: emp.id,
-              status: "APPROVED",
-              month,
+              leaveTypeId: el.id,
+              year,
+              month
+            }
+          }
+        });
+
+        if (exists) { skipped++; return; }
+
+        // 4.1️⃣ & 4.2️⃣ Working days check — PAUSED for now
+        // TODO: Uncomment when attendance data is ready
+        // const shift = await tx.shiftApproval.findFirst({
+        //   where: { employeeId: emp.id, status: "APPROVED", month, year },
+        //   select: { weekOffConfig: true }
+        // });
+        // const weekOffConfig = shift?.weekOffConfig ?? null;
+        // const workedDays = await getWorkedDaysOptimized(emp.id, year, month, weekOffConfig);
+        // if (workingDaysRequired && workedDays < workingDaysRequired) {
+        //   console.log(`❌ Skipping EL for emp ${emp.id}, worked: ${workedDays}`);
+        //   skipped++;
+        //   return;
+        // }
+        const workedDays = 'N/A (check paused)';
+
+        // 4.3️⃣ Balance row
+        const bal = await tx.employeeLeaveBalance.upsert({
+          where: {
+            employeeId_leaveTypeId_year: {
+              employeeId: emp.id,
+              leaveTypeId: el.id,
               year
-            },
-            select: { weekOffConfig: true }
-          });
+            }
+          },
+          update: {},
+          create: {
+            employeeId: emp.id,
+            leaveTypeId: el.id,
+            category: "LEAVE",
+            year,
+            totalAllowed: 0,
+            used: 0,
+            halfDayUsed: 0
+          }
+        });
 
-          const weekOffConfig = shift?.weekOffConfig ?? null;
+        // 4.4️⃣ Ledger balance
+        const prevBalance = await getLastLedgerBalanceTx(tx, emp.id, el.id, year);
 
-          // 4.2️⃣ Calculate worked days
-          const workedDays = await getWorkedDaysOptimized(
-            emp.id,
+        const credit = monthlyCredit;
+        if (credit <= 0) { skipped++; return; }
+
+        // 4.5️⃣ Accrual record
+        await tx.leaveAccrual.create({
+          data: {
+            employeeId: emp.id,
+            leaveTypeId: el.id,
             year,
             month,
-            weekOffConfig
-          );
-
-          // ❗ POLICY CHECK
-          if (workingDaysRequired && workedDays < workingDaysRequired) {
-            console.log(`❌ Skipping EL for emp ${emp.id}, worked: ${workedDays}`);
-            return;
+            accrualType: "MONTHLY",
+            daysCredited: credit
           }
+        });
 
-          // 4.3️⃣ Balance row
-          const bal = await tx.employeeLeaveBalance.upsert({
-            where: {
-              employeeId_leaveTypeId_year: {
-                employeeId: emp.id,
-                leaveTypeId: el.id,
-                year
-              }
-            },
-            update: {},
-            create: {
-              employeeId: emp.id,
-              leaveTypeId: el.id,
-              category: "LEAVE",
-              year,
-              totalAllowed: 0,
-              used: 0,
-              halfDayUsed: 0
-            }
-          });
-
-          // 4.4️⃣ Ledger balance
-          const prevBalance = await getLastLedgerBalanceTx(tx, emp.id, el.id, year);
-
-          let credit = monthlyCredit;
-
-          if (maxBalance != null) {
-            const remaining = maxBalance - prevBalance;
-            if (remaining <= 0) return;
-
-            credit = Math.min(credit, remaining);
+        // 4.6️⃣ Balance update
+        await tx.employeeLeaveBalance.update({
+          where: { id: bal.id },
+          data: {
+            totalAllowed: { increment: credit }
           }
+        });
 
-          if (credit <= 0) return;
+        // 4.7️⃣ Ledger — credit
+        const balanceAfterCredit = prevBalance + credit;
 
-          // 4.5️⃣ Accrual
-          await tx.leaveAccrual.create({
-            data: {
-              employeeId: emp.id,
-              leaveTypeId: el.id,
-              year,
-              month,
-              accrualType: "MONTHLY",
-              daysCredited: credit
-            }
-          });
+        await insertLedgerTx(tx, {
+          employeeId: emp.id,
+          leaveTypeId: el.id,
+          year,
+          month,
+          credit,
+          debit: 0,
+          balanceAfter: balanceAfterCredit,
+          action: "CREDIT",
+          referenceType: "ACCRUAL",
+          source: "SYSTEM",
+          remarks: `EL credited (worked ${workedDays} days)`
+        });
 
-          // 4.6️⃣ Balance update
+        // 4.7b️⃣ Auto-encash excess over maxBalance
+        if (maxBalance != null && balanceAfterCredit > maxBalance) {
+          const excessDays = balanceAfterCredit - maxBalance;
+
           await tx.employeeLeaveBalance.update({
             where: { id: bal.id },
             data: {
-              totalAllowed: { increment: credit }
+              totalAllowed: { decrement: excessDays }
             }
           });
-
-          // 4.7️⃣ Ledger
-          const newBalance = prevBalance + credit;
 
           await insertLedgerTx(tx, {
             employeeId: emp.id,
             leaveTypeId: el.id,
             year,
             month,
-            credit,
-            debit: 0,
-            balanceAfter: newBalance,
-            action: "CREDIT",
-            referenceType: "ACCRUAL",
+            credit: 0,
+            debit: excessDays,
+            balanceAfter: maxBalance,
+            action: "ENCASHMENT",
+            referenceType: "ENCASHMENT",
             source: "SYSTEM",
-            remarks: `EL credited (worked ${workedDays} days)`
+            remarks: `EL auto-encashed ${excessDays} days (exceeded max balance ${maxBalance})`
           });
 
-          // 4.8️⃣ Summaries
-          await rebuildMonthlySummaryTx(tx, emp.id, el.id, year, month);
-          await rebuildYearlySummaryTx(tx, emp.id, el.id, year);
-        });
-      }
+          console.log(`💰 EL auto-encashed ${excessDays} days for emp ${emp.id}`);
+        }
 
-      console.log(`✅ EL accrual done for ${year}-${month}`);
+        credited++;
+        didCredit = true;
+      }, { timeout: 15000 });
+
+      // 4.8️⃣ Summaries — outside transaction to avoid timeout
+      if (didCredit) {
+        await rebuildMonthlySummaryTx(prisma, emp.id, el.id, year, month);
+        await rebuildYearlySummaryTx(prisma, emp.id, el.id, year);
+      }
+    } catch (err: any) {
+      errors.push(`emp ${emp.id}: ${err?.message ?? "unknown"}`);
+    }
+  }
+
+  console.log(`✅ EL accrual done for ${year}-${month}: credited=${credited}, skipped=${skipped}`);
+  return { year, month, totalEmployees: employees.length, credited, skipped, errors };
+}
+
+// ── Manual trigger endpoint ────────────────────────────────────────────────
+export const triggerELAccrual = async (req: Request, res: Response) => {
+  try {
+    const year = req.body.year ? Number(req.body.year) : undefined;
+    const month = req.body.month ? Number(req.body.month) : undefined;
+    const result = await runELAccrual(year, month);
+    return res.json(result);
+  } catch (e: any) {
+    console.error("Manual EL accrual error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+};
+
+// ── Cron wrapper ───────────────────────────────────────────────────────────
+export const initELAccrualCron = () => {
+  cron.schedule("10 2 1 * *", async () => {
+    try {
+      await runELAccrual();
     } catch (e) {
       console.error("EL CRON ERROR:", e);
     }
@@ -2892,6 +2936,9 @@ async function getWorkedDaysOptimized(
   const start = new Date(calYear, month - 1, 1);
   const end = new Date(calYear, month, 0, 23, 59, 59);
 
+  console.log(`Calculating worked days for emp ${employeeId} in ${year}-${month}...`);
+  console.log(`Date range: ${fmtDate(start)} to ${fmtDate(end)}`);
+
   const workedDates = new Set<string>();
 
   // 1️⃣ Attendance
@@ -2903,6 +2950,8 @@ async function getWorkedDaysOptimized(
     },
     select: { date: true }
   });
+
+  console.log(`Attendance records for emp ${employeeId} in ${year}-${month}:`, attendance.length);
 
   attendance.forEach(a => {
     workedDates.add(atStartOfDay(a.date).toISOString());
@@ -2937,6 +2986,8 @@ async function getWorkedDaysOptimized(
       finalCount++;
     }
   }
+
+  console.log(`Final worked days for emp ${employeeId} in ${year}-${month}: ${finalCount}`);
 
   return finalCount;
 }
