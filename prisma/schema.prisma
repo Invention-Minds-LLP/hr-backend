@@ -1384,7 +1384,7 @@ model ManpowerRequisition {
   vacancies             Int?
   minExperience         Int?
   maxExperience         Int?
-  skills                String?
+  skills                String? @db.LongText
   education             String?
   training              String?
   reasonBreakdown       Json?

@@ -41,7 +41,11 @@ finalizeLogin = async (
           departmentId: true,
           photoUrl: true,
           roleId: true,
+          gender: true,
           designation: {
+            select: { name: true }
+          },
+          role: {
             select: { name: true }
           }
         }
@@ -53,10 +57,13 @@ finalizeLogin = async (
     throw new Error('User or Employee not found');
   }
 
+  // Use role from Employee table (source of truth)
+  const roleName = user.employee.role?.name ?? user.role;
+
   // JWT payload (same as loginUser)
   const payload = {
     userId: user.id,
-    role: user.role,
+    role: roleName,
     empId: user.employee.id,
     deptId: user.employee.departmentId,
     employeeCode: user.employeeCode,
@@ -80,12 +87,13 @@ finalizeLogin = async (
     username: user.username,
     employeeCode: user.employeeCode,
     id: user.id,
-    role: user.role,
+    role: roleName,
     empId: user.employee.id,
     deptId: user.employee.departmentId,
     designation: user.employee.designation?.name || '',
     photoUrl: user.employee.photoUrl || null,
     roleId: user.employee.roleId,
+    gender: user.employee.gender,
   };
 };
 }

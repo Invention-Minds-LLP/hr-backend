@@ -291,7 +291,10 @@ export async function runBiometricSync(isFinalRun: boolean) {
     // 🔑 Generate comp-off after attendance is finalized
     await generateCompOffIfEligible(attendance);
 
-
+    // 🔑 Auto-cancel approved leave if employee is Present
+    if (finalStatus === 'Present') {
+      await autoCancelLeaveIfPresent(employeeId, date);
+    }
 
   }
 
@@ -761,4 +764,222 @@ async function notifyHRShiftSummary() {
       },
     });
   }
+}
+
+/* ---------------------------------
+   AUTO-CANCEL LEAVE IF PRESENT
+---------------------------------- */
+export async function autoCancelLeaveIfPresent(employeeId: number, date: Date) {
+  try {
+    const targetDate = startOfDay(date);
+    const dayEnd = new Date(targetDate);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    // Find approved leave covering this date
+    const leave = await prisma.leaveRequest.findFirst({
+      where: {
+        employeeId,
+        status: 'APPROVED',
+        startDate: { lte: dayEnd },
+        endDate: { gte: targetDate },
+      },
+      include: {
+        employee: {
+          select: {
+            firstName: true, lastName: true, employeeCode: true,
+            inchargeId: true, reportingManager: true, departmentId: true,
+          },
+        },
+        leaveType: { select: { name: true } },
+      },
+    });
+
+    if (!leave) return;
+
+    const year = getFinancialYear(targetDate);
+    const month = targetDate.getMonth() + 1;
+    const isSingle = isSameDay(leave.startDate, leave.endDate);
+    const isHalfDay = leave.isHalfDay && isSingle;
+    const isCO = leave.leaveType.name === 'CO';
+    const isRH = leave.leaveType.name === 'RH';
+    const isFirstDay = isSameDay(targetDate, leave.startDate);
+    const isLastDay = isSameDay(targetDate, leave.endDate);
+
+    await prisma.$transaction(async (tx) => {
+      // ── Cancel / shrink / split the leave ──────────────────────────
+      if (isSingle) {
+        await tx.leaveRequest.update({
+          where: { id: leave.id },
+          data: {
+            status: 'CANCELLED',
+            cancelledAt: new Date(),
+            cancellationReason: 'Auto-cancelled: Employee marked Present via biometric',
+          },
+        });
+      } else if (isFirstDay) {
+        await tx.leaveRequest.update({
+          where: { id: leave.id },
+          data: { startDate: addDays(targetDate, 1) },
+        });
+      } else if (isLastDay) {
+        await tx.leaveRequest.update({
+          where: { id: leave.id },
+          data: { endDate: addDays(targetDate, -1) },
+        });
+      } else {
+        // Split: original ends day before, new starts day after
+        await tx.leaveRequest.update({
+          where: { id: leave.id },
+          data: { endDate: addDays(targetDate, -1) },
+        });
+        await tx.leaveRequest.create({
+          data: {
+            employeeId: leave.employeeId,
+            leaveTypeId: leave.leaveTypeId,
+            startDate: addDays(targetDate, 1),
+            endDate: leave.endDate,
+            reason: `${leave.reason} [split due to biometric present on ${fmtDate(date)}]`,
+            status: 'APPROVED',
+            approvedBy: leave.approvedBy,
+            isHalfDay: false,
+            hodDecision: leave.hodDecision,
+            hodDecidedAt: leave.hodDecidedAt,
+            hrDecision: leave.hrDecision,
+            hrDecidedAt: leave.hrDecidedAt,
+            inChargeDecision: leave.inChargeDecision,
+            inChargeDecidedAt: leave.inChargeDecidedAt,
+          },
+        });
+      }
+
+      // ── Restore balance (non-CO, non-RH) ──────────────────────────
+      if (!isCO && !isRH) {
+        let daysRestored = isHalfDay ? 0.5 : 1;
+
+        // Check actual debit from ledger for single-day leaves
+        if (isSingle) {
+          const originalDebit = await tx.leaveLedger.findFirst({
+            where: {
+              employeeId,
+              leaveTypeId: leave.leaveTypeId,
+              referenceId: leave.id,
+              action: 'DEBIT',
+            } as any,
+            orderBy: { id: 'asc' },
+          });
+          if (originalDebit) daysRestored = Number(originalDebit.debit);
+        }
+
+        const balance = await tx.employeeLeaveBalance.findFirst({
+          where: { employeeId, leaveTypeId: leave.leaveTypeId, year },
+        });
+
+        if (balance) {
+          // Restore balance
+          if (isHalfDay) {
+            await tx.employeeLeaveBalance.update({
+              where: { id: balance.id },
+              data: { halfDayUsed: { decrement: 1 } },
+            });
+          } else {
+            await tx.employeeLeaveBalance.update({
+              where: { id: balance.id },
+              data: { used: { decrement: 1 } },
+            });
+          }
+
+          // Get current ledger balance and insert CANCELLATION entry
+          const lastLedger = await tx.leaveLedger.findFirst({
+            where: { employeeId, leaveTypeId: leave.leaveTypeId, year },
+            orderBy: { id: 'desc' },
+            select: { balanceAfter: true },
+          });
+          const currentBalance = lastLedger?.balanceAfter ?? 0;
+
+          await (tx.leaveLedger as any).create({
+            data: {
+              employeeId,
+              leaveTypeId: leave.leaveTypeId,
+              year,
+              month,
+              credit: daysRestored,
+              debit: 0,
+              balanceAfter: currentBalance + daysRestored,
+              action: 'CANCELLATION',
+              referenceType: 'LEAVE_REQUEST',
+              referenceId: leave.id,
+              source: 'SYSTEM',
+              remarks: `Auto-cancelled: Present via biometric on ${fmtDate(date)}`,
+            },
+          });
+        }
+      }
+
+      // ── CO leave: restore comp-off credit ──────────────────────────
+      if (isCO) {
+        const usedCredit = await tx.compOffCredit.findFirst({
+          where: { leaveId: leave.id, used: true },
+        });
+        if (usedCredit) {
+          await tx.compOffCredit.update({
+            where: { id: usedCredit.id },
+            data: { used: false, usedOn: null, leaveId: null },
+          });
+        }
+      }
+    }, { timeout: 15000 });
+
+    // ── Notifications ────────────────────────────────────────────────
+    const empName = `${leave.employee.firstName} ${leave.employee.lastName}`;
+    const leaveInfo = `${leave.leaveType.name} leave (${fmtDate(leave.startDate)} to ${fmtDate(leave.endDate)})`;
+    const action = isSingle ? 'auto-cancelled' : 'adjusted';
+    const message = `${empName}'s ${leaveInfo} has been ${action} as they were marked Present on ${fmtDate(date)}. Balance restored.`;
+
+    // Notify employee
+    await createNotification(employeeId, `Your ${leaveInfo} has been ${action} as you were marked Present on ${fmtDate(date)}. Your leave balance has been restored.`);
+
+    // Notify incharge
+    if (leave.employee.inchargeId) {
+      await createNotification(leave.employee.inchargeId, message);
+    }
+
+    // Notify reporting manager
+    if (leave.employee.reportingManager) {
+      await createNotification(leave.employee.reportingManager, message);
+    }
+
+    // Notify HR dept
+    const hrEmployees = await prisma.employee.findMany({
+      where: { departmentId: 1, employmentStatus: 'ACTIVE' },
+      select: { id: true },
+    });
+    for (const hr of hrEmployees) {
+      if (hr.id !== employeeId && hr.id !== leave.employee.inchargeId && hr.id !== leave.employee.reportingManager) {
+        await createNotification(hr.id, message);
+      }
+    }
+
+    console.log(`✅ Auto-cancelled leave #${leave.id} for ${empName} — balance restored`);
+  } catch (err) {
+    console.error(`❌ Auto-cancel leave failed for emp ${employeeId}:`, err);
+  }
+}
+
+function isSameDay(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function addDays(date: Date, days: number): Date {
+  const d = startOfDay(new Date(date));
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function getFinancialYear(date: Date): number {
+  const month = date.getMonth() + 1;
+  return month >= 4 ? date.getFullYear() : date.getFullYear() - 1;
+}
+
+function fmtDate(d: Date): string {
+  return d.toISOString().split('T')[0];
 }

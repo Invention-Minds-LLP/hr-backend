@@ -98,16 +98,18 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       }
 
       // RH date must fall on an optional holiday
-      const rhDate = new Date(start);
-      rhDate.setUTCHours(0, 0, 0, 0);
-      const calYear = rhDate.getFullYear();
+      // The start date from frontend is IST midnight in UTC (e.g. 2026-04-02T18:30:00Z for April 3rd IST)
+      // Holiday dates are stored as UTC midnight (e.g. 2026-04-03T00:00:00Z)
+      // So we need to check a window around the start date to account for timezone
+      const rhDateStart = new Date(start.getTime() - 6 * 60 * 60 * 1000); // -6 hours buffer
+      const rhDateEnd = new Date(start.getTime() + 24 * 60 * 60 * 1000);   // +24 hours buffer
 
       const optionalHoliday = await prisma.holiday.findFirst({
         where: {
           isOptional: true,
           date: {
-            gte: new Date(Date.UTC(calYear, rhDate.getUTCMonth(), rhDate.getUTCDate())),
-            lt: new Date(Date.UTC(calYear, rhDate.getUTCMonth(), rhDate.getUTCDate() + 1)),
+            gte: rhDateStart,
+            lt: rhDateEnd,
           },
         },
       });

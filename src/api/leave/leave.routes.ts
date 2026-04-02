@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { createLeaveBalances, createLeaveRequest, createLeaveType, getBlockedDates, getCompOffCredits, getLeaveBalance, getLeaveDashboard, getLeaveRequests, getLeaveTypes, getMonthlyCasualUsage, getWhoIsOnLeaveBuckets, getWhoIsOnLeaveToday, updateLeaveStatus, updateLeaveType, uploadPrescription, triggerFYRollover, purgeAndRerunFYRollover, triggerELAccrual } from "./leave.controller";
+import { autoCancelLeaveIfPresent } from "../biometric/biometric.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
@@ -30,5 +31,17 @@ router.get('/balance/:employeeId', authenticateToken, getLeaveBalance);
 router.post("/admin/fy-rollover", triggerFYRollover);
 router.post("/admin/fy-rollover-purge", purgeAndRerunFYRollover);
 router.post("/admin/el-accrual", triggerELAccrual);
+
+// Test endpoint for auto-cancel leave
+router.post("/admin/test-auto-cancel", async (req, res) => {
+  try {
+    const { employeeId, date } = req.body;
+    if (!employeeId || !date) return res.status(400).json({ error: "employeeId and date required" });
+    await autoCancelLeaveIfPresent(Number(employeeId), new Date(date));
+    return res.json({ message: "Auto-cancel check completed", employeeId, date });
+  } catch (e: any) {
+    return res.status(500).json({ error: e.message });
+  }
+});
 
 export default router;

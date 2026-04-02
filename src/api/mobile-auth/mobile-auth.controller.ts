@@ -17,7 +17,7 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
     ) {
         const employee = await prisma.employee.findFirst({
             where: { phone },
-            include: { designation: true }
+            include: { designation: true, role: { select: { name: true } } }
         });
 
         if (!employee) {
@@ -33,11 +33,13 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
         }
 
         // 🔐 Generate tokens directly
+        const empRoleName = employee.role?.name ?? user.role;
+
         const accessToken = jwt.sign(
             {
                 userId: user.id,
                 empId: employee.id,
-                role: user.role,
+                role: empRoleName,
                 reviewMode: true
             },
             process.env.JWT_SECRET!,
@@ -66,7 +68,7 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
             username: user.username,
             employeeCode: user.employeeCode,
             id: user.id,
-            role: user.role,
+            role: empRoleName,
 
             // employee info
             empId: employee.id,
@@ -264,11 +266,15 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
         where: { employeeCode }
     });
 
+    // Get role from Employee table
+    const empRole = await prisma.role.findUnique({ where: { id: employee.roleId }, select: { name: true } });
+    const roleName = empRole?.name ?? user!.role;
+
     const accessToken = jwt.sign(
         {
             userId: user!.id,
             empId: employee.id,
-            role: user!.role
+            role: roleName
         },
         process.env.JWT_SECRET!,
         { expiresIn: '15m' }
@@ -294,7 +300,7 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
         username: user!.username,
         employeeCode: user!.employeeCode,
         id: user!.id,
-        role: user!.role,
+        role: roleName,
 
         // employee details
         empId: employee.id,
@@ -319,7 +325,8 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
     }
 
     const employee = await prisma.employee.findFirst({
-        where: { employeeCode: stored.user.employeeCode }
+        where: { employeeCode: stored.user.employeeCode },
+        include: { role: { select: { name: true } } }
     });
 
     if (!employee) {
@@ -329,7 +336,7 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
     const accessToken = jwt.sign(
         {
             userId: stored.user.id,
-            role: stored.user.role,
+            role: employee.role?.name ?? stored.user.role,
             empId: employee.id,
         },
         process.env.JWT_SECRET!,

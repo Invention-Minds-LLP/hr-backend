@@ -94,7 +94,8 @@ export const loginUser = async (req: Request, res: Response) => {
         photoUrl: true,
         designation: true,
         roleId: true,
-        gender: true
+        gender: true,
+        role: { select: { name: true } }
       }
     })
 
@@ -110,10 +111,13 @@ export const loginUser = async (req: Request, res: Response) => {
 
     if (!validPassword) return res.status(401).json({ error: "Invalid password" });
 
+    // Use role from Employee table (source of truth), not User table
+    const roleName = employee.role?.name ?? user.role;
+
     // Generate JWT
     const payload = {
       userId: user.id,
-      role: user.role,
+      role: roleName,
       empId: employee.id,
       deptId: employee.departmentId,
       employeeCode: user.employeeCode,
@@ -136,7 +140,7 @@ export const loginUser = async (req: Request, res: Response) => {
       username: user.username,
       employeeCode: user.employeeCode,
       id: user.id,
-      role: user.role,
+      role: roleName,
       empId: employee.id,
       deptId: employee.departmentId,
       designation: employee?.designation?.name || '',
