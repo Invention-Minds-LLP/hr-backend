@@ -118,26 +118,25 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
         });
       }
 
-      // Max 2 RH per financial year
+      // Count total optional holidays for this calendar year
+      const totalOptionalHolidays = await prisma.holiday.count({
+        where: { isOptional: true },
+      });
+
+      // Count RH already used/pending this FY
       const rhUsedCount = await prisma.leaveRequest.count({
         where: {
           employeeId: Number(employeeId),
           leaveTypeId: Number(leaveTypeId),
           status: { in: ["PENDING", "APPROVED"] },
-          startDate: {
-            gte: year >= 4
-              ? new Date(Date.UTC(year, 3, 1))       // April 1 of FY year
-              : new Date(Date.UTC(year, 3, 1)),
-          },
-          endDate: {
-            lt: new Date(Date.UTC(year + 1, 3, 1)),  // March 31 of next year
-          },
+          startDate: { gte: new Date(Date.UTC(year, 3, 1)) },
+          endDate: { lt: new Date(Date.UTC(year + 1, 3, 1)) },
         },
       });
 
-      if (rhUsedCount >= 2) {
+      if (rhUsedCount >= totalOptionalHolidays) {
         return res.status(400).json({
-          error: "Maximum 2 Restricted Holidays (RH) allowed per financial year. You have already used 2.",
+          error: `Maximum ${totalOptionalHolidays} Restricted Holidays allowed per financial year. You have already used ${rhUsedCount}.`,
         });
       }
     }
