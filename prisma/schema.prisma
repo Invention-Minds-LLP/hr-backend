@@ -144,6 +144,10 @@ model Employee {
   payslips                 Payslip[]
   attendancePunches        AttendancePunch[]
   weeklyPerformanceReports WeeklyPerformanceReport[]
+  weeklyRatings            WeeklyPerformanceRating[] @relation("WeeklyRatingEmployee")
+  incentives               Incentive[]
+  loans                    Loan[]
+  loanRepayments           LoanRepayment[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -1657,10 +1661,11 @@ model Incident {
 }
 
 model Designation {
-  id        Int        @id @default(autoincrement())
-  name      String     @unique
-  isActive  Boolean    @default(true)
-  employees Employee[]
+  id              Int                    @id @default(autoincrement())
+  name            String                 @unique
+  isActive        Boolean                @default(true)
+  employees       Employee[]
+  ratingQuestions WeeklyRatingQuestion[]
 }
 
 model DeviceToken {
@@ -2520,4 +2525,129 @@ model WeeklyTaskEntry {
   @@index([reportId])
   @@index([taskDate])
   @@index([assignedById])
+}
+
+model WeeklyRatingQuestion {
+  id            Int          @id @default(autoincrement())
+  text          String
+  isDefault     Boolean      @default(false)
+  isActive      Boolean      @default(true)
+  displayOrder  Int          @default(0)
+  designationId Int?
+  createdBy     Int?
+  createdAt     DateTime     @default(now())
+
+  designation Designation? @relation(fields: [designationId], references: [id])
+  answers     WeeklyRatingAnswer[]
+
+  @@index([designationId])
+}
+
+model WeeklyPerformanceRating {
+  id             Int      @id @default(autoincrement())
+  employeeId     Int
+  ratedBy        Int
+  weekStartDate  DateTime
+  weekEndDate    DateTime
+  weekLabel      String?
+  overallScore   Float?
+  managerRemarks String?  @db.Text
+  status         String   @default("DRAFT") // DRAFT, SUBMITTED
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @default(now()) @updatedAt
+
+  employee Employee             @relation("WeeklyRatingEmployee", fields: [employeeId], references: [id])
+  answers  WeeklyRatingAnswer[]
+
+  @@unique([employeeId, weekStartDate])
+  @@index([employeeId])
+  @@index([ratedBy])
+  @@index([weekStartDate])
+  @@index([status])
+}
+
+model WeeklyRatingAnswer {
+  id         Int     @id @default(autoincrement())
+  ratingId   Int
+  questionId Int
+  score      Int     // 1-10
+  remarks    String?
+
+  rating   WeeklyPerformanceRating @relation(fields: [ratingId], references: [id], onDelete: Cascade)
+  question WeeklyRatingQuestion    @relation(fields: [questionId], references: [id])
+
+  @@unique([ratingId, questionId])
+  @@index([ratingId])
+  @@index([questionId])
+}
+
+model Incentive {
+  id            Int       @id @default(autoincrement())
+  employeeId    Int
+  type          String    // BONUS, PERFORMANCE, FESTIVAL, REFERRAL, OTHER
+  amount        Float
+  description   String?   @db.Text
+  effectiveDate DateTime
+  paidOn        DateTime?
+  status        String    @default("PENDING") // PENDING, APPROVED, PAID, CANCELLED, REJECTED
+  requestedBy   Int?      // manager who requested
+  approvedBy    Int?
+  approvedAt    DateTime?
+  rejectedBy    Int?
+  rejectedAt    DateTime?
+  rejectReason  String?
+  source        String    @default("MANUAL") // MANUAL (HR), REQUEST (Manager)
+  remarks       String?   @db.Text
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @default(now()) @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId])
+  @@index([status])
+  @@index([requestedBy])
+}
+
+model Loan {
+  id              Int       @id @default(autoincrement())
+  employeeId      Int
+  loanType        String    // SALARY_ADVANCE, PERSONAL, EMERGENCY, OTHER
+  principalAmount Float
+  interestRate    Float     @default(0)
+  tenure          Int       // months
+  emiAmount       Float
+  totalRepaid     Float     @default(0)
+  outstandingBalance Float
+  status          String    @default("PENDING") // PENDING, APPROVED, ACTIVE, CLOSED, REJECTED
+  appliedOn       DateTime  @default(now())
+  approvedBy      Int?
+  approvedAt      DateTime?
+  disbursedOn     DateTime?
+  reason          String?   @db.Text
+  remarks         String?   @db.Text
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @default(now()) @updatedAt
+
+  employee   Employee        @relation(fields: [employeeId], references: [id])
+  repayments LoanRepayment[]
+
+  @@index([employeeId])
+  @@index([status])
+}
+
+model LoanRepayment {
+  id         Int      @id @default(autoincrement())
+  loanId     Int
+  employeeId Int
+  amount     Float
+  paidOn     DateTime
+  mode       String?  // SALARY_DEDUCTION, CASH, BANK_TRANSFER
+  remarks    String?
+  createdAt  DateTime @default(now())
+
+  loan     Loan     @relation(fields: [loanId], references: [id])
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([loanId])
+  @@index([employeeId])
 }

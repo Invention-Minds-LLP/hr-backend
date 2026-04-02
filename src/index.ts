@@ -49,6 +49,11 @@ import hrCorrectionsRoutes from "./api/hr-corrections/hr-corrections.routes";
 import payrollRoutes from "./api/payroll/payroll.routes";
 import mobileAttendanceRoutes from "./api/mobile-attendance/mobile-attendance.routes";
 import weeklyTrackerRoutes from "./api/weekly-tracker/weekly-tracker.routes";
+import encashmentRoutes from "./api/encashment/encashment.routes";
+import compOffRoutes from "./api/comp-off/comp-off.routes";
+import incentiveRoutes from "./api/incentive/incentive.routes";
+import loanRoutes from "./api/loan/loan.routes";
+import weeklyRatingRoutes from "./api/weekly-rating/weekly-rating.routes";
 
 
 
@@ -161,6 +166,11 @@ app.use("/api/hr-corrections", hrCorrectionsRoutes);
 app.use("/api/payroll", payrollRoutes);
 app.use("/api/mobile-attendance", mobileAttendanceRoutes);
 app.use("/api/weekly-tracker", weeklyTrackerRoutes);
+app.use("/api/encashment", encashmentRoutes);
+app.use("/api/comp-off", compOffRoutes);
+app.use("/api/incentives", incentiveRoutes);
+app.use("/api/loans", loanRoutes);
+app.use("/api/weekly-rating", weeklyRatingRoutes);
 
 
 // Default route

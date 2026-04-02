@@ -67,9 +67,9 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     // Allow advance applications for the next FY when rollover hasn't run yet
     // (e.g., applying for April leave while still in March)
     const currentFY = getFinancialYear(new Date());
-    const isAdvanceNextFY = !balance && year === currentFY + 1;
+    // const isAdvanceNextFY = !balance && year === currentFY + 1;
 
-    if (!balance && !isAdvanceNextFY) {
+    if (!balance  && lt.name !== "RH") {
       return res.status(400).json({
         error: `Leave balance not configured for ${year}`
       });
@@ -90,7 +90,59 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       });
     }
 
-    if (lt.name !== "CO" && !isAdvanceNextFY) {
+    // ── RH (Restricted Holiday) validations ───────────────────────────────
+    if (lt.name === "RH") {
+      // RH must be exactly 1 day
+      if (requestedUnits > 1) {
+        return res.status(400).json({ error: "RH can only be applied for 1 day at a time" });
+      }
+
+      // RH date must fall on an optional holiday
+      const rhDate = new Date(start);
+      rhDate.setUTCHours(0, 0, 0, 0);
+      const calYear = rhDate.getFullYear();
+
+      const optionalHoliday = await prisma.holiday.findFirst({
+        where: {
+          isOptional: true,
+          date: {
+            gte: new Date(Date.UTC(calYear, rhDate.getUTCMonth(), rhDate.getUTCDate())),
+            lt: new Date(Date.UTC(calYear, rhDate.getUTCMonth(), rhDate.getUTCDate() + 1)),
+          },
+        },
+      });
+
+      if (!optionalHoliday) {
+        return res.status(400).json({
+          error: "RH can only be applied on a Restricted Holiday (optional holiday) date",
+        });
+      }
+
+      // Max 2 RH per financial year
+      const rhUsedCount = await prisma.leaveRequest.count({
+        where: {
+          employeeId: Number(employeeId),
+          leaveTypeId: Number(leaveTypeId),
+          status: { in: ["PENDING", "APPROVED"] },
+          startDate: {
+            gte: year >= 4
+              ? new Date(Date.UTC(year, 3, 1))       // April 1 of FY year
+              : new Date(Date.UTC(year, 3, 1)),
+          },
+          endDate: {
+            lt: new Date(Date.UTC(year + 1, 3, 1)),  // March 31 of next year
+          },
+        },
+      });
+
+      if (rhUsedCount >= 2) {
+        return res.status(400).json({
+          error: "Maximum 2 Restricted Holidays (RH) allowed per financial year. You have already used 2.",
+        });
+      }
+    }
+
+    if (lt.name !== "CO" && lt.name !== "RH") {
       const bal = await getBalance(Number(employeeId), Number(leaveTypeId), year);
       if (!bal) return res.status(400).json({ error: `Leave balance not configured for ${year}` });
 
@@ -1417,7 +1469,12 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
           return { kind: "OK" as const, status: 200, body: { ...updatedLeave, requestedUnits } };
         }
 
-        // ---- Non-CO: validate balance
+        // ---- RH: no balance table, just approve (validated at creation)
+        if (updatedLeave.leaveType.name === "RH") {
+          return { kind: "OK" as const, status: 200, body: { ...updatedLeave, requestedUnits } };
+        }
+
+        // ---- Non-CO/RH: validate balance
         const bal = await tx.employeeLeaveBalance.findFirst({
           where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year, category: "LEAVE" },
         });
@@ -2058,7 +2115,7 @@ export const getBlockedDates = async (req: Request, res: Response) => {
       employeeId,
       status: { in: ["APPROVED", "PENDING"] }
     },
-    select: { startDate: true, endDate: true }
+    select: { id: true, startDate: true, endDate: true }
   });
 
   return res.json(existing);
