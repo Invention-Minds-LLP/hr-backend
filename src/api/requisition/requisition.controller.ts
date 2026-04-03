@@ -399,12 +399,16 @@ export const listRequisitions = async (req: Request, res: Response) => {
     }
 
     // HR / Management → no filter (see all)
+    if (roleId === 1 || roleId === 4) {
+      whereCondition = {};
+    }
     // const requisitions = await prisma.manpowerRequisition.findMany({
     //   where: whereCondition,
     //   include: { job: true },
     //   orderBy: { requestDate: "desc" }
     // });
     const requisitions = await prisma.manpowerRequisition.findMany({
+      where: whereCondition,
       include: { job: true },
       orderBy: { requestDate: 'desc' }
     });
