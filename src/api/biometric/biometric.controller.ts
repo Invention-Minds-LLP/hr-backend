@@ -775,7 +775,72 @@ export async function autoCancelLeaveIfPresent(employeeId: number, date: Date) {
     const dayEnd = new Date(targetDate);
     dayEnd.setHours(23, 59, 59, 999);
 
-    // Find approved leave covering this date
+    // ── 1. Cancel PENDING leave (no balance was deducted) ──────────
+    const pendingLeave = await prisma.leaveRequest.findFirst({
+      where: {
+        employeeId,
+        status: 'PENDING',
+        startDate: { lte: dayEnd },
+        endDate: { gte: targetDate },
+      },
+      include: {
+        employee: {
+          select: {
+            firstName: true, lastName: true, employeeCode: true,
+            inchargeId: true, reportingManager: true, departmentId: true,
+          },
+        },
+        leaveType: { select: { name: true } },
+      },
+    });
+
+    if (pendingLeave) {
+      const isSingle = isSameDay(pendingLeave.startDate, pendingLeave.endDate);
+
+      if (isSingle) {
+        await prisma.leaveRequest.update({
+          where: { id: pendingLeave.id },
+          data: {
+            status: 'CANCELLED',
+            cancelledAt: new Date(),
+            cancellationReason: 'Auto-cancelled: Employee marked Present via biometric (pending leave)',
+          },
+        });
+      } else {
+        // For multi-day pending leave, just cancel — no split needed since not approved
+        await prisma.leaveRequest.update({
+          where: { id: pendingLeave.id },
+          data: {
+            status: 'CANCELLED',
+            cancelledAt: new Date(),
+            cancellationReason: 'Auto-cancelled: Employee marked Present via biometric on one of the leave days',
+          },
+        });
+      }
+
+      const empName = `${pendingLeave.employee.firstName} ${pendingLeave.employee.lastName}`;
+      const leaveInfo = `${pendingLeave.leaveType.name} leave (${fmtDate(pendingLeave.startDate)} to ${fmtDate(pendingLeave.endDate)})`;
+      const message = `${empName}'s pending ${leaveInfo} has been auto-cancelled as they were marked Present on ${fmtDate(date)}.`;
+
+      await createNotification(employeeId, `Your pending ${leaveInfo} has been auto-cancelled as you were marked Present on ${fmtDate(date)}.`);
+      if (pendingLeave.employee.inchargeId) await createNotification(pendingLeave.employee.inchargeId, message);
+      if (pendingLeave.employee.reportingManager) await createNotification(pendingLeave.employee.reportingManager, message);
+
+      const hrEmployees = await prisma.employee.findMany({
+        where: { departmentId: 1, employmentStatus: 'ACTIVE' },
+        select: { id: true },
+      });
+      for (const hr of hrEmployees) {
+        if (hr.id !== employeeId && hr.id !== pendingLeave.employee.inchargeId && hr.id !== pendingLeave.employee.reportingManager) {
+          await createNotification(hr.id, message);
+        }
+      }
+
+      console.log(`✅ Auto-cancelled PENDING leave #${pendingLeave.id} for ${empName}`);
+      return; // Done — no need to check approved leave
+    }
+
+    // ── 2. Cancel APPROVED leave (balance restore needed) ────────
     const leave = await prisma.leaveRequest.findFirst({
       where: {
         employeeId,
@@ -981,5 +1046,7 @@ function getFinancialYear(date: Date): number {
 }
 
 function fmtDate(d: Date): string {
-  return d.toISOString().split('T')[0];
+  // Use IST offset (+5:30) to get correct Indian date
+  const ist = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
+  return ist.toISOString().split('T')[0];
 }

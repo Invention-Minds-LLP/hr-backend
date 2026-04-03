@@ -69,7 +69,7 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     const currentFY = getFinancialYear(new Date());
     // const isAdvanceNextFY = !balance && year === currentFY + 1;
 
-    if (!balance  && lt.name !== "RH") {
+    if (!balance  && (lt.name !== "CO" && lt.name !== "RH")) {
       return res.status(400).json({
         error: `Leave balance not configured for ${year}`
       });
