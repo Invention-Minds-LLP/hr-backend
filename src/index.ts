@@ -98,6 +98,7 @@ const allowedOrigins = [
   'https://localhost',
   'capacitor://localhost',     // Capacitor iOS
   'http://localhost:8100',
+  'http://localhost:8101',
   'https://hrminds.imapps.in',
   'https://hrmindsjmrh.imapps.in',
   'http://localhost:4200',

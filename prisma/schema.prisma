@@ -90,21 +90,21 @@ model Employee {
   ComplaintAcknowledgement ComplaintAcknowledgement[]
   documents                Document[]
   emergencyContacts        EmergencyContact[]
-  Branch                   Branch                     @relation(fields: [branchId], references: [id])
-  Department               Department                 @relation(fields: [departmentId], references: [id])
-  designation              Designation?               @relation(fields: [designationId], references: [id])
-  incharge                 Employee?                  @relation("EmployeeIncharge", fields: [inchargeId], references: [id])
-  subordinates             Employee[]                 @relation("EmployeeIncharge")
-  role                     Role                       @relation(fields: [roleId], references: [id])
-    performedLedgers LeaveLedger[] @relation("LedgerPerformedBy")
+  Branch                   Branch                      @relation(fields: [branchId], references: [id])
+  Department               Department                  @relation(fields: [departmentId], references: [id])
+  designation              Designation?                @relation(fields: [designationId], references: [id])
+  incharge                 Employee?                   @relation("EmployeeIncharge", fields: [inchargeId], references: [id])
+  subordinates             Employee[]                  @relation("EmployeeIncharge")
+  role                     Role                        @relation(fields: [roleId], references: [id])
+  performedLedgers         LeaveLedger[]               @relation("LedgerPerformedBy")
   EmployeeShiftSetting     EmployeeShiftSetting?
   EmployeeSurvey           EmployeeSurvey[]
   evaluations              EvaluationAttempt[]
   ExitInterview            ExitInterview[]
   Grievance                Grievance[]
   GrievanceComment         GrievanceComment[]
-  incidentAsEmployee       Incident[]                 @relation("IncidentEmployee")
-  incidentAsReporter       Incident[]                 @relation("IncidentReporter")
+  incidentAsEmployee       Incident[]                  @relation("IncidentEmployee")
+  incidentAsReporter       Incident[]                  @relation("IncidentReporter")
   Internship               Internship[]
   LateLoginLog             LateLoginLog[]
   leaveRequests            LeaveRequest[]
@@ -114,13 +114,13 @@ model Employee {
   PerformanceResponse      PerformanceResponse[]
   PerformanceSummary       PerformanceSummary[]
   permissions              PermissionRequest[]
-  poshAccusations          PoshCase[]                 @relation("AccusedCases")
-  poshComplaints           PoshCase[]                 @relation("ComplainantCases")
+  poshAccusations          PoshCase[]                  @relation("AccusedCases")
+  poshComplaints           PoshCase[]                  @relation("ComplainantCases")
   qualifications           Qualification[]
   ResignationClearance     ResignationClearance[]
   ResignationRequest       ResignationRequest[]
   shiftApprovals           ShiftApproval[]
-  requestedShiftApprovals  ShiftApproval[]            @relation("ShiftApprovalRequestedBy")
+  requestedShiftApprovals  ShiftApproval[]             @relation("ShiftApprovalRequestedBy")
   shifts                   ShiftAssignment[]
   Training                 Training[]
   TrainingAssignment       TrainingAssignment[]
@@ -144,7 +144,7 @@ model Employee {
   payslips                 Payslip[]
   attendancePunches        AttendancePunch[]
   weeklyPerformanceReports WeeklyPerformanceReport[]
-  weeklyRatings            WeeklyPerformanceRating[] @relation("WeeklyRatingEmployee")
+  weeklyRatings            WeeklyPerformanceRating[]   @relation("WeeklyRatingEmployee")
   incentives               Incentive[]
   loans                    Loan[]
   loanRepayments           LoanRepayment[]
@@ -276,13 +276,13 @@ model Attendance {
   approvedAt         DateTime?
   approvedBy         Int?
   attendanceApproval String?
-  isForcedPresent      Boolean   @default(false)
-  forcePresentId       Int?
-  isPunchCorrected     Boolean   @default(false)
-  punchCorrectionId    Int?
-  isOverridden         Boolean   @default(false)
-  overrideId           Int?
-  employee             Employee  @relation(fields: [employeeId], references: [id])
+  isForcedPresent    Boolean   @default(false)
+  forcePresentId     Int?
+  isPunchCorrected   Boolean   @default(false)
+  punchCorrectionId  Int?
+  isOverridden       Boolean   @default(false)
+  overrideId         Int?
+  employee           Employee  @relation(fields: [employeeId], references: [id])
 
   @@unique([employeeId, date])
   @@index([employeeId, date])
@@ -298,17 +298,17 @@ model AttendanceSyncLog {
 }
 
 model ForcePresentAction {
-  id                 Int          @id @default(autoincrement())
-  employeeId         Int
-  date               DateTime
-  leaveRequestId     Int?
-  daysRestored       Float        @default(1)
-  compOffGranted     Boolean      @default(false)
-  performedBy        Int
-  reason             String
-  createdAt          DateTime     @default(now())
-  employee           Employee     @relation(fields: [employeeId], references: [id])
-  leaveRequest       LeaveRequest? @relation(fields: [leaveRequestId], references: [id])
+  id             Int           @id @default(autoincrement())
+  employeeId     Int
+  date           DateTime
+  leaveRequestId Int?
+  daysRestored   Float         @default(1)
+  compOffGranted Boolean       @default(false)
+  performedBy    Int
+  reason         String
+  createdAt      DateTime      @default(now())
+  employee       Employee      @relation(fields: [employeeId], references: [id])
+  leaveRequest   LeaveRequest? @relation(fields: [leaveRequestId], references: [id])
 }
 
 model PunchCorrectionLog {
@@ -388,16 +388,16 @@ model AppraisalOverrideLog {
 }
 
 model LeaveType {
-  id                   Int                    @id @default(autoincrement())
-  name                 String                 @unique
-  description          String?
-  carryForward         Boolean                @default(false)
-  EmployeeLeaveBalance EmployeeLeaveBalance[]
-  LeaveRequest         LeaveRequest[]
-  policies             LeavePolicy[]
-  leaveAccruals           LeaveAccrual[]
-  leaveLedgers            LeaveLedger[]
-  balanceAdjustmentLogs   LeaveBalanceAdjustmentLog[]
+  id                    Int                         @id @default(autoincrement())
+  name                  String                      @unique
+  description           String?
+  carryForward          Boolean                     @default(false)
+  EmployeeLeaveBalance  EmployeeLeaveBalance[]
+  LeaveRequest          LeaveRequest[]
+  policies              LeavePolicy[]
+  leaveAccruals         LeaveAccrual[]
+  leaveLedgers          LeaveLedger[]
+  balanceAdjustmentLogs LeaveBalanceAdjustmentLog[]
 }
 
 enum HalfDaySession {
@@ -406,38 +406,38 @@ enum HalfDaySession {
 }
 
 model LeaveRequest {
-  id                Int              @id @default(autoincrement())
-  employeeId        Int
-  leaveTypeId       Int
-  startDate         DateTime
-  endDate           DateTime
-  reason            String
-  status            LeaveStatus      @default(PENDING)
-  approvedBy        Int?
-  isHalfDay         Boolean?         @default(false)
-  halfDaySession    HalfDaySession?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @default(now()) @updatedAt
-  declineReason     String?
-  declinedBy        Int?
-  approvedDate      DateTime?
-  declinedDate      DateTime?
-  hodDecidedAt      DateTime?
-  hodDecision       ApprovalDecision @default(PENDING)
-  hodNote           String?
-  hrDecidedAt       DateTime?
-  hrDecision        ApprovalDecision @default(PENDING)
-  hrNote            String?
-  inChargeDecidedAt DateTime?
-  inChargeDecision  ApprovalDecision @default(PENDING)
-  inChargeNote      String?
-   prescriptionUrl   String?
-  cancelledAt       DateTime?
-  cancelledBy       Int?
-  cancellationReason String?
+  id                  Int                  @id @default(autoincrement())
+  employeeId          Int
+  leaveTypeId         Int
+  startDate           DateTime
+  endDate             DateTime
+  reason              String
+  status              LeaveStatus          @default(PENDING)
+  approvedBy          Int?
+  isHalfDay           Boolean?             @default(false)
+  halfDaySession      HalfDaySession?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @default(now()) @updatedAt
+  declineReason       String?
+  declinedBy          Int?
+  approvedDate        DateTime?
+  declinedDate        DateTime?
+  hodDecidedAt        DateTime?
+  hodDecision         ApprovalDecision     @default(PENDING)
+  hodNote             String?
+  hrDecidedAt         DateTime?
+  hrDecision          ApprovalDecision     @default(PENDING)
+  hrNote              String?
+  inChargeDecidedAt   DateTime?
+  inChargeDecision    ApprovalDecision     @default(PENDING)
+  inChargeNote        String?
+  prescriptionUrl     String?
+  cancelledAt         DateTime?
+  cancelledBy         Int?
+  cancellationReason  String?
   forcePresentActions ForcePresentAction[]
-  employee          Employee         @relation(fields: [employeeId], references: [id])
-  leaveType         LeaveType        @relation(fields: [leaveTypeId], references: [id])
+  employee            Employee             @relation(fields: [employeeId], references: [id])
+  leaveType           LeaveType            @relation(fields: [leaveTypeId], references: [id])
 
   @@index([employeeId])
   @@index([leaveTypeId])
@@ -623,31 +623,60 @@ model AssignedTest {
 }
 
 model AppraisalForm {
-  id            Int               @id @default(autoincrement())
+  id            Int      @id @default(autoincrement())
   employeeId    Int
   cycle         String
-  status        String
+  status        String   @default("AUTO_DRAFT")
   overallScore  Float?
   finalDecision String?
   finalComments String?
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @default(now()) @updatedAt
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @default(now()) @updatedAt
   managerId     Int?
-  employee      Employee          @relation(fields: [employeeId], references: [id])
+
+  // New fields for enhanced flow
+  appraisalStartDate          DateTime?
+  appraisalEndDate            DateTime?
+  dueDate                     DateTime?
+  hrVerifiedBy                Int?
+  hrVerifiedAt                DateTime?
+  selfAppraisalSubmittedAt    DateTime?
+  managerAppraisalSubmittedAt DateTime?
+  hrReviewComments            String?   @db.Text
+  hrRecommendations           String?   @db.Text
+  hrApprovedBy                Int?
+  hrApprovedAt                DateTime?
+
+  employee      Employee               @relation(fields: [employeeId], references: [id])
   hrReview      HRAppraisal?
   managerReview ManagerAppraisal?
   selfAppraisal SelfAppraisal?
+  selfAnswers   SelfAppraisalAnswer[]
+  editRequests  AppraisalEditRequest[]
+  editHistory   AppraisalEditHistory[]
 
   @@index([employeeId], map: "AppraisalForm_employeeId_fkey")
+  @@index([status])
+}
+
+model SelfAppraisalQuestion {
+  id           Int      @id @default(autoincrement())
+  text         String
+  category     String?
+  displayOrder Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  answers SelfAppraisalAnswer[]
 }
 
 model SelfAppraisal {
   id              Int           @id @default(autoincrement())
   appraisalFormId Int           @unique
-  achievements    String?
-  goalsObjective  String?
-  challenges      String?
-  trainingNeeds   String?
+  achievements    String?       @db.Text
+  goalsObjective  String?       @db.Text
+  challenges      String?       @db.Text
+  trainingNeeds   String?       @db.Text
   communication   Float?
   teamwork        Float?
   problemSolving  Float?
@@ -659,11 +688,61 @@ model SelfAppraisal {
   appraisalForm   AppraisalForm @relation(fields: [appraisalFormId], references: [id])
 }
 
+model SelfAppraisalAnswer {
+  id              Int      @id @default(autoincrement())
+  appraisalFormId Int
+  questionId      Int
+  rating          Float?
+  comments        String?  @db.Text
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+
+  appraisalForm AppraisalForm         @relation(fields: [appraisalFormId], references: [id])
+  question      SelfAppraisalQuestion @relation(fields: [questionId], references: [id])
+
+  @@unique([appraisalFormId, questionId])
+  @@index([appraisalFormId])
+  @@index([questionId])
+}
+
+model AppraisalEditRequest {
+  id              Int       @id @default(autoincrement())
+  appraisalFormId Int
+  requestedBy     Int
+  requestedAt     DateTime  @default(now())
+  reason          String    @db.Text
+  requestType     String // SELF, MANAGER
+  status          String    @default("PENDING") // PENDING, APPROVED, REJECTED
+  approvedBy      Int?
+  approvedAt      DateTime?
+  rejectionReason String?
+
+  appraisalForm AppraisalForm @relation(fields: [appraisalFormId], references: [id])
+
+  @@index([appraisalFormId])
+}
+
+model AppraisalEditHistory {
+  id              Int      @id @default(autoincrement())
+  appraisalFormId Int
+  editedBy        Int
+  editedAt        DateTime @default(now())
+  editType        String // SELF_APPRAISAL, MANAGER_APPRAISAL
+  previousValues  Json
+  newValues       Json
+  editReason      String?
+  approvedBy      Int?
+
+  appraisalForm AppraisalForm @relation(fields: [appraisalFormId], references: [id])
+
+  @@index([appraisalFormId])
+}
+
 model ManagerAppraisal {
   id                     Int           @id @default(autoincrement())
   appraisalFormId        Int           @unique
-  comments               String?
-  recommendations        String?
+  comments               String?       @db.LongText
+  recommendations        String?       @db.LongText
   communication          Float?
   teamwork               Float?
   problemSolving         Float?
@@ -672,23 +751,23 @@ model ManagerAppraisal {
   overallScore           Float?
   createdAt              DateTime      @default(now())
   updatedAt              DateTime      @default(now()) @updatedAt
-  attendanceComments     String?
+  attendanceComments     String?       @db.LongText
   attendanceRating       Float?
-  guestServiceComments   String?
+  guestServiceComments   String?       @db.LongText
   guestServiceRating     Float?
-  independenceComments   String?
+  independenceComments   String?       @db.LongText
   independenceRating     Float?
-  knowledgeOfJobComments String?
+  knowledgeOfJobComments String?       @db.LongText
   knowledgeOfJobRating   Float?
-  leadershipComments     String?
+  leadershipComments     String?       @db.LongText
   leadershipRating       Float?
-  qualityOfWorkComments  String?
+  qualityOfWorkComments  String?       @db.LongText
   qualityOfWorkRating    Float?
-  recordsComments        String?
+  recordsComments        String?       @db.LongText
   recordsRating          Float?
-  safetyComments         String?
+  safetyComments         String?       @db.LongText
   safetyRating           Float?
-  teamworkComments       String?
+  teamworkComments       String?       @db.LongText
   teamworkRating         Float?
   appraisalForm          AppraisalForm @relation(fields: [appraisalFormId], references: [id])
 }
@@ -1384,7 +1463,7 @@ model ManpowerRequisition {
   vacancies             Int?
   minExperience         Int?
   maxExperience         Int?
-  skills                String? @db.LongText
+  skills                String?   @db.LongText
   education             String?
   training              String?
   reasonBreakdown       Json?
@@ -1444,7 +1523,7 @@ model Grievance {
   id                       Int                        @id @default(autoincrement())
   employeeId               Int
   title                    String
-  description              String @db.LongText
+  description              String                     @db.LongText
   category                 String?
   status                   GrievanceStatus            @default(OPEN)
   createdAt                DateTime                   @default(now())
@@ -1461,7 +1540,7 @@ model GrievanceComment {
   id          Int       @id @default(autoincrement())
   grievanceId Int
   employeeId  Int
-  comment     String @db.LongText
+  comment     String    @db.LongText
   createdAt   DateTime  @default(now())
   employee    Employee  @relation(fields: [employeeId], references: [id])
   grievance   Grievance @relation(fields: [grievanceId], references: [id])
@@ -1474,9 +1553,9 @@ model PoshCase {
   id                       Int                        @id @default(autoincrement())
   complainantId            Int
   accusedId                Int
-  description              String @db.LongText
+  description              String                     @db.LongText
   status                   PoshStatus                 @default(FILED)
-  committeeNote            String? @db.LongText
+  committeeNote            String?                    @db.LongText
   createdAt                DateTime                   @default(now())
   updatedAt                DateTime                   @default(now()) @updatedAt
   ComplaintAcknowledgement ComplaintAcknowledgement[]
@@ -1493,8 +1572,8 @@ model PoshHearing {
   id        Int      @id @default(autoincrement())
   poshId    Int
   date      DateTime
-  notes     String? @db.LongText
-  outcome   String? @db.LongText
+  notes     String?  @db.LongText
+  outcome   String?  @db.LongText
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
   poshCase  PoshCase @relation(fields: [poshId], references: [id])
@@ -1505,7 +1584,7 @@ model PoshHearing {
 model Training {
   id                 Int                  @id @default(autoincrement())
   title              String
-  description        String? @db.LongText
+  description        String?              @db.LongText
   objectives         String?              @db.Text
   trainerType        String?
   trainerId          Int?
@@ -1576,7 +1655,7 @@ model TrainingFeedback {
   trainingId     Int
   employeeId     Int
   rating         Int?
-  feedback       String? @db.LongText
+  feedback       String?  @db.LongText
   trainerRating  Int?
   contentQuality Int?
   relevance      Int?
@@ -1614,7 +1693,7 @@ model EmployeeLeaveBalance {
   permissionType PermissionType?
   category       BalanceCategory
   year           Int
-  isUnlimited    Boolean?         @default(false)
+  isUnlimited    Boolean?        @default(false)
   totalAllowed   Float           @default(0)
   used           Float           @default(0)
   halfDayUsed    Float?          @default(0)
@@ -1945,8 +2024,8 @@ model LeaveLedger {
 
   createdAt DateTime @default(now())
 
-  employee  Employee  @relation(fields: [employeeId], references: [id])
-  leaveType LeaveType @relation(fields: [leaveTypeId], references: [id])
+  employee        Employee  @relation(fields: [employeeId], references: [id])
+  leaveType       LeaveType @relation(fields: [leaveTypeId], references: [id])
   performedByUser Employee? @relation("LedgerPerformedBy", fields: [performedBy], references: [id])
 
   @@index([employeeId])
@@ -2004,8 +2083,8 @@ model LeavePolicy {
   accrualBasedOn      String?
   workingDaysRequired Int?
 
-  isActive            Boolean @default(true)
-  createdBy Int?
+  isActive           Boolean @default(true)
+  createdBy          Int?
   financialYearStart Int? // e.g. 2025
 
   // LIMITS
@@ -2364,22 +2443,22 @@ enum BalanceCategory {
 // ─── Payroll ────────────────────────────────────────────────────────────────
 
 model SalaryStructure {
-  id                Int      @id @default(autoincrement())
-  employeeId        Int      @unique
-  basic             Float    @default(0)
-  hra               Float    @default(0)
-  medicalAllowance  Float    @default(0)
-  travelAllowance   Float    @default(0)
-  specialAllowance  Float    @default(0)
-  otherAllowances   Float    @default(0)
-  pfApplicable      Boolean  @default(true)
-  esiApplicable     Boolean  @default(true)
-  ptApplicable      Boolean  @default(true)
-  tdsMonthly        Float    @default(0)
-  effectiveFrom     DateTime @default(now())
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @default(now()) @updatedAt
-  employee          Employee @relation(fields: [employeeId], references: [id])
+  id               Int      @id @default(autoincrement())
+  employeeId       Int      @unique
+  basic            Float    @default(0)
+  hra              Float    @default(0)
+  medicalAllowance Float    @default(0)
+  travelAllowance  Float    @default(0)
+  specialAllowance Float    @default(0)
+  otherAllowances  Float    @default(0)
+  pfApplicable     Boolean  @default(true)
+  esiApplicable    Boolean  @default(true)
+  ptApplicable     Boolean  @default(true)
+  tdsMonthly       Float    @default(0)
+  effectiveFrom    DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @default(now()) @updatedAt
+  employee         Employee @relation(fields: [employeeId], references: [id])
 
   @@index([employeeId])
 }
@@ -2441,8 +2520,8 @@ model Payslip {
 model AttendancePunch {
   id           Int      @id @default(autoincrement())
   employeeId   Int
-  type         String   // CHECK_IN, CHECK_OUT
-  activityType String   // OFFICE, CLIENT_VISIT, FIELD_WORK
+  type         String // CHECK_IN, CHECK_OUT
+  activityType String // OFFICE, CLIENT_VISIT, FIELD_WORK
   timestamp    DateTime @default(now())
   latitude     Float
   longitude    Float
@@ -2457,43 +2536,43 @@ model AttendancePunch {
 }
 
 model WeeklyPerformanceReport {
-  id                Int                @id @default(autoincrement())
-  employeeId        Int
-  weekStartDate     DateTime
-  weekEndDate       DateTime
-  weekLabel         String?
-  status            WeeklyReportStatus @default(DRAFT)
-  employeeSummary   String?            @db.Text
+  id              Int                @id @default(autoincrement())
+  employeeId      Int
+  weekStartDate   DateTime
+  weekEndDate     DateTime
+  weekLabel       String?
+  status          WeeklyReportStatus @default(DRAFT)
+  employeeSummary String?            @db.Text
 
-  inChargeDecision  ApprovalDecision   @default(PENDING)
+  inChargeDecision  ApprovalDecision @default(PENDING)
   inChargeDecidedAt DateTime?
-  inChargeNote      String?            @db.Text
+  inChargeNote      String?          @db.Text
   inChargeRating    Int?
 
-  hodDecision       ApprovalDecision   @default(PENDING)
-  hodDecidedAt      DateTime?
-  hodNote           String?            @db.Text
-  hodRating         Int?
+  hodDecision  ApprovalDecision @default(PENDING)
+  hodDecidedAt DateTime?
+  hodNote      String?          @db.Text
+  hodRating    Int?
 
-  hrDecision        ApprovalDecision   @default(PENDING)
-  hrDecidedAt       DateTime?
-  hrNote            String?            @db.Text
-  hrRating          Int?
+  hrDecision  ApprovalDecision @default(PENDING)
+  hrDecidedAt DateTime?
+  hrNote      String?          @db.Text
+  hrRating    Int?
 
-  approvedBy        Int?
-  approvedDate      DateTime?
-  declinedBy        Int?
-  declinedDate      DateTime?
-  declineReason     String?
+  approvedBy    Int?
+  approvedDate  DateTime?
+  declinedBy    Int?
+  declinedDate  DateTime?
+  declineReason String?
 
-  submittedAt       DateTime?
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @default(now()) @updatedAt
+  submittedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
 
-  previousWeekId    Int?
+  previousWeekId Int?
 
-  employee          Employee           @relation(fields: [employeeId], references: [id])
-  dailyTasks        WeeklyTaskEntry[]
+  employee   Employee          @relation(fields: [employeeId], references: [id])
+  dailyTasks WeeklyTaskEntry[]
 
   @@unique([employeeId, weekStartDate])
   @@index([employeeId])
@@ -2502,25 +2581,25 @@ model WeeklyPerformanceReport {
 }
 
 model WeeklyTaskEntry {
-  id                 Int                     @id @default(autoincrement())
+  id                 Int             @id @default(autoincrement())
   reportId           Int
   taskDate           DateTime
-  taskDescription    String                  @db.Text
+  taskDescription    String          @db.Text
   category           String?
-  priority           TaskPriority            @default(MEDIUM)
-  taskStatus         DailyTaskStatus         @default(NOT_STARTED)
-  percentComplete    Int                     @default(0)
+  priority           TaskPriority    @default(MEDIUM)
+  taskStatus         DailyTaskStatus @default(NOT_STARTED)
+  percentComplete    Int             @default(0)
   assignedById       Int?
   deadline           DateTime?
   completionDate     DateTime?
-  remarks            String?                 @db.Text
-  isCarriedForward   Boolean                 @default(false)
+  remarks            String?         @db.Text
+  isCarriedForward   Boolean         @default(false)
   carriedFromEntryId Int?
 
-  createdAt          DateTime                @default(now())
-  updatedAt          DateTime                @default(now()) @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 
-  report             WeeklyPerformanceReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  report WeeklyPerformanceReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
 
   @@index([reportId])
   @@index([taskDate])
@@ -2528,16 +2607,16 @@ model WeeklyTaskEntry {
 }
 
 model WeeklyRatingQuestion {
-  id            Int          @id @default(autoincrement())
+  id            Int      @id @default(autoincrement())
   text          String
-  isDefault     Boolean      @default(false)
-  isActive      Boolean      @default(true)
-  displayOrder  Int          @default(0)
+  isDefault     Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  displayOrder  Int      @default(0)
   designationId Int?
   createdBy     Int?
-  createdAt     DateTime     @default(now())
+  createdAt     DateTime @default(now())
 
-  designation Designation? @relation(fields: [designationId], references: [id])
+  designation Designation?         @relation(fields: [designationId], references: [id])
   answers     WeeklyRatingAnswer[]
 
   @@index([designationId])
@@ -2570,7 +2649,7 @@ model WeeklyRatingAnswer {
   id         Int     @id @default(autoincrement())
   ratingId   Int
   questionId Int
-  score      Int     // 1-10
+  score      Int // 1-10
   remarks    String?
 
   rating   WeeklyPerformanceRating @relation(fields: [ratingId], references: [id], onDelete: Cascade)
@@ -2584,13 +2663,13 @@ model WeeklyRatingAnswer {
 model Incentive {
   id            Int       @id @default(autoincrement())
   employeeId    Int
-  type          String    // BONUS, PERFORMANCE, FESTIVAL, REFERRAL, OTHER
+  type          String // BONUS, PERFORMANCE, FESTIVAL, REFERRAL, OTHER
   amount        Float
   description   String?   @db.Text
   effectiveDate DateTime
   paidOn        DateTime?
   status        String    @default("PENDING") // PENDING, APPROVED, PAID, CANCELLED, REJECTED
-  requestedBy   Int?      // manager who requested
+  requestedBy   Int? // manager who requested
   approvedBy    Int?
   approvedAt    DateTime?
   rejectedBy    Int?
@@ -2609,24 +2688,24 @@ model Incentive {
 }
 
 model Loan {
-  id              Int       @id @default(autoincrement())
-  employeeId      Int
-  loanType        String    // SALARY_ADVANCE, PERSONAL, EMERGENCY, OTHER
-  principalAmount Float
-  interestRate    Float     @default(0)
-  tenure          Int       // months
-  emiAmount       Float
-  totalRepaid     Float     @default(0)
+  id                 Int       @id @default(autoincrement())
+  employeeId         Int
+  loanType           String // SALARY_ADVANCE, PERSONAL, EMERGENCY, OTHER
+  principalAmount    Float
+  interestRate       Float     @default(0)
+  tenure             Int // months
+  emiAmount          Float
+  totalRepaid        Float     @default(0)
   outstandingBalance Float
-  status          String    @default("PENDING") // PENDING, APPROVED, ACTIVE, CLOSED, REJECTED
-  appliedOn       DateTime  @default(now())
-  approvedBy      Int?
-  approvedAt      DateTime?
-  disbursedOn     DateTime?
-  reason          String?   @db.Text
-  remarks         String?   @db.Text
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @default(now()) @updatedAt
+  status             String    @default("PENDING") // PENDING, APPROVED, ACTIVE, CLOSED, REJECTED
+  appliedOn          DateTime  @default(now())
+  approvedBy         Int?
+  approvedAt         DateTime?
+  disbursedOn        DateTime?
+  reason             String?   @db.Text
+  remarks            String?   @db.Text
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @default(now()) @updatedAt
 
   employee   Employee        @relation(fields: [employeeId], references: [id])
   repayments LoanRepayment[]
@@ -2641,7 +2720,7 @@ model LoanRepayment {
   employeeId Int
   amount     Float
   paidOn     DateTime
-  mode       String?  // SALARY_DEDUCTION, CASH, BANK_TRANSFER
+  mode       String? // SALARY_DEDUCTION, CASH, BANK_TRANSFER
   remarks    String?
   createdAt  DateTime @default(now())
 

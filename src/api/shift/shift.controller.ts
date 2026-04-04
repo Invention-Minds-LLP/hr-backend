@@ -2051,11 +2051,11 @@ export const requestMonthlyShift = async (
     const hasIncharge = !!employee.inchargeId;
 
     if (hasIncharge && requesterId !== employee.inchargeId) {
-      return res.status(403).json({ error: 'Only in-charge can request monthly shift' });
+      return res.status(400).json({ error: 'Only in-charge can request monthly shift' });
     }
 
     if (!hasIncharge && requesterId !== employee.reportingManager) {
-      return res.status(403).json({ error: 'Only reporting manager can request monthly shift' });
+      return res.status(400).json({ error: 'Only reporting manager can request monthly shift' });
     }
 
     /* -----------------------------

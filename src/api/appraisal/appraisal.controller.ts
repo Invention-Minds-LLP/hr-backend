@@ -249,7 +249,8 @@ export const getAllAppraisalsWithManagerReview = async (req: Request, res: Respo
             photoUrl: true
           }
         },
-        managerReview: true // include ONLY ManagerAppraisal
+        managerReview: true,
+        editRequests: { where: { status: "PENDING" }, select: { id: true, requestType: true, status: true } },
       },
       orderBy: { createdAt: "desc" }
     });
