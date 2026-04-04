@@ -6,18 +6,20 @@ import { startShiftCron } from "../api/shift/shift.controller";
 import cron from 'node-cron';
 import { runBiometricSync } from "../api/biometric/biometric.controller";
 import { initFinancialYearRolloverCron, initELAccrualCron, initNewJoineeLeaveAllocationCron } from "../api/leave/leave.controller";
+import { initAppraisalAutoDraftCron } from "../api/appraisal/appraisal-v2.controller";
 
 export async function startSchedulers() {
   initSurveyScheduler();
   initNoticePeriodSchedular();
   initLeaveEndScheduler();
   // initQuarterlyAppraisalScheduler();
+  initAppraisalAutoDraftCron();
   startShiftCron();
   // sendAppraisalCountReminders();
   startAttendanceScheduler();
   // await runBiometricBackfill();
 
-    initELAccrualCron();
+  initELAccrualCron();
   initFinancialYearRolloverCron();
   initNewJoineeLeaveAllocationCron();
 }
@@ -72,8 +74,14 @@ const schedules = [
   '02 20 * * *',
   '20 20 * * *',
 
-  //21
-  '* 21 * * *',
+  '02 21 * * *',
+  '20 21 * * *',
+
+
+  //22
+  '* 22 * * *',
+
+
 
 ];
 
@@ -81,7 +89,7 @@ const schedules = [
 export function startAttendanceScheduler() {
   for (const schedule of schedules) {
     cron.schedule(schedule, async () => {
-      const isFinalRun = schedule === '* 21 * * *';
+      const isFinalRun = schedule === '* 22 * * *';
 
       console.log(
         `[CRON] Attendance sync triggered | ${schedule} | Final: ${isFinalRun}`
