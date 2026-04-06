@@ -76,7 +76,7 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     }
 
     // const year = start.getFullYear();
-    const requestedUnits = isHalfDay ? 0.5 : daysInclusive(start, end);
+    const requestedUnits = isHalfDay ? 0.5 : await countWorkingDays(employeeId, start, end);
     if (isHalfDay && !isSameDate(new Date(startDate), new Date(endDate))) {
       return res.status(400).json({ error: "Half-day must be a single date" });
     }
@@ -1433,7 +1433,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
         const endDate = new Date(updatedLeave.endDate);
 
         const year = getFinancialYear(startDate);
-        const requestedUnits = updatedLeave.isHalfDay ? 0.5 : daysInclusive(startDate, endDate);
+        const requestedUnits = updatedLeave.isHalfDay ? 0.5 : await countWorkingDays(updatedLeave.employeeId, startDate, endDate);
 
         // ---- CO: consume credits only (leave balance untouched)
         if (updatedLeave.leaveType.name === "CO") {
@@ -1523,7 +1523,12 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
         let runningBalance = ledgerBalance;
 
         for (const m of touched) {
-          const days = calculateDaysForMonth(startDate, endDate, m.year, m.month);
+          const calYear = getCalendarYear(m.year, m.month);
+          const monthStart = new Date(calYear, m.month - 1, 1);
+          const monthEnd = new Date(calYear, m.month, 0);
+          const from = startDate > monthStart ? startDate : monthStart;
+          const to = endDate < monthEnd ? endDate : monthEnd;
+          const days = await countWorkingDays(updatedLeave.employeeId, from, to);
           if (days <= 0) continue;
 
           runningBalance -= days;
@@ -1867,6 +1872,67 @@ export function daysInclusive(s: Date, e: Date) {
   const ss = new Date(s); ss.setHours(0, 0, 0, 0);
   const ee = new Date(e); ee.setHours(0, 0, 0, 0);
   return Math.floor((ee.getTime() - ss.getTime()) / MS_PER_DAY) + 1;
+}
+
+// Counts working days between start and end (inclusive), excluding:
+//   - week-offs (per employee shift config, fallback Sunday)
+//   - mandatory national holidays (isOptional = false)
+// Optional holidays (RH) are still counted as working days.
+export async function countWorkingDays(employeeId: number, start: Date, end: Date): Promise<number> {
+  if (start > end) return 0;
+
+  // Fetch all mandatory holidays in the date range once
+  const mandatoryHolidays = await prisma.holiday.findMany({
+    where: {
+      isOptional: false,
+      date: { gte: start, lte: end }
+    },
+    select: { date: true }
+  });
+
+  const holidaySet = new Set(
+    mandatoryHolidays.map(h => {
+      const d = new Date(h.date);
+      d.setHours(0, 0, 0, 0);
+      return d.toISOString().slice(0, 10);
+    })
+  );
+
+  const monthConfigs = new Map<string, any>();
+  let total = 0;
+
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    const current = new Date(d);
+    current.setHours(0, 0, 0, 0);
+    const dateKey = current.toISOString().slice(0, 10);
+
+    // Skip mandatory national holidays
+    if (holidaySet.has(dateKey)) continue;
+
+    const month = current.getMonth() + 1;
+    const year = current.getFullYear();
+    const monthKey = `${year}-${month}`;
+
+    if (!monthConfigs.has(monthKey)) {
+      const approval = await prisma.shiftApproval.findFirst({
+        where: {
+          employeeId,
+          month,
+          year,
+          status: "APPROVED",
+          weekOffConfig: { not: Prisma.DbNull }
+        }
+      });
+      monthConfigs.set(monthKey, approval?.weekOffConfig ?? null);
+    }
+
+    const config = monthConfigs.get(monthKey);
+    if (!isWeeklyOffFromConfig(config, current)) {
+      total++;
+    }
+  }
+
+  return total;
 }
 
 export async function getLeaveDashboard(req: Request, res: Response) {
@@ -2929,23 +2995,6 @@ async function getLastLedgerBalanceTx(
     select: { balanceAfter: true },
   });
   return last?.balanceAfter ?? 0;
-}
-function calculateDaysForMonth(
-  start: Date,
-  end: Date,
-  year: number,
-  month: number
-) {
-  const calYear = getCalendarYear(year, month);
-
-  const monthStart = new Date(calYear, month - 1, 1);
-  const monthEnd = new Date(calYear, month, 0);
-
-
-  const from = start > monthStart ? start : monthStart;
-  const to = end < monthEnd ? end : monthEnd;
-
-  return daysInclusive(from, to);
 }
 
 
