@@ -57,18 +57,25 @@ export const getQuestionsForEmployee = async (req: Request, res: Response) => {
 
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
+    const where: any = {
+      isActive: true,
+      OR: [{ designationId: null, isDefault: true }],
+    };
+
+    // Only add designation filter if employee actually has one assigned
+    if (emp.designationId) {
+      where.OR.push({ designationId: emp.designationId });
+    }
+
     const questions = await prisma.weeklyRatingQuestion.findMany({
-      where: {
-        isActive: true,
-        OR: [
-          { designationId: null, isDefault: true },
-          { designationId: emp.designationId },
-        ],
-      },
+      where,
       orderBy: [{ isDefault: "desc" }, { displayOrder: "asc" }],
     });
 
-    return res.json(questions);
+    return res.json({
+      designationId: emp.designationId ?? null,
+      questions,
+    });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
@@ -80,12 +87,15 @@ export const createQuestion = async (req: Request, res: Response) => {
     if (!text?.trim()) return res.status(400).json({ error: "Question text is required" });
     if (!designationId) return res.status(400).json({ error: "Designation is required for custom questions" });
 
-    // Check max 10 active questions per designation (5 default + 5 custom)
+    // Check max 10 active questions total (defaults + custom for this designation)
+    const activeDefaults = await prisma.weeklyRatingQuestion.count({
+      where: { isDefault: true, isActive: true },
+    });
     const activeCustom = await prisma.weeklyRatingQuestion.count({
       where: { designationId: Number(designationId), isActive: true },
     });
-    if (activeCustom >= 5) {
-      return res.status(400).json({ error: "Maximum 5 custom questions per designation allowed" });
+    if (activeDefaults + activeCustom >= 10) {
+      return res.status(400).json({ error: "Maximum 10 questions allowed (default + custom combined)" });
     }
 
     const maxOrder = await prisma.weeklyRatingQuestion.aggregate({ _max: { displayOrder: true } });
@@ -115,11 +125,14 @@ export const toggleQuestion = async (req: Request, res: Response) => {
     if (!q) return res.status(404).json({ error: "Question not found" });
 
     if (isActive && q.designationId) {
+      const activeDefaults = await prisma.weeklyRatingQuestion.count({
+        where: { isDefault: true, isActive: true },
+      });
       const activeCustom = await prisma.weeklyRatingQuestion.count({
         where: { designationId: q.designationId, isActive: true },
       });
-      if (activeCustom >= 5) {
-        return res.status(400).json({ error: "Maximum 5 custom questions per designation allowed" });
+      if (activeDefaults + activeCustom >= 10) {
+        return res.status(400).json({ error: "Maximum 10 questions allowed (default + custom combined)" });
       }
     }
 
@@ -215,6 +228,10 @@ export const submitRating = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "employeeId, ratedBy, weekStartDate, weekEndDate, answers are required" });
     }
 
+    if (answers.length > 10) {
+      return res.status(400).json({ error: "Maximum 10 questions allowed per rating" });
+    }
+
     // Validate scores 1-10
     for (const a of answers) {
       if (!a.questionId || a.score < 1 || a.score > 10) {
@@ -224,7 +241,8 @@ export const submitRating = async (req: Request, res: Response) => {
 
     const start = new Date(weekStartDate);
     const end = new Date(weekEndDate);
-    const overallScore = Math.round((answers.reduce((sum: number, a: any) => sum + a.score, 0) / answers.length) * 10) / 10;
+    // overallScore out of 100: each question contributes equally (100/n points max)
+    const overallScore = Math.round((answers.reduce((sum: number, a: any) => sum + a.score, 0) / answers.length) * 10);
 
     // Upsert rating
     const existing = await prisma.weeklyPerformanceRating.findUnique({

@@ -148,6 +148,9 @@ model Employee {
   incentives               Incentive[]
   loans                    Loan[]
   loanRepayments           LoanRepayment[]
+  pips                     EmployeePIP[]
+  pipEmailLogs             PIPEmailLog[]
+  pipResponses             PIPEmployeeResponse[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -2728,5 +2731,138 @@ model LoanRepayment {
   employee Employee @relation(fields: [employeeId], references: [id])
 
   @@index([loanId])
+  @@index([employeeId])
+}
+
+// ─── PIP (Performance Improvement Plan) ────────────────────────────────────
+
+enum PIPStatus {
+  WARNING_ISSUED
+  PIP_ACTIVE
+  PIP_EXTENDED
+  PIP_CLOSED_IMPROVED
+  TERMINATION_INITIATED
+  TERMINATED
+}
+
+enum PIPTemplateType {
+  WARNING
+  PIP_INITIATION
+  PIP_WEEKLY_REVIEW
+  PIP_EXTENSION
+  PIP_CLOSURE
+  TERMINATION_NOTICE
+}
+
+model PIPEmailTemplate {
+  id        Int             @id @default(autoincrement())
+  name      String
+  type      PIPTemplateType
+  subject   String
+  body      String          @db.LongText
+  cc        String?
+  bcc       String?
+  isActive  Boolean         @default(true)
+  createdBy Int?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  logs PIPEmailLog[]
+}
+
+model EmployeePIP {
+  id               Int       @id @default(autoincrement())
+  pipNumber        String?   @unique
+  employeeId       Int
+  triggerScore     Float
+  triggerMonth     String
+  status           PIPStatus @default(WARNING_ISSUED)
+  targets          Json?
+  trainingIds      Json?
+  pipStartDate     DateTime?
+  pipEndDate       DateTime?
+  extendedCount    Int       @default(0)
+  warningDate      DateTime?
+  responseDeadline DateTime?
+  noticePeriodDays Int?
+  terminationReason String?  @db.Text
+  remarks          String?   @db.Text
+  initiatedBy      Int
+  closedAt         DateTime?
+  closedBy         Int?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  employee      Employee               @relation(fields: [employeeId], references: [id])
+  weeklyReviews PIPWeeklyReview[]
+  emailLogs     PIPEmailLog[]
+  responses     PIPEmployeeResponse[]
+
+  @@index([employeeId])
+  @@index([status])
+  @@index([triggerMonth])
+}
+
+model PIPWeeklyReview {
+  id          Int      @id @default(autoincrement())
+  pipId       Int
+  weekNumber  Int
+  reviewDate  DateTime
+  weeklyScore Float?
+  status      String
+  remarks     String?  @db.Text
+  reviewedBy  Int
+  createdAt   DateTime @default(now())
+
+  pip EmployeePIP @relation(fields: [pipId], references: [id])
+
+  @@index([pipId])
+}
+
+model PIPEmailLog {
+  id            Int      @id @default(autoincrement())
+  pipId         Int?
+  employeeId    Int
+  templateId    Int?
+  sentTo        String
+  subject       String
+  body          String   @db.LongText
+  sentBy        Int
+  sentAt        DateTime @default(now())
+  status        String   @default("SENT")
+  errorMessage  String?  @db.Text
+  responseToken String?  @unique
+
+  pip      EmployeePIP?      @relation(fields: [pipId], references: [id])
+  template PIPEmailTemplate? @relation(fields: [templateId], references: [id])
+  employee Employee          @relation(fields: [employeeId], references: [id])
+
+  @@index([pipId])
+  @@index([employeeId])
+  @@index([sentAt])
+}
+
+enum PIPResponseMethod {
+  EMAIL_LINK
+  HR_LOGGED
+  EMPLOYEE_SELF
+}
+
+model PIPEmployeeResponse {
+  id             Int                @id @default(autoincrement())
+  pipId          Int
+  employeeId     Int
+  method         PIPResponseMethod
+  responseText   String             @db.Text
+  tokenUsed      String?
+  respondedAt    DateTime           @default(now())
+  acknowledgedBy Int?
+  acknowledgedAt DateTime?
+  createdAt      DateTime           @default(now())
+
+  pip      EmployeePIP @relation(fields: [pipId], references: [id])
+  employee Employee    @relation(fields: [employeeId], references: [id])
+
+  @@index([pipId])
   @@index([employeeId])
 }
