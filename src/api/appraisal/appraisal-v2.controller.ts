@@ -5,11 +5,28 @@ import { createNotification } from "../notifications/notifications.controller";
 // ═══════════════════════════════════════════════════════════════════════════════
 // SELF-APPRAISAL QUESTIONS (Master)
 // ═══════════════════════════════════════════════════════════════════════════════
-export const getSelfAppraisalQuestions = async (_req: Request, res: Response) => {
+export const getSelfAppraisalQuestions = async (req: Request, res: Response) => {
   try {
+    const appraisalId = req.query.appraisalId ? Number(req.query.appraisalId) : null;
+
+    let employeeType: string | null = null;
+
+    if (appraisalId) {
+      const appraisal = await prisma.appraisalForm.findUnique({
+        where: { id: appraisalId },
+        include: { employee: { select: { employeeType: true } } },
+      });
+      employeeType = appraisal?.employee?.employeeType?.toUpperCase() ?? null;
+    }
+
     const questions = await prisma.selfAppraisalQuestion.findMany({
+      where: {
+        isActive: true,
+        ...(employeeType ? { category: employeeType } : {}),
+      },
       orderBy: { displayOrder: "asc" },
     });
+
     return res.json(questions);
   } catch (e: any) {
     return res.status(500).json({ error: e.message });
@@ -18,7 +35,7 @@ export const getSelfAppraisalQuestions = async (_req: Request, res: Response) =>
 
 export const createSelfAppraisalQuestion = async (req: Request, res: Response) => {
   try {
-    const { text, category } = req.body;
+    const { text, category, section } = req.body;
     if (!text?.trim()) return res.status(400).json({ error: "Question text required" });
 
     const maxOrder = await prisma.selfAppraisalQuestion.aggregate({ _max: { displayOrder: true } });
@@ -26,6 +43,7 @@ export const createSelfAppraisalQuestion = async (req: Request, res: Response) =
       data: {
         text: text.trim(),
         category: category || null,
+        section: section || null,
         displayOrder: (maxOrder._max.displayOrder ?? 0) + 1,
       },
     });
@@ -153,9 +171,11 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
 
     // Update status if not saving as draft
     if (!isDraft) {
-      // Check if manager already submitted — if so, both done → HR_REVIEW
+      // All three must submit → HR_REVIEW
       const managerAlreadySubmitted = !!appraisal.managerAppraisalSubmittedAt;
-      const newStatus = managerAlreadySubmitted ? "HR_REVIEW" : "PENDING_FILL";
+      const managementAlreadySubmitted = !!appraisal.managementAppraisalSubmittedAt;
+      const allSubmitted = managerAlreadySubmitted && managementAlreadySubmitted;
+      const newStatus = allSubmitted ? "HR_REVIEW" : "PENDING_FILL";
 
       await prisma.appraisalForm.update({
         where: { id },
@@ -185,14 +205,13 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
         select: { id: true },
       });
 
-      if (managerAlreadySubmitted) {
-        // Both done — notify HR to review
+      if (allSubmitted) {
         for (const hr of hrEmployees) {
-          await createNotification(hr.id, `Both self-appraisal and manager review submitted for appraisal #${id} (${appraisal.cycle}). Please review.`);
+          await createNotification(hr.id, `All appraisal sections submitted for appraisal #${id} (${appraisal.cycle}). Please review.`);
         }
       } else {
         for (const hr of hrEmployees) {
-          await createNotification(hr.id, `Self-appraisal submitted for appraisal #${id} (${appraisal.cycle}). Waiting for manager review.`);
+          await createNotification(hr.id, `Self-appraisal submitted for appraisal #${id} (${appraisal.cycle}).`);
         }
       }
     }
@@ -265,9 +284,10 @@ export const submitManagerAppraisalV2 = async (req: Request, res: Response) => {
     });
 
     if (!isDraft) {
-      // Check if employee already submitted self-appraisal — if so, both done → HR_REVIEW
       const selfAlreadySubmitted = !!appraisal.selfAppraisalSubmittedAt;
-      const newStatus = selfAlreadySubmitted ? "HR_REVIEW" : "PENDING_FILL";
+      const managementAlreadySubmitted = !!appraisal.managementAppraisalSubmittedAt;
+      const allSubmitted = selfAlreadySubmitted && managementAlreadySubmitted;
+      const newStatus = allSubmitted ? "HR_REVIEW" : "PENDING_FILL";
 
       await prisma.appraisalForm.update({
         where: { id },
@@ -293,24 +313,122 @@ export const submitManagerAppraisalV2 = async (req: Request, res: Response) => {
         });
       }
 
-      // Notify HR
       const hrEmployees = await prisma.employee.findMany({
         where: { departmentId: 1, employmentStatus: "ACTIVE" },
         select: { id: true },
       });
-
-      if (selfAlreadySubmitted) {
+      if (allSubmitted) {
         for (const hr of hrEmployees) {
-          await createNotification(hr.id, `Both self-appraisal and manager review submitted for appraisal #${id} (${appraisal.cycle}). Please review.`);
+          await createNotification(hr.id, `All appraisal sections submitted for appraisal #${id} (${appraisal.cycle}). Please review.`);
         }
       } else {
         for (const hr of hrEmployees) {
-          await createNotification(hr.id, `Manager review submitted for appraisal #${id} (${appraisal.cycle}). Waiting for self-appraisal.`);
+          await createNotification(hr.id, `Manager review submitted for appraisal #${id} (${appraisal.cycle}).`);
         }
       }
     }
 
     return res.json({ message: isDraft ? "Manager appraisal saved as draft" : "Manager appraisal submitted" });
+  } catch (e: any) {
+    return res.status(500).json({ error: e.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MANAGEMENT: SUBMIT MANAGEMENT APPRAISAL
+// ═══════════════════════════════════════════════════════════════════════════════
+export const submitManagementAppraisal = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const {
+      qualityOfWorkRating, qualityOfWorkComments,
+      knowledgeOfJobRating, knowledgeOfJobComments,
+      teamworkRating, teamworkComments,
+      independenceRating, independenceComments,
+      recordsRating, recordsComments,
+      guestServiceRating, guestServiceComments,
+      safetyRating, safetyComments,
+      attendanceRating, attendanceComments,
+      leadershipRating, leadershipComments,
+      overallScore, comments, recommendations, isDraft,
+    } = req.body;
+
+    const appraisal = await prisma.appraisalForm.findUnique({ where: { id } });
+    if (!appraisal) return res.status(404).json({ error: "Appraisal not found" });
+
+    if (!["PENDING_FILL", "SELF_APPRAISAL_PENDING", "MANAGER_APPRAISAL_PENDING", "MANAGER_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
+      return res.status(400).json({ error: "Management appraisal cannot be submitted at this stage" });
+    }
+
+    await prisma.managementAppraisal.upsert({
+      where: { appraisalFormId: id },
+      create: {
+        appraisalFormId: id,
+        qualityOfWorkRating, qualityOfWorkComments,
+        knowledgeOfJobRating, knowledgeOfJobComments,
+        teamworkRating, teamworkComments,
+        independenceRating, independenceComments,
+        recordsRating, recordsComments,
+        guestServiceRating, guestServiceComments,
+        safetyRating, safetyComments,
+        attendanceRating, attendanceComments,
+        leadershipRating, leadershipComments,
+        overallScore, comments, recommendations,
+      },
+      update: {
+        qualityOfWorkRating, qualityOfWorkComments,
+        knowledgeOfJobRating, knowledgeOfJobComments,
+        teamworkRating, teamworkComments,
+        independenceRating, independenceComments,
+        recordsRating, recordsComments,
+        guestServiceRating, guestServiceComments,
+        safetyRating, safetyComments,
+        attendanceRating, attendanceComments,
+        leadershipRating, leadershipComments,
+        overallScore, comments, recommendations,
+      },
+    });
+
+    if (!isDraft) {
+      const selfAlreadySubmitted = !!appraisal.selfAppraisalSubmittedAt;
+      const managerAlreadySubmitted = !!appraisal.managerAppraisalSubmittedAt;
+      const allSubmitted = selfAlreadySubmitted && managerAlreadySubmitted;
+      const newStatus = allSubmitted ? "HR_REVIEW" : "PENDING_FILL";
+
+      await prisma.appraisalForm.update({
+        where: { id },
+        data: { status: newStatus, managementAppraisalSubmittedAt: new Date() },
+      });
+
+      // Update edit history newValues if this is re-submission after edit approval
+      const latestMgmtEditHistory = await prisma.appraisalEditHistory.findFirst({
+        where: { appraisalFormId: id, editType: "MANAGEMENT_APPRAISAL", newValues: { equals: {} } },
+        orderBy: { editedAt: "desc" },
+      });
+      if (latestMgmtEditHistory) {
+        const mgmtData = await prisma.managementAppraisal.findUnique({ where: { appraisalFormId: id } });
+        await prisma.appraisalEditHistory.update({
+          where: { id: latestMgmtEditHistory.id },
+          data: { newValues: { managementAppraisal: mgmtData } },
+        });
+      }
+
+      const hrEmployees = await prisma.employee.findMany({
+        where: { departmentId: 1, employmentStatus: "ACTIVE" },
+        select: { id: true },
+      });
+      if (allSubmitted) {
+        for (const hr of hrEmployees) {
+          await createNotification(hr.id, `All appraisal sections submitted for appraisal #${id} (${appraisal.cycle}). Please review.`);
+        }
+      } else {
+        for (const hr of hrEmployees) {
+          await createNotification(hr.id, `Management review submitted for appraisal #${id} (${appraisal.cycle}).`);
+        }
+      }
+    }
+
+    return res.json({ message: isDraft ? "Management appraisal saved as draft" : "Management appraisal submitted" });
   } catch (e: any) {
     return res.status(500).json({ error: e.message });
   }
@@ -376,7 +494,7 @@ export const requestEdit = async (req: Request, res: Response) => {
     const { requestedBy, reason, requestType } = req.body;
 
     if (!reason?.trim()) return res.status(400).json({ error: "Reason required" });
-    if (!["SELF", "MANAGER"].includes(requestType)) return res.status(400).json({ error: "requestType must be SELF or MANAGER" });
+    if (!["SELF", "MANAGER", "MANAGEMENT"].includes(requestType)) return res.status(400).json({ error: "requestType must be SELF, MANAGER, or MANAGEMENT" });
 
     const appraisal = await prisma.appraisalForm.findUnique({
       where: { id: appraisalId },
@@ -446,7 +564,7 @@ export const respondEditRequest = async (req: Request, res: Response) => {
     });
     const requesterName = requester ? `${requester.firstName} ${requester.lastName}` : `Employee`;
     const empName = `${editReq.appraisalForm.employee.firstName} ${editReq.appraisalForm.employee.lastName}`;
-    const typeLabel = editReq.requestType === "SELF" ? "self-appraisal" : "manager review";
+    const typeLabel = editReq.requestType === "SELF" ? "self-appraisal" : editReq.requestType === "MANAGER" ? "manager review" : "management review";
 
     if (action === "APPROVE") {
       // Save current values as edit history snapshot
@@ -457,29 +575,35 @@ export const respondEditRequest = async (req: Request, res: Response) => {
         const selfData = await prisma.selfAppraisal.findUnique({ where: { appraisalFormId: appraisal.id } });
         const answers = await prisma.selfAppraisalAnswer.findMany({ where: { appraisalFormId: appraisal.id } });
         previousValues = { selfAppraisal: selfData, answers };
-      } else {
+      } else if (editReq.requestType === "MANAGER") {
         const managerData = await prisma.managerAppraisal.findUnique({ where: { appraisalFormId: appraisal.id } });
         previousValues = { managerAppraisal: managerData };
+      } else {
+        const mgmtData = await prisma.managementAppraisal.findUnique({ where: { appraisalFormId: appraisal.id } });
+        previousValues = { managementAppraisal: mgmtData };
       }
+
+      const editTypeMap: Record<string, string> = { SELF: "SELF_APPRAISAL", MANAGER: "MANAGER_APPRAISAL", MANAGEMENT: "MANAGEMENT_APPRAISAL" };
 
       await prisma.appraisalEditHistory.create({
         data: {
           appraisalFormId: appraisal.id,
           editedBy: editReq.requestedBy,
-          editType: editReq.requestType === "SELF" ? "SELF_APPRAISAL" : "MANAGER_APPRAISAL",
+          editType: editTypeMap[editReq.requestType] || "MANAGER_APPRAISAL",
           previousValues,
-          newValues: {}, // will be filled when they actually edit
+          newValues: {},
           editReason: editReq.reason,
           approvedBy: approvedBy ? Number(approvedBy) : null,
         },
       });
 
-      // Clear the submitted timestamp so they can re-fill, keep status as PENDING_FILL
       const clearData: any = { status: "PENDING_FILL" };
       if (editReq.requestType === "SELF") {
         clearData.selfAppraisalSubmittedAt = null;
-      } else {
+      } else if (editReq.requestType === "MANAGER") {
         clearData.managerAppraisalSubmittedAt = null;
+      } else {
+        clearData.managementAppraisalSubmittedAt = null;
       }
       await prisma.appraisalForm.update({
         where: { id: appraisal.id },
@@ -531,6 +655,7 @@ export const getAppraisalDetail = async (req: Request, res: Response) => {
         selfAppraisal: true,
         selfAnswers: { include: { question: true }, orderBy: { question: { displayOrder: "asc" } } },
         managerReview: true,
+        managementReview: true,
         hrReview: true,
         editRequests: { orderBy: { requestedAt: "desc" } },
         editHistory: { orderBy: { editedAt: "desc" } },
@@ -554,8 +679,8 @@ export const getAppraisalDetail = async (req: Request, res: Response) => {
 
     const result = { ...appraisal, editRequests: enrichedEditRequests };
 
-    // Manager cannot see self-appraisal
-    if (viewerRole === "MANAGER") {
+    // Manager/Management cannot see self-appraisal
+    if (viewerRole === "MANAGER" || viewerRole === "MANAGEMENT") {
       return res.json({
         ...result,
         selfAppraisal: null,

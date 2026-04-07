@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { bulkCreateAppraisals, getAllAppraisalsWithManagerReview, saveManagerReview } from './appraisal.controller';
 import {
   getSelfAppraisalQuestions, createSelfAppraisalQuestion, toggleSelfAppraisalQuestion,
-  hrVerifyAppraisal, submitSelfAppraisal, submitManagerAppraisalV2,
+  hrVerifyAppraisal, submitSelfAppraisal, submitManagerAppraisalV2, submitManagementAppraisal,
   hrReviewAppraisal, requestEdit, respondEditRequest,
   getAppraisalDetail, getEditHistory, getEmployeeInsights,
 } from './appraisal-v2.controller';
@@ -25,6 +25,7 @@ router.get('/detail/:id', authenticateToken, getAppraisalDetail);
 router.patch('/:id/hr-verify', authenticateToken, hrVerifyAppraisal);
 router.post('/:id/self-appraisal', authenticateToken, submitSelfAppraisal);
 router.post('/:id/manager-appraisal', authenticateToken, submitManagerAppraisalV2);
+router.post('/:id/management-appraisal', authenticateToken, submitManagementAppraisal);
 router.post('/:id/hr-review', authenticateToken, hrReviewAppraisal);
 
 // V2: Edit requests

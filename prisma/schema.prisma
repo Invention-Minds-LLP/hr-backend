@@ -643,20 +643,22 @@ model AppraisalForm {
   dueDate                     DateTime?
   hrVerifiedBy                Int?
   hrVerifiedAt                DateTime?
-  selfAppraisalSubmittedAt    DateTime?
-  managerAppraisalSubmittedAt DateTime?
-  hrReviewComments            String?   @db.Text
-  hrRecommendations           String?   @db.Text
-  hrApprovedBy                Int?
-  hrApprovedAt                DateTime?
+  selfAppraisalSubmittedAt       DateTime?
+  managerAppraisalSubmittedAt    DateTime?
+  managementAppraisalSubmittedAt DateTime?
+  hrReviewComments               String?   @db.Text
+  hrRecommendations              String?   @db.Text
+  hrApprovedBy                   Int?
+  hrApprovedAt                   DateTime?
 
-  employee      Employee               @relation(fields: [employeeId], references: [id])
-  hrReview      HRAppraisal?
-  managerReview ManagerAppraisal?
-  selfAppraisal SelfAppraisal?
-  selfAnswers   SelfAppraisalAnswer[]
-  editRequests  AppraisalEditRequest[]
-  editHistory   AppraisalEditHistory[]
+  employee           Employee                @relation(fields: [employeeId], references: [id])
+  hrReview           HRAppraisal?
+  managerReview      ManagerAppraisal?
+  managementReview   ManagementAppraisal?
+  selfAppraisal      SelfAppraisal?
+  selfAnswers        SelfAppraisalAnswer[]
+  editRequests       AppraisalEditRequest[]
+  editHistory        AppraisalEditHistory[]
 
   @@index([employeeId], map: "AppraisalForm_employeeId_fkey")
   @@index([status])
@@ -665,7 +667,8 @@ model AppraisalForm {
 model SelfAppraisalQuestion {
   id           Int      @id @default(autoincrement())
   text         String
-  category     String?
+  category     String?  // CLINICAL | NONCLINICAL | PARAMEDICAL
+  section      String?  // Section heading within category
   displayOrder Int      @default(0)
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
@@ -772,6 +775,35 @@ model ManagerAppraisal {
   safetyRating           Float?
   teamworkComments       String?       @db.LongText
   teamworkRating         Float?
+  appraisalForm          AppraisalForm @relation(fields: [appraisalFormId], references: [id])
+}
+
+model ManagementAppraisal {
+  id                     Int           @id @default(autoincrement())
+  appraisalFormId        Int           @unique
+  qualityOfWorkRating    Float?
+  qualityOfWorkComments  String?       @db.LongText
+  knowledgeOfJobRating   Float?
+  knowledgeOfJobComments String?       @db.LongText
+  teamworkRating         Float?
+  teamworkComments       String?       @db.LongText
+  independenceRating     Float?
+  independenceComments   String?       @db.LongText
+  recordsRating          Float?
+  recordsComments        String?       @db.LongText
+  guestServiceRating     Float?
+  guestServiceComments   String?       @db.LongText
+  safetyRating           Float?
+  safetyComments         String?       @db.LongText
+  attendanceRating       Float?
+  attendanceComments     String?       @db.LongText
+  leadershipRating       Float?
+  leadershipComments     String?       @db.LongText
+  overallScore           Float?
+  comments               String?       @db.LongText
+  recommendations        String?       @db.LongText
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @default(now()) @updatedAt
   appraisalForm          AppraisalForm @relation(fields: [appraisalFormId], references: [id])
 }
 
