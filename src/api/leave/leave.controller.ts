@@ -1327,7 +1327,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
         //   Level1: MANAGEMENT
         //   Level2: HR_MANAGER
         // ================================================================
-        else if (roleId === 3 || roleId === 5) {
+        else if (roleId === 3) {
           if (role === "MANAGEMENT") {
             data.hodDecision = approved ? "APPROVED" : "REJECTED";
             data.hodDecidedAt = new Date();
@@ -1370,7 +1370,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
         //   Level1: REPORTING_MANAGER
         //   Level2: HR_MANAGER
         // ================================================================
-        else if (roleId === 2) {
+        else if (roleId === 2 || roleId === 5) {
           if (role === "REPORTING_MANAGER") {
             data.hodDecision = approved ? "APPROVED" : "REJECTED";
             data.hodDecidedAt = new Date();

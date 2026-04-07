@@ -488,16 +488,9 @@ export const sendWarning = async (req: Request, res: Response) => {
         }
 
         const responseToken = generateResponseToken();
-        const responseLink = `${process.env.FRONTEND_URL ?? "http://localhost:4200"}/pip-respond/${responseToken}`;
-        const data = buildPlaceholderData(emp, pip, { responseLink, pipNumber: pip.pipNumber ?? "" });
+        const data = buildPlaceholderData(emp, pip, { responseLink: "", pipNumber: pip.pipNumber ?? "" });
         const subject = fillPlaceholders(template.subject, data);
-        const rawBody = fillPlaceholders(template.body, data);
-        // Append response link footer to email
-        const body = rawBody + `<br/><br/><hr/><p style="font-size:13px;color:#555;">
-          <strong>PIP Reference:</strong> ${pip.pipNumber ?? ""}<br/>
-          To submit your response online, click: <a href="${responseLink}">${responseLink}</a><br/>
-          <em>This link can only be used once and is valid until ${data.responseDeadline}.</em>
-        </p>`;
+        const body = fillPlaceholders(template.body, data);
 
         let emailStatus = "SENT";
         let errorMessage: string | null = null;
