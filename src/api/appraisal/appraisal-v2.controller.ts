@@ -680,7 +680,7 @@ export const getAppraisalDetail = async (req: Request, res: Response) => {
     const result = { ...appraisal, editRequests: enrichedEditRequests };
 
     // Manager/Management cannot see self-appraisal
-    if (viewerRole === "MANAGER" || viewerRole === "MANAGEMENT") {
+    if (viewerRole === "MANAGER") {
       return res.json({
         ...result,
         selfAppraisal: null,
