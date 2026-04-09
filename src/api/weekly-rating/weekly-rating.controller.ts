@@ -316,6 +316,33 @@ export const getRatingDetail = async (req: Request, res: Response) => {
   }
 };
 
+// Employee: Get own weekly ratings
+export const getMyRatings = async (req: Request, res: Response) => {
+  try {
+    const empId = Number((req as any).user?.empId);
+    if (!empId) return res.status(401).json({ error: "Unauthorized" });
+
+    const ratings = await prisma.weeklyPerformanceRating.findMany({
+      where: { employeeId: empId, status: "SUBMITTED" },
+      include: {
+        answers: { include: { question: true }, orderBy: { question: { displayOrder: "asc" } } },
+      },
+      orderBy: { weekStartDate: "desc" },
+    });
+
+    const raterIds = [...new Set(ratings.map(r => r.ratedBy))];
+    const raters = await prisma.employee.findMany({
+      where: { id: { in: raterIds } },
+      select: { id: true, firstName: true, lastName: true },
+    });
+    const raterMap = new Map(raters.map(r => [r.id, `${r.firstName} ${r.lastName}`]));
+
+    return res.json(ratings.map(r => ({ ...r, ratedByName: raterMap.get(r.ratedBy) ?? '' })));
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
 // HR: Get all ratings (filterable)
 export const getAllRatings = async (req: Request, res: Response) => {
   try {
