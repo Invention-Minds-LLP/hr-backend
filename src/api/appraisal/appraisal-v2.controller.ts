@@ -98,14 +98,44 @@ export const hrVerifyAppraisal = async (req: Request, res: Response) => {
     const empName = `${appraisal.employee.firstName} ${appraisal.employee.lastName}`;
     await createNotification(appraisal.employeeId, `Your appraisal for cycle "${appraisal.cycle}" has been initiated. Please complete your self-appraisal.`);
 
-    // Notify manager — fill in parallel
+    // Notify assigned manager and find their reporting manager (Management, role 4)
     if (appraisal.managerId) {
       await createNotification(appraisal.managerId, `Appraisal initiated for ${empName} (${appraisal.cycle}). Please complete your manager review.`);
+
+      // The assigned manager's reporting manager is the Management reviewer (role 4)
+      const assignedManager = await prisma.employee.findUnique({
+        where: { id: appraisal.managerId },
+        select: { reportingManager: true },
+      });
+      if (assignedManager?.reportingManager) {
+        await createNotification(assignedManager.reportingManager, `Appraisal initiated for ${empName} (${appraisal.cycle}). Please complete your management review.`);
+      }
     }
 
     return res.json(updated);
   } catch (e: any) {
     return res.status(500).json({ error: e.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER: Notify correct HR staff based on the appraisal employee's department
+//   - HR Manager (roleId 1) → always notified (all departments)
+//   - HR Executive (roleId 2) → only notified for non-HR-dept (departmentId !== 1) appraisals
+// ═══════════════════════════════════════════════════════════════════════════════
+const notifyHRTeam = async (employeeDeptId: number, message: string) => {
+  const hrStaff = await prisma.employee.findMany({
+    where: {
+      departmentId: 1,
+      employmentStatus: "ACTIVE",
+      roleId: employeeDeptId === 1
+        ? 1              // HR dept appraisal → only HR Manager
+        : { in: [1, 2] }, // other dept appraisal → HR Manager + HR Executives
+    },
+    select: { id: true },
+  });
+  for (const staff of hrStaff) {
+    await createNotification(staff.id, message);
   }
 };
 
@@ -117,7 +147,10 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
     const id = Number(req.params.id);
     const { answers, achievements, goalsObjective, challenges, trainingNeeds, isDraft } = req.body;
 
-    const appraisal = await prisma.appraisalForm.findUnique({ where: { id } });
+    const appraisal = await prisma.appraisalForm.findUnique({
+      where: { id },
+      include: { employee: { select: { departmentId: true, firstName: true, lastName: true } } },
+    });
     if (!appraisal) return res.status(404).json({ error: "Appraisal not found" });
 
     // Allow self-appraisal during PENDING_FILL or if already submitted (edit after approval)
@@ -199,21 +232,12 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
         });
       }
 
-      // Notify HR
-      const hrEmployees = await prisma.employee.findMany({
-        where: { departmentId: 1, employmentStatus: "ACTIVE" },
-        select: { id: true },
-      });
-
-      if (allSubmitted) {
-        for (const hr of hrEmployees) {
-          await createNotification(hr.id, `All appraisal sections submitted for appraisal #${id} (${appraisal.cycle}). Please review.`);
-        }
-      } else {
-        for (const hr of hrEmployees) {
-          await createNotification(hr.id, `Self-appraisal submitted for appraisal #${id} (${appraisal.cycle}).`);
-        }
-      }
+      const employeeDeptId = appraisal.employee?.departmentId ?? 0;
+      const empName = `${appraisal.employee?.firstName} ${appraisal.employee?.lastName}`;
+      const selfMsg = allSubmitted
+        ? `All appraisal sections submitted for ${empName} (${appraisal.cycle}). Please review.`
+        : `Self-appraisal submitted by ${empName} (${appraisal.cycle}).`;
+      await notifyHRTeam(employeeDeptId, selfMsg);
     }
 
     return res.json({ message: isDraft ? "Self-appraisal saved as draft" : "Self-appraisal submitted" });
@@ -242,7 +266,10 @@ export const submitManagerAppraisalV2 = async (req: Request, res: Response) => {
       finalDecision, finalComments, isDraft,
     } = req.body;
 
-    const appraisal = await prisma.appraisalForm.findUnique({ where: { id } });
+    const appraisal = await prisma.appraisalForm.findUnique({
+      where: { id },
+      include: { employee: { select: { departmentId: true, firstName: true, lastName: true } } },
+    });
     if (!appraisal) return res.status(404).json({ error: "Appraisal not found" });
 
     // Allow manager to fill during PENDING_FILL (parallel) or after self-appraisal submitted
@@ -313,19 +340,12 @@ export const submitManagerAppraisalV2 = async (req: Request, res: Response) => {
         });
       }
 
-      const hrEmployees = await prisma.employee.findMany({
-        where: { departmentId: 1, employmentStatus: "ACTIVE" },
-        select: { id: true },
-      });
-      if (allSubmitted) {
-        for (const hr of hrEmployees) {
-          await createNotification(hr.id, `All appraisal sections submitted for appraisal #${id} (${appraisal.cycle}). Please review.`);
-        }
-      } else {
-        for (const hr of hrEmployees) {
-          await createNotification(hr.id, `Manager review submitted for appraisal #${id} (${appraisal.cycle}).`);
-        }
-      }
+      const employeeDeptId = appraisal.employee?.departmentId ?? 0;
+      const empName = `${appraisal.employee?.firstName} ${appraisal.employee?.lastName}`;
+      const mgrMsg = allSubmitted
+        ? `All appraisal sections submitted for ${empName} (${appraisal.cycle}). Please review.`
+        : `Manager review submitted for ${empName} (${appraisal.cycle}).`;
+      await notifyHRTeam(employeeDeptId, mgrMsg);
     }
 
     return res.json({ message: isDraft ? "Manager appraisal saved as draft" : "Manager appraisal submitted" });
@@ -353,7 +373,10 @@ export const submitManagementAppraisal = async (req: Request, res: Response) => 
       overallScore, comments, recommendations, isDraft,
     } = req.body;
 
-    const appraisal = await prisma.appraisalForm.findUnique({ where: { id } });
+    const appraisal = await prisma.appraisalForm.findUnique({
+      where: { id },
+      include: { employee: { select: { departmentId: true, firstName: true, lastName: true } } },
+    });
     if (!appraisal) return res.status(404).json({ error: "Appraisal not found" });
 
     if (!["PENDING_FILL", "SELF_APPRAISAL_PENDING", "MANAGER_APPRAISAL_PENDING", "MANAGER_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
@@ -413,19 +436,12 @@ export const submitManagementAppraisal = async (req: Request, res: Response) => 
         });
       }
 
-      const hrEmployees = await prisma.employee.findMany({
-        where: { departmentId: 1, employmentStatus: "ACTIVE" },
-        select: { id: true },
-      });
-      if (allSubmitted) {
-        for (const hr of hrEmployees) {
-          await createNotification(hr.id, `All appraisal sections submitted for appraisal #${id} (${appraisal.cycle}). Please review.`);
-        }
-      } else {
-        for (const hr of hrEmployees) {
-          await createNotification(hr.id, `Management review submitted for appraisal #${id} (${appraisal.cycle}).`);
-        }
-      }
+      const employeeDeptId = appraisal.employee?.departmentId ?? 0;
+      const empName = `${appraisal.employee?.firstName} ${appraisal.employee?.lastName}`;
+      const mgmtMsg = allSubmitted
+        ? `All appraisal sections submitted for ${empName} (${appraisal.cycle}). Please review.`
+        : `Management review submitted for ${empName} (${appraisal.cycle}).`;
+      await notifyHRTeam(employeeDeptId, mgmtMsg);
     }
 
     return res.json({ message: isDraft ? "Management appraisal saved as draft" : "Management appraisal submitted" });

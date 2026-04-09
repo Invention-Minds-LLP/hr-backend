@@ -232,7 +232,42 @@ export const initQuarterlyAppraisalScheduler = () => {
 
 export const getAllAppraisalsWithManagerReview = async (req: Request, res: Response) => {
   try {
+    const user = (req as any).user;
+    const userRole: string = user?.role || '';
+    const empId: number = Number(user?.empId);
+    const deptId: number = Number(user?.deptId);
+
+    const isHRManager = userRole === 'HR Manager' || userRole === 'HR';
+    const isManagement = userRole === 'Management';
+    const isReportingManager = userRole === 'Reporting Manager';
+    // HR dept (dept 1), role 2 — handles appraisals for all other departments
+    const isHRExecutive = deptId === 1 && !isHRManager && !isManagement && !isReportingManager;
+
+    // Build where clause based on role/dept
+    let whereClause: any = {};
+    if (isHRManager || isManagement) {
+      whereClause = {}; // see all
+    } else if (isHRExecutive) {
+      // HR executives see other-dept appraisals + their own appraisal (for self-appraisal module)
+      whereClause = {
+        OR: [
+          { employee: { departmentId: { not: 1 } } },
+          { employeeId: empId },
+        ],
+      };
+    } else if (isReportingManager) {
+      whereClause = {
+        OR: [
+          { employee: { reportingManager: empId } },
+          { employeeId: empId },
+        ],
+      };
+    } else {
+      whereClause = { employeeId: empId }; // own appraisal only
+    }
+
     const appraisals = await prisma.appraisalForm.findMany({
+      where: whereClause,
       include: {
         employee: {
           select: {
@@ -267,12 +302,32 @@ export const getAllAppraisalsWithManagerReview = async (req: Request, res: Respo
       managers.map((m) => [m.id, `${m.firstName} ${m.lastName}`])
     );
 
-    const formatted = appraisals.map((appraisal) => ({
-      ...appraisal,
-      managerName: appraisal.managerId
-        ? managerMap.get(appraisal.managerId) || null
-        : null,
-    }));
+    const formatted = appraisals.map((appraisal) => {
+      const result: any = {
+        ...appraisal,
+        managerName: appraisal.managerId
+          ? managerMap.get(appraisal.managerId) || null
+          : null,
+      };
+      // Determine per-appraisal score visibility:
+      // HR Manager and Management always see scores.
+      // Reporting Manager sees scores for appraisals they manage.
+      // HR Executive sees scores for other-dept appraisals but NOT their own.
+      // Everyone else never sees scores.
+      const isOwnAppraisal = appraisal.employeeId === empId;
+      const canViewThisScore =
+        isHRManager ||
+        isManagement ||
+        (isHRExecutive && !isOwnAppraisal) ||
+        (isReportingManager && !isOwnAppraisal);
+
+      if (!canViewThisScore) {
+        result.managerReview = null;
+        result.finalDecision = null;
+        result.finalComments = null;
+      }
+      return result;
+    });
 
     res.json(formatted);
   } catch (error) {
