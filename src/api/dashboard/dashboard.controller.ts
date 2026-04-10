@@ -1862,7 +1862,7 @@ export class DashboardController {
                 `${o.employee.firstName} ${o.employee.lastName}`,
                 o.employee.employeeCode || '—',
                 o.employee.Department?.name || '—',
-                o.employee.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
+                o.employee.employeeType,
                 fmtTime(o.scheduledEnd),
                 fmtTime(o.checkOut),
                 `${Math.floor(o.minutes / 60)}h ${o.minutes % 60}m`,
@@ -2092,6 +2092,40 @@ export class DashboardController {
             where: {
                 managerStatus: 'PENDING',
                 ...(userEmpId ? { employee: { reportingManager: userEmpId } } : {}),
+            } as any,
+            include: {
+                employee: {
+                    select: {
+                        firstName: true,
+                        lastName: true,
+                        employeeCode: true,
+                        Department: { select: { name: true } },
+                    }
+                }
+            },
+            orderBy: { date: 'desc' },
+        });
+
+        const rows = items.map(o => ({
+            id: o.id,
+            employeeName: `${o.employee.firstName} ${o.employee.lastName}`,
+            employeeCode: o.employee.employeeCode || '—',
+            department: o.employee.Department?.name || '—',
+            date: o.date,
+            scheduledEnd: o.scheduledEnd,
+            checkOut: o.checkOut,
+            minutes: o.minutes,
+            managerStatus: (o as any).managerStatus,
+        }));
+
+        res.json(rows);
+    });
+
+    getHROtPending = asyncHandler(async (req, res) => {
+        const items = await prisma.overtimeApproval.findMany({
+            where: {
+                managerStatus: 'APPROVED',
+                status: 'PENDING',
             } as any,
             include: {
                 employee: {

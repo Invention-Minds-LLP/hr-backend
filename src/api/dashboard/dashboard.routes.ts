@@ -25,6 +25,7 @@ router.get('/missing-docs', ctrl.downloadMissingDocs);
 router.get('/recruiting', authenticateToken,ctrl.getRecruiting);
 router.post('/ot/approve-reject', authenticateToken,ctrl.approveOrRejectOT);
 router.get('/ot/manager-pending', authenticateToken, ctrl.getManagerOtPending);
+router.get('/ot/hr-pending', authenticateToken, ctrl.getHROtPending);
 router.post('/ot/manager-approve-reject', authenticateToken,ctrl.approveOrRejectOTManager);
 // 1. Unmarked attendance
 router.post("/unmarked/message", authenticateToken,messageUnmarked);
