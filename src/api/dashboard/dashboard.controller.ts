@@ -2892,13 +2892,14 @@ export class DashboardController {
                 id: true,
             },
         });
-        const probRows = probRowsRaw.map((e, idx) => ({
+        const probMgrMap = await buildManagerNameMap(probRowsRaw.map(e => e.reportingManager));
+        const probRows = probRowsRaw.map((e) => ({
             id: e.id,
             data: [
                 `${e.firstName} ${e.lastName}`,
                 e.employeeCode || '—',
                 e.Department?.name || '—',
-                e.reportingManager ? `Mgr #${e.reportingManager}` : '—',
+                e.reportingManager ? (probMgrMap.get(e.reportingManager) || '—') : '—',
                 fmtDate(e.probationEndDate),
             ]
         }));
@@ -2925,17 +2926,18 @@ export class DashboardController {
             ]
         }));
 
+        const verifierMgrMap = await buildManagerNameMap(overdue.map(o => o.verifierId));
         const overRows = overdue.map((o, idx) => ({
             id: idx + 1,
-            resignationId: o.resignationId, // for unique key
+            resignationId: o.resignationId,
             data: [
                 o.employeeName,
                 o.employeeCode || '—',
                 o.deptName || '—',
                 o.type,
                 `${o.sinceDays} days`,
-                o.verifierId ? `User #${o.verifierId}` : 'Unassigned',
-                o.note || '—'   // 👈 show note column
+                o.verifierId ? (verifierMgrMap.get(o.verifierId) || '—') : 'Unassigned',
+                o.note || '—'
             ]
         }));
 
