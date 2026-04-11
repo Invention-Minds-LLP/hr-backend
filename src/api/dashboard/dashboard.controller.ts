@@ -2093,6 +2093,7 @@ export class DashboardController {
         const items = await prisma.overtimeApproval.findMany({
             where: {
                 managerStatus: 'PENDING',
+                minutes: { gt: 60 },
                 ...(userEmpId ? { employee: { reportingManager: userEmpId } } : {}),
             } as any,
             include: {
@@ -2128,6 +2129,7 @@ export class DashboardController {
             where: {
                 managerStatus: 'APPROVED',
                 status: 'PENDING',
+                minutes: { gt: 60 },
             } as any,
             include: {
                 employee: {
