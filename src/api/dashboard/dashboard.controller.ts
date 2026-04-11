@@ -991,7 +991,7 @@ export class DashboardController {
 
         // now add OT pending (HR sees only manager-approved records)
         const otPending = await prisma.overtimeApproval.count({
-            where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart } as any
+            where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart, minutes: { gt: 60 } } as any
         });
 
         attention.push({
@@ -1009,6 +1009,7 @@ export class DashboardController {
                 where: {
                     managerStatus: 'PENDING',
                     date: yesterdayStart,
+                    minutes: { gt: 60 },
                     employee: { reportingManager: userEmpId },
                 } as any,
             });
@@ -1975,7 +1976,7 @@ export class DashboardController {
         }
         if (key === 'otPending') {
             const items = await prisma.overtimeApproval.findMany({
-                where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart } as any,
+                where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart, minutes: { gt: 60 } } as any,
                 include: {
                     employee: { select: { firstName: true, lastName: true, employeeCode: true, Department: { select: { name: true } } } }
                 }
@@ -2010,6 +2011,7 @@ export class DashboardController {
                 where: {
                     managerStatus: 'PENDING',
                     date: yesterdayStart,
+                    minutes: { gt: 60 },
                     ...(userEmpId ? { employee: { reportingManager: userEmpId } } : {}),
                 } as any,
                 include: {

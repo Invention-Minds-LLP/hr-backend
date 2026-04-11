@@ -650,7 +650,7 @@ export async function runBiometricSync(isFinalRun: boolean) {
       (rec.checkOut.getTime() - schedEnd.getTime()) / 60000
     );
 
-    if (otMin > 0 && otMin <= 720) {
+    if (otMin > 60 && otMin <= 720) {
       await prisma.overtimeApproval.upsert({
         where: {
           employeeId_date: {

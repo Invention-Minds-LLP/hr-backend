@@ -202,6 +202,7 @@ export const mobileEmailInit = async (req: Request, res: Response) => {
     if (!session) {
         return res.status(401).json({ message: 'Session not found' });
     }
+    console.log('Email OTP init for session:', sessionId, 'Employee:', session.employee, 'Provided email:', email);
 
     if (session?.employee.email !== email) {
         return res.status(401).json({ message: 'Email mismatch' });
