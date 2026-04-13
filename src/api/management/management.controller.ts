@@ -233,6 +233,8 @@ export const getLeaveCalendar = async (req: Request, res: Response) => {
     const monthStart = startOfMonth(targetDate);
     const monthEnd = endOfMonth(targetDate);
 
+    console.log("Fetching leave calendar for month:", monthStart, "to", monthEnd);
+
     const leaves = await prisma.leaveRequest.findMany({
       where: {
         status: "APPROVED",
@@ -246,6 +248,8 @@ export const getLeaveCalendar = async (req: Request, res: Response) => {
         leaveType: { select: { name: true } },
       },
     });
+
+    console.log(`Found ${leaves.length} approved leaves overlapping with month`);
 
     // Build day → entries map (includes leave type per person)
     const dayMap = new Map<string, { count: number; entries: { name: string; type: string }[]; typeCounts: Map<string, number> }>();
