@@ -225,15 +225,24 @@ export const getAttendanceSummary = async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════
 export const getLeaveCalendar = async (req: Request, res: Response) => {
   try {
-    let targetDate = new Date();
-    if (req.query.month && /^\d{4}-\d{2}$/.test(req.query.month as string)) {
-      const [y, m] = (req.query.month as string).split("-").map(Number);
-      targetDate = new Date(y, m - 1, 1);
-    }
-    const monthStart = startOfMonth(targetDate);
-    const monthEnd = endOfMonth(targetDate);
+    // Helper: convert a UTC Date from DB to IST date string (yyyy-MM-dd)
+    const toISTDateStr = (d: Date): string => {
+      const ist = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+      return format(ist, "yyyy-MM-dd");
+    };
 
-    console.log("Fetching leave calendar for month:", monthStart, "to", monthEnd);
+    // Build IST month boundaries: start = IST midnight of day 1, end = IST 23:59:59 of last day
+    let year = new Date().getFullYear();
+    let month = new Date().getMonth() + 1; // 1-based
+    if (req.query.month && /^\d{4}-\d{2}$/.test(req.query.month as string)) {
+      [year, month] = (req.query.month as string).split("-").map(Number);
+    }
+
+    // IST midnight of first day → UTC  (IST = UTC+5:30, so midnight IST = prev day 18:30 UTC)
+    const monthStart = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0) - 5.5 * 60 * 60 * 1000);
+    // IST 23:59:59 of last day
+    const lastDay = new Date(year, month, 0).getDate(); // days in month
+    const monthEnd = new Date(Date.UTC(year, month - 1, lastDay, 23, 59, 59, 999) - 5.5 * 60 * 60 * 1000);
 
     const leaves = await prisma.leaveRequest.findMany({
       where: {
@@ -249,18 +258,22 @@ export const getLeaveCalendar = async (req: Request, res: Response) => {
       },
     });
 
-    console.log(`Found ${leaves.length} approved leaves overlapping with month`);
-
-    // Build day → entries map (includes leave type per person)
+    // Build day → entries map using IST date strings
     const dayMap = new Map<string, { count: number; entries: { name: string; type: string }[]; typeCounts: Map<string, number> }>();
+
+    // IST date strings for month boundaries (for range filtering in the loop)
+    const monthStartStr = `${year}-${String(month).padStart(2, "0")}-01`;
+    const monthEndStr   = `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
 
     for (const l of leaves) {
       let cur = new Date(l.startDate);
       const end = new Date(l.endDate);
       const leaveTypeName = l.leaveType?.name || "Leave";
-      while (cur <= end && cur <= monthEnd) {
-        if (cur >= monthStart) {
-          const key = format(cur, "yyyy-MM-dd");
+
+      while (cur <= end) {
+        const key = toISTDateStr(cur);
+        // Only include days within the requested month
+        if (key >= monthStartStr && key <= monthEndStr) {
           if (!dayMap.has(key)) dayMap.set(key, { count: 0, entries: [], typeCounts: new Map() });
           const entry = dayMap.get(key)!;
           entry.count += 1;
@@ -303,8 +316,8 @@ export const getLeaveCalendar = async (req: Request, res: Response) => {
     res.json({
       calendar,
       topTypes,
-      month: format(targetDate, "yyyy-MM"),
-      monthLabel: format(targetDate, "MMMM yyyy"),
+      month: `${year}-${String(month).padStart(2, "0")}`,
+      monthLabel: format(new Date(year, month - 1, 1), "MMMM yyyy"),
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -1263,7 +1276,7 @@ export const getOtAnalysis = async (req: Request, res: Response) => {
       by: ["employeeId"],
       where: {
         date: { gte: rangeStart, lte: rangeEnd },
-        status: "APPROVED",
+        status: "APPROVE",
         managerStatus: "APPROVED",
       },
       _sum: { minutes: true },
@@ -1549,6 +1562,171 @@ export const getAbsenteeism = async (req: Request, res: Response) => {
       .sort((a, b) => a.dept.localeCompare(b.dept) || b.absentDays - a.absentDays);
 
     res.json({ chronicAbsentees, deptSummary, allAbsentEmployees, days });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════
+// SECTION 16 — WORKFORCE INSIGHTS (Age/Gender + Tenure)
+// GET /api/management/workforce-insights
+// ═══════════════════════════════════════════════════════════
+export const getWorkforceInsights = async (_req: Request, res: Response) => {
+  try {
+    const employees = await prisma.employee.findMany({
+      where: { employmentStatus: { in: ["ACTIVE", "NOTICE_PERIOD"] } },
+      select: {
+        dob: true,
+        gender: true,
+        dateOfJoining: true,
+        Department: { select: { name: true } },
+      },
+    });
+
+    const now = new Date();
+
+    // ── Age-Gender Split ──────────────────────────────────
+    const ageSplit = {
+      below45: { MALE: 0, FEMALE: 0, OTHER: 0 },
+      above45: { MALE: 0, FEMALE: 0, OTHER: 0 },
+    };
+
+    for (const e of employees) {
+      if (!e.dob) continue;
+      const age = (now.getTime() - new Date(e.dob).getTime()) / (365.25 * 24 * 3600 * 1000);
+      const bucket = age <= 45 ? "below45" : "above45";
+      const g = (e.gender === "MALE" || e.gender === "FEMALE") ? e.gender : "OTHER";
+      ageSplit[bucket][g] += 1;
+    }
+
+    const ageSplitChart = [
+      { label: "≤ 45 years", male: ageSplit.below45.MALE, female: ageSplit.below45.FEMALE, other: ageSplit.below45.OTHER },
+      { label: "> 45 years", male: ageSplit.above45.MALE, female: ageSplit.above45.FEMALE, other: ageSplit.above45.OTHER },
+    ];
+
+    // ── Tenure Buckets ────────────────────────────────────
+    const tenureBuckets = [
+      { label: "< 1 year",   min: 0,  max: 1,   count: 0 },
+      { label: "1 – 3 yrs",  min: 1,  max: 3,   count: 0 },
+      { label: "3 – 5 yrs",  min: 3,  max: 5,   count: 0 },
+      { label: "5 – 10 yrs", min: 5,  max: 10,  count: 0 },
+      { label: "> 10 yrs",   min: 10, max: 9999, count: 0 },
+    ];
+
+    for (const e of employees) {
+      if (!e.dateOfJoining) continue;
+      const tenureYrs = (now.getTime() - new Date(e.dateOfJoining).getTime()) / (365.25 * 24 * 3600 * 1000);
+      for (const b of tenureBuckets) {
+        if (tenureYrs >= b.min && tenureYrs < b.max) { b.count++; break; }
+      }
+    }
+
+    // ── Joining Year Trend ────────────────────────────────
+    const joiningYearMap = new Map<number, number>();
+    for (const e of employees) {
+      if (!e.dateOfJoining) continue;
+      const yr = new Date(e.dateOfJoining).getFullYear();
+      joiningYearMap.set(yr, (joiningYearMap.get(yr) || 0) + 1);
+    }
+    const joiningTrend = Array.from(joiningYearMap.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([year, count]) => ({ year, count }));
+
+    // ── Dept Gender Breakdown ─────────────────────────────
+    const deptGenderMap = new Map<string, { male: number; female: number; other: number }>();
+    for (const e of employees) {
+      const dept = e.Department?.name || "Unassigned";
+      const cur = deptGenderMap.get(dept) || { male: 0, female: 0, other: 0 };
+      if (e.gender === "MALE") cur.male++;
+      else if (e.gender === "FEMALE") cur.female++;
+      else cur.other++;
+      deptGenderMap.set(dept, cur);
+    }
+    const deptGender = Array.from(deptGenderMap.entries())
+      .map(([dept, v]) => ({ dept, ...v, total: v.male + v.female + v.other }))
+      .sort((a, b) => b.total - a.total);
+
+    res.json({ ageSplitChart, tenureBuckets, joiningTrend, deptGender });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════
+// SECTION 17 — MOBILE LOGIN ACTIVITY
+// GET /api/management/mobile-login-activity?days=14
+// Detects mobile vs desktop from LoginHistory userAgent
+// ═══════════════════════════════════════════════════════════
+export const getMobileLoginActivity = async (req: Request, res: Response) => {
+  try {
+    const days = Math.min(parseInt(req.query.days as string) || 14, 90);
+
+    const since = new Date();
+    since.setDate(since.getDate() - days + 1);
+    since.setHours(0, 0, 0, 0);
+
+    const logs = await prisma.loginHistory.findMany({
+      where: { attemptedAt: { gte: since }, success: true },
+      select: { attemptedAt: true, userAgent: true, userId: true },
+      orderBy: { attemptedAt: "asc" },
+    });
+
+    const isMobile = (ua: string | null): boolean => {
+      if (!ua) return false;
+      return /Mobile|Android|iPhone|iPad|Windows Phone|BlackBerry|webOS|Opera Mini/i.test(ua);
+    };
+
+    // Build a map for every day in the window
+    const dayMap = new Map<string, { mobile: number; desktop: number; users: Set<number> }>();
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); // YYYY-MM-DD
+      dayMap.set(dateStr, { mobile: 0, desktop: 0, users: new Set() });
+    }
+
+    for (const log of logs) {
+      const dateStr = log.attemptedAt.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+      const entry = dayMap.get(dateStr);
+      if (!entry) continue;
+      if (isMobile(log.userAgent)) entry.mobile++;
+      else entry.desktop++;
+      entry.users.add(log.userId);
+    }
+
+    const daily = Array.from(dayMap.entries()).map(([date, v]) => ({
+      date,
+      label: new Date(date).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }),
+      mobile: v.mobile,
+      desktop: v.desktop,
+      total: v.mobile + v.desktop,
+      uniqueUsers: v.users.size,
+    }));
+
+    const totalMobile  = daily.reduce((s, d) => s + d.mobile, 0);
+    const totalDesktop = daily.reduce((s, d) => s + d.desktop, 0);
+    const totalLogins  = totalMobile + totalDesktop;
+    const uniqueActiveUsers = new Set(logs.map((l) => l.userId)).size;
+
+    // Hourly distribution (IST hour 0–23)
+    const hourly: { hour: number; mobile: number; desktop: number }[] = Array.from({ length: 24 }, (_, h) => ({
+      hour: h, mobile: 0, desktop: 0,
+    }));
+    for (const log of logs) {
+      const hr = new Date(log.attemptedAt.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })).getHours();
+      if (isMobile(log.userAgent)) hourly[hr].mobile++;
+      else hourly[hr].desktop++;
+    }
+
+    res.json({
+      daily,
+      hourly,
+      totalLogins,
+      totalMobile,
+      totalDesktop,
+      mobilePct: totalLogins > 0 ? Math.round((totalMobile / totalLogins) * 100) : 0,
+      uniqueActiveUsers,
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

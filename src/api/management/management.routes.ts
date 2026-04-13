@@ -3,6 +3,7 @@ import { authenticateToken } from "../../middleware/authMiddleware";
 import {
   getPulse,
   getWorkforce,
+  getWorkforceInsights,
   getAttendanceSummary,
   getLeaveCalendar,
   getPerformanceRadar,
@@ -20,6 +21,7 @@ import {
   getLateArrivals,
   getLeaveUtilization,
   getAbsenteeism,
+  getMobileLoginActivity,
 } from "./management.controller";
 
 const router = Router();
@@ -43,5 +45,7 @@ router.get("/ot-analysis", authenticateToken, getOtAnalysis);
 router.get("/late-arrivals", authenticateToken, getLateArrivals);
 router.get("/leave-utilization", authenticateToken, getLeaveUtilization);
 router.get("/absenteeism", authenticateToken, getAbsenteeism);
+router.get("/workforce-insights", authenticateToken, getWorkforceInsights);
+router.get("/mobile-login-activity", authenticateToken, getMobileLoginActivity);
 
 export default router;
