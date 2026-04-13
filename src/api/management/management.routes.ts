@@ -22,6 +22,7 @@ import {
   getLeaveUtilization,
   getAbsenteeism,
   getMobileLoginActivity,
+  getQualifications,
 } from "./management.controller";
 
 const router = Router();
@@ -47,5 +48,6 @@ router.get("/leave-utilization", authenticateToken, getLeaveUtilization);
 router.get("/absenteeism", authenticateToken, getAbsenteeism);
 router.get("/workforce-insights", authenticateToken, getWorkforceInsights);
 router.get("/mobile-login-activity", authenticateToken, getMobileLoginActivity);
+router.get("/qualifications", authenticateToken, getQualifications);
 
 export default router;

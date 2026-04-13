@@ -184,33 +184,135 @@ export const getAttendanceSummary = async (req: Request, res: Response) => {
   try {
     const numDays = Math.min(Math.max(Number(req.query.days) || 7, 1), 30);
 
-    const days: {
-      date: string;
-      present: number;
-      absent: number;
-      leave: number;
-      permission: number;
-    }[] = [];
+    const rangeStart = startOfDayIST(addDays(new Date(), -(numDays - 1)));
+    const rangeEnd   = endOfDayIST(new Date());
 
-    const totalActive = await prisma.employee.count({
-      where: { employmentStatus: "ACTIVE" },
-    });
-
+    // ── Determine months covered by the window ────────────────
+    const monthsInRange: { year: number; month: number }[] = [];
+    const seenMonths = new Set<string>();
     for (let i = numDays - 1; i >= 0; i--) {
       const d = addDays(new Date(), -i);
-      const dayStart = startOfDayIST(d);
-      const dayEnd = endOfDayIST(d);
-      // For 7 days: "Mon 07", for 14/30: "07 Apr"
-      const label = numDays <= 7 ? format(d, "EEE dd") : format(d, "dd MMM");
+      const key = `${d.getFullYear()}-${d.getMonth() + 1}`;
+      if (!seenMonths.has(key)) {
+        seenMonths.add(key);
+        monthsInRange.push({ year: d.getFullYear(), month: d.getMonth() + 1 });
+      }
+    }
 
+    const totalActive = await prisma.employee.count({ where: { employmentStatus: "ACTIVE" } });
+
+    // ── Public holidays in range ──────────────────────────────
+    const publicHolidays = await prisma.holiday.findMany({
+      where: { date: { gte: rangeStart, lte: rangeEnd } },
+      select: { date: true, title: true },
+    });
+    const holidayMap = new Map<string, string>();
+    for (const h of publicHolidays) {
+      const ist = new Date(h.date.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+      holidayMap.set(format(ist, "yyyy-MM-dd"), h.title);
+    }
+
+    // ── Approved weekly off from ShiftApproval ────────────────
+    // Fetch all approved monthly rotational shift configs for active employees
+    // covering months in the trend window
+    const shiftApprovals = await prisma.shiftApproval.findMany({
+      where: {
+        status: "APPROVED",
+        month: { not: null },
+        year:  { not: null },
+        OR: monthsInRange.map(({ year, month }) => ({ year, month })),
+      },
+      select: { employeeId: true, month: true, year: true, weekOffConfig: true },
+    });
+
+    // Build per-employee week-off dates within the range
+    // Map<employeeId, Set<"yyyy-MM-dd">>
+    const empWeekOffDates = new Map<number, Set<string>>();
+    // Track which employees have an approved shift per month
+    const approvedEmpsByMonth = new Map<string, Set<number>>();
+
+    for (const approval of shiftApprovals) {
+      if (!approval.month || !approval.year) continue;
+
+      const monthKey = `${approval.year}-${approval.month}`;
+      if (!approvedEmpsByMonth.has(monthKey)) approvedEmpsByMonth.set(monthKey, new Set());
+      approvedEmpsByMonth.get(monthKey)!.add(approval.employeeId);
+
+      const cfg = approval.weekOffConfig as { weeks?: Record<string, number> } | null;
+      if (!cfg?.weeks) continue;
+
+      // Compute week-off dates: same algorithm as attendance.controller.ts
+      const monthStart = new Date(approval.year, approval.month - 1, 1);
+      const firstWeekStart = new Date(monthStart);
+      firstWeekStart.setDate(monthStart.getDate() - monthStart.getDay()); // back to Sunday
+      firstWeekStart.setHours(0, 0, 0, 0);
+
+      if (!empWeekOffDates.has(approval.employeeId)) empWeekOffDates.set(approval.employeeId, new Set());
+      const datesSet = empWeekOffDates.get(approval.employeeId)!;
+
+      Object.entries(cfg.weeks).forEach(([weekIndexStr, dayOfWeek]) => {
+        const weekIndex = Number(weekIndexStr);
+        if (Number.isNaN(weekIndex) || typeof dayOfWeek !== "number") return;
+
+        const woDate = new Date(firstWeekStart);
+        woDate.setDate(firstWeekStart.getDate() + weekIndex * 7 + dayOfWeek);
+
+        if (woDate >= rangeStart && woDate <= rangeEnd) {
+          datesSet.add(format(woDate, "yyyy-MM-dd"));
+        }
+      });
+    }
+
+    // ── Build daily summary ───────────────────────────────────
+    const days: any[] = [];
+
+    for (let i = numDays - 1; i >= 0; i--) {
+      const d        = addDays(new Date(), -i);
+      const dayStart = startOfDayIST(d);
+      const dayEnd   = endOfDayIST(d);
+      const dayStr   = format(d, "yyyy-MM-dd");
+      const label    = numDays <= 7 ? format(d, "EEE dd") : format(d, "dd MMM");
+      const monthKey = `${d.getFullYear()}-${d.getMonth() + 1}`;
+
+      // Count employees whose approved week-off falls on this date
+      let weekoffFromApprovals = 0;
+      for (const dates of empWeekOffDates.values()) {
+        if (dates.has(dayStr)) weekoffFromApprovals++;
+      }
+
+      // Employees WITHOUT an approved shift this month → Sunday fallback
+      const approvedThisMonth   = approvedEmpsByMonth.get(monthKey)?.size ?? 0;
+      const unapprovedThisMonth = Math.max(0, totalActive - approvedThisMonth);
+      const sundayFallback      = d.getDay() === 0 ? unapprovedThisMonth : 0;
+
+      const totalWeekoff   = weekoffFromApprovals + sundayFallback;
+      const holidayTitle   = holidayMap.get(dayStr);
+      const isHoliday      = !!holidayTitle;
+      const isWeekOff      = totalWeekoff > 0;
       const [present, leave, permission] = await Promise.all([
         prisma.attendance.count({ where: { date: { gte: dayStart, lte: dayEnd }, status: "PRESENT" } }),
         prisma.attendance.count({ where: { date: { gte: dayStart, lte: dayEnd }, status: "LEAVE" } }),
         prisma.attendance.count({ where: { date: { gte: dayStart, lte: dayEnd }, status: "PERMISSION" } }),
       ]);
 
-      const absent = Math.max(0, totalActive - present - leave - permission);
-      days.push({ date: label, present, absent, leave, permission });
+      if (isHoliday) {
+        // Public holiday: nobody is absent
+        days.push({
+          date: label, present, absent: 0, leave: 0, permission: 0,
+          weekoff: Math.max(0, totalActive - present),
+          isNonWorking: true, nonWorkingLabel: holidayTitle,
+        });
+      } else {
+        // Working day (may have some employees on week-off)
+        // Subtract week-offs from expected headcount before computing absences
+        const expectedPresent = Math.max(0, totalActive - totalWeekoff);
+        const absent = Math.max(0, expectedPresent - present - leave - permission);
+        days.push({
+          date: label, present, absent, leave, permission,
+          weekoff: totalWeekoff,
+          isNonWorking: false, nonWorkingLabel: isWeekOff ? "Week Off" : null,
+        });
+      }
     }
 
     res.json({ days, totalActive, numDays });
@@ -903,10 +1005,20 @@ export const getDeptRisk = async (_req: Request, res: Response) => {
         const resignRate   = v.headcount > 0 ? v.resignations / v.headcount : 0;
         const leaveRate    = v.headcount > 0 ? v.leaveCount / v.headcount : 0;
         const scoreRisk    = avgScore !== null ? Math.max(0, (60 - avgScore) / 60) : 0;
+        const pipRate      = v.pips / Math.max(v.headcount, 1);
         const riskScore    = Math.round(
-          (resignRate * 3 + leaveRate * 1 + scoreRisk * 2 + (v.pips / Math.max(v.headcount, 1)) * 2) * 33
+          (resignRate * 3 + leaveRate * 1 + scoreRisk * 2 + pipRate * 2) * 33
         );
         const riskLevel    = riskScore >= 60 ? "high" : riskScore >= 30 ? "medium" : "low";
+
+        // Score breakdown — individual contribution of each factor
+        const breakdown = {
+          resign: Math.round(resignRate * 3 * 33),
+          leave:  Math.round(leaveRate  * 1 * 33),
+          score:  Math.round(scoreRisk  * 2 * 33),
+          pip:    Math.round(pipRate    * 2 * 33),
+        };
+
         return {
           dept,
           headcount: v.headcount,
@@ -917,6 +1029,7 @@ export const getDeptRisk = async (_req: Request, res: Response) => {
           pips: v.pips,
           riskScore: Math.min(riskScore, 100),
           riskLevel,
+          breakdown,
         };
       })
       .sort((a, b) => b.riskScore - a.riskScore);
@@ -1458,7 +1571,10 @@ export const getLeaveUtilization = async (_req: Request, res: Response) => {
       .sort((a, b) => a.dept.localeCompare(b.dept) || b.utilizationPct - a.utilizationPct);
 
     // Top 15 for summary card
-    const topUsers = [...allEmployees].sort((a, b) => b.utilizationPct - a.utilizationPct).slice(0, 15);
+    const topUsers = [...allEmployees]
+      .filter((e) => e.used > 0)
+      .sort((a, b) => b.utilizationPct - a.utilizationPct)
+      .slice(0, 15);
 
     res.json({ deptStats, topUsers, allEmployees, year });
   } catch (err: any) {
@@ -1729,6 +1845,108 @@ export const getMobileLoginActivity = async (req: Request, res: Response) => {
       totalDesktop,
       mobilePct: totalLogins > 0 ? Math.round((totalMobile / totalLogins) * 100) : 0,
       uniqueActiveUsers,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════
+// SECTION 18 — QUALIFICATIONS ANALYTICS
+// GET /api/management/qualifications
+// ═══════════════════════════════════════════════════════════
+export const getQualifications = async (_req: Request, res: Response) => {
+  try {
+    const [totalActive, qualifications] = await Promise.all([
+      prisma.employee.count({ where: { employmentStatus: { in: ["ACTIVE", "NOTICE_PERIOD"] } } }),
+      prisma.qualification.findMany({
+        select: {
+          degree: true,
+          degreeName: true,
+          institution: true,
+          year: true,
+          grade: true,
+          employee: {
+            select: {
+              id: true,
+              employmentStatus: true,
+              Department: { select: { name: true } },
+            },
+          },
+        },
+      }),
+    ]);
+
+    // Only consider active/notice-period employees
+    const active = qualifications.filter(
+      (q) => q.employee.employmentStatus === "ACTIVE" || q.employee.employmentStatus === "NOTICE_PERIOD"
+    );
+
+    // Unique employees with at least one qualification
+    const coveredEmployeeIds = new Set(active.map((q) => q.employee.id));
+    const coveragePct = totalActive > 0 ? Math.round((coveredEmployeeIds.size / totalActive) * 100) : 0;
+
+    // Degree type distribution (use degreeName if available, fall back to degree)
+    const degreeMap = new Map<string, number>();
+    for (const q of active) {
+      const key = (q.degreeName || q.degree || "Other").trim();
+      degreeMap.set(key, (degreeMap.get(key) || 0) + 1);
+    }
+    const degreeDistribution = Array.from(degreeMap.entries())
+      .map(([degree, count]) => ({ degree, count }))
+      .sort((a, b) => b.count - a.count);
+
+    // Top institutions
+    const instMap = new Map<string, number>();
+    for (const q of active) {
+      if (!q.institution) continue;
+      const key = q.institution.trim();
+      instMap.set(key, (instMap.get(key) || 0) + 1);
+    }
+    const topInstitutions = Array.from(instMap.entries())
+      .map(([institution, count]) => ({ institution, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
+    // Department-wise qualification breakdown — most common degree per dept
+    const deptMap = new Map<string, { deptDegrees: Map<string, number>; total: number; empIds: Set<number> }>();
+    for (const q of active) {
+      const dept = q.employee.Department?.name || "Unassigned";
+      if (!deptMap.has(dept)) deptMap.set(dept, { deptDegrees: new Map(), total: 0, empIds: new Set() });
+      const entry = deptMap.get(dept)!;
+      const deg = (q.degreeName || q.degree || "Other").trim();
+      entry.deptDegrees.set(deg, (entry.deptDegrees.get(deg) || 0) + 1);
+      entry.total++;
+      entry.empIds.add(q.employee.id);
+    }
+    const deptBreakdown = Array.from(deptMap.entries())
+      .map(([dept, v]) => {
+        let topDegree = "";
+        let topCount = 0;
+        v.deptDegrees.forEach((cnt, deg) => { if (cnt > topCount) { topCount = cnt; topDegree = deg; } });
+        return { dept, qualifiedCount: v.empIds.size, topDegree, totalQuals: v.total };
+      })
+      .sort((a, b) => b.qualifiedCount - a.qualifiedCount);
+
+    // Graduation year trend (group by decade)
+    const yearMap = new Map<string, number>();
+    for (const q of active) {
+      if (!q.year || q.year < 1960 || q.year > new Date().getFullYear()) continue;
+      const decade = `${Math.floor(q.year / 10) * 10}s`;
+      yearMap.set(decade, (yearMap.get(decade) || 0) + 1);
+    }
+    const graduationDecades = Array.from(yearMap.entries())
+      .map(([decade, count]) => ({ decade, count }))
+      .sort((a, b) => a.decade.localeCompare(b.decade));
+
+    res.json({
+      totalActive,
+      withQualification: coveredEmployeeIds.size,
+      coveragePct,
+      degreeDistribution,
+      topInstitutions,
+      deptBreakdown,
+      graduationDecades,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
