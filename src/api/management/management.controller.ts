@@ -304,12 +304,16 @@ export const getAttendanceSummary = async (req: Request, res: Response) => {
         });
       } else {
         // Working day (may have some employees on week-off)
-        // Subtract week-offs from expected headcount before computing absences
-        const expectedPresent = Math.max(0, totalActive - totalWeekoff);
-        const absent = Math.max(0, expectedPresent - present - leave - permission);
+        // Week-off employees who actually came in should be counted as present, not weekoff.
+        // So net weekoff = only those on week-off who did NOT attend.
+        const weekoffNet       = Math.max(0, totalWeekoff - present);
+        // Of the present count, only those beyond the week-off pool are "regular" attendees.
+        const presentFromRegular = Math.max(0, present - totalWeekoff);
+        const expectedRegular  = Math.max(0, totalActive - totalWeekoff);
+        const absent = Math.max(0, expectedRegular - presentFromRegular - leave - permission);
         days.push({
           date: label, present, absent, leave, permission,
-          weekoff: totalWeekoff,
+          weekoff: weekoffNet,
           isNonWorking: false, nonWorkingLabel: isWeekOff ? "Week Off" : null,
         });
       }
