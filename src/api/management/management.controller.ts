@@ -244,6 +244,9 @@ export const getLeaveCalendar = async (req: Request, res: Response) => {
     const lastDay = new Date(year, month, 0).getDate(); // days in month
     const monthEnd = new Date(Date.UTC(year, month - 1, lastDay, 23, 59, 59, 999) - 5.5 * 60 * 60 * 1000);
 
+    console.log(`Fetching leaves overlapping ${year}-${String(month).padStart(2, "0")}-01 to ${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`);
+    console.log( monthStart, monthEnd );
+
     const leaves = await prisma.leaveRequest.findMany({
       where: {
         status: "APPROVED",
