@@ -2159,6 +2159,30 @@ export class DashboardController {
         res.json(rows);
     });
 
+    getMyApprovedOT = asyncHandler(async (req, res) => {
+        const empId = (req as any).user?.empId;
+        if (!empId) return res.status(401).json({ error: 'Unauthorized' });
+
+        const items = await prisma.overtimeApproval.findMany({
+            where: {
+                employeeId: Number(empId),
+                status: 'APPROVE',
+            } as any,
+            orderBy: { date: 'desc' },
+        });
+
+        const rows = items.map((o: any) => ({
+            id: o.id,
+            date: o.date,
+            scheduledEnd: o.scheduledEnd,
+            checkOut: o.checkOut,
+            minutes: o.minutes,
+            approvedAt: o.approvedAt,
+        }));
+
+        res.json(rows);
+    });
+
     approveOrRejectOTManager = asyncHandler(async (req, res) => {
         const { ids, action } = req.body as { ids: number[]; action: 'APPROVE' | 'REJECT' };
         const userEmpId = (req as any).user?.empId;

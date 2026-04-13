@@ -55,6 +55,7 @@ import incentiveRoutes from "./api/incentive/incentive.routes";
 import loanRoutes from "./api/loan/loan.routes";
 import weeklyRatingRoutes from "./api/weekly-rating/weekly-rating.routes";
 import pipRoutes, { respondViaToken } from "./api/pip/pip.routes";
+import managementRoutes from "./api/management/management.routes";
 
 
 
@@ -174,6 +175,7 @@ app.use("/api/incentives", incentiveRoutes);
 app.use("/api/loans", loanRoutes);
 app.use("/api/weekly-rating", weeklyRatingRoutes);
 app.use("/api/pip", pipRoutes);
+app.use("/api/management", managementRoutes);
 // Public endpoint — no auth required (employee responds via token link in email)
 app.post("/api/pip-respond/:token", respondViaToken);
 
