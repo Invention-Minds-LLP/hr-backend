@@ -95,11 +95,16 @@ export const loginUser = async (req: Request, res: Response) => {
         designation: true,
         roleId: true,
         gender: true,
+        employmentStatus: true,
         role: { select: { name: true } }
       }
     })
 
     if (!employee) return res.status(404).json({ error: "Employee not found" });
+
+    if (employee.employmentStatus !== "ACTIVE" && employee.employmentStatus !== "NOTICE_PERIOD") {
+      return res.status(403).json({ error: "Your account is inactive. Please contact HR." });
+    }
 
     if (!user) return res.status(404).json({ error: "User not found" });
 
