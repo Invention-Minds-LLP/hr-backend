@@ -187,6 +187,16 @@ export const createEmployee = async (req: Request, res: Response) => {
       experienceType
     } = req.body;
     const data = req.body;
+
+    if (
+      reportingManager && inchargeId &&
+      Number(reportingManager) === Number(inchargeId)
+    ) {
+      return res.status(400).json({
+        error: "Reporting Manager and Incharge cannot be the same person",
+      });
+    }
+
     let finalCode = employeeCode;
     console.log(finalCode)
 
@@ -686,6 +696,15 @@ export const updateEmployee = async (req: Request, res: Response) => {
       experienceType,
       ...employeeFields
     } = data;
+
+    if (
+      data.reportingManager && inchargeId &&
+      Number(data.reportingManager) === Number(inchargeId)
+    ) {
+      return res.status(400).json({
+        error: "Reporting Manager and Incharge cannot be the same person",
+      });
+    }
 
     const toDate = (v: any) => (v ? new Date(v) : null);
 
