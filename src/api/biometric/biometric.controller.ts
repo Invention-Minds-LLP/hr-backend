@@ -98,10 +98,11 @@ async function isNightShift(employeeId: number, date: Date): Promise<boolean> {
 
 function combineShiftStart(day: Date, shiftStart: Date) {
   const d = new Date(day);
+  const istStart = new Date(shiftStart.getTime() + 5.5 * 3600000);
   d.setHours(
-    shiftStart.getHours(),
-    shiftStart.getMinutes(),
-    shiftStart.getSeconds(),
+    istStart.getHours(),
+    istStart.getMinutes(),
+    istStart.getSeconds(),
     0
   );
   return d;
@@ -109,7 +110,8 @@ function combineShiftStart(day: Date, shiftStart: Date) {
 
 function combineShiftEnd(day: Date, start: Date, end: Date) {
   const d = new Date(day);
-  d.setHours(end.getHours(), end.getMinutes(), end.getSeconds(), 0);
+  const istEnd = new Date(end.getTime() + 5.5 * 3600000);
+  d.setHours(istEnd.getHours(), istEnd.getMinutes(), istEnd.getSeconds(), 0);
   if (end < start) d.setDate(d.getDate() + 1);
   return d;
 }
