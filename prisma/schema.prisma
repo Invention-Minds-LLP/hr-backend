@@ -80,6 +80,7 @@ model Employee {
   geoTrackingConsent      Boolean?         @default(false)
   geoTrackingConsentAt    DateTime?
   experienceType          String?
+  overtimeEnabled         Boolean?         @default(false)
 
   Address                  Address[]
   AnnouncementAck          AnnouncementAck[]
@@ -2657,25 +2658,32 @@ model WeeklyRatingQuestion {
   @@index([designationId])
 }
 
+enum RaterType {
+  MANAGER
+  SELF
+}
+
 model WeeklyPerformanceRating {
-  id             Int      @id @default(autoincrement())
+  id             Int       @id @default(autoincrement())
   employeeId     Int
   ratedBy        Int
+  raterType      RaterType @default(MANAGER)
   weekStartDate  DateTime
   weekEndDate    DateTime
   weekLabel      String?
   overallScore   Float?
-  managerRemarks String?  @db.Text
-  status         String   @default("DRAFT") // DRAFT, SUBMITTED
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @default(now()) @updatedAt
+  managerRemarks String?   @db.Text
+  status         String    @default("DRAFT") // DRAFT, SUBMITTED
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @default(now()) @updatedAt
 
   employee Employee             @relation("WeeklyRatingEmployee", fields: [employeeId], references: [id])
   answers  WeeklyRatingAnswer[]
 
-  @@unique([employeeId, weekStartDate])
+  @@unique([employeeId, weekStartDate, raterType])
   @@index([employeeId])
   @@index([ratedBy])
+  @@index([raterType])
   @@index([weekStartDate])
   @@index([status])
 }

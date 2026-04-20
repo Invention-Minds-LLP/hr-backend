@@ -193,13 +193,14 @@ export const getTeamForRating = async (req: Request, res: Response) => {
       orderBy: { firstName: "asc" },
     });
 
-    // If weekStartDate given, check which employees already have ratings
+    // If weekStartDate given, check which employees already have MANAGER ratings
     let ratingMap: Record<number, any> = {};
     if (weekStartDate) {
       const ratings = await prisma.weeklyPerformanceRating.findMany({
         where: {
           employeeId: { in: team.map(e => e.id) },
           weekStartDate,
+          raterType: "MANAGER" as any,
         },
         select: { employeeId: true, id: true, status: true, overallScore: true },
       });
@@ -220,6 +221,8 @@ export const getTeamForRating = async (req: Request, res: Response) => {
 };
 
 // Create or update rating with answers
+// Self-rating: ratedBy === employeeId → raterType = SELF
+// Manager rating: ratedBy !== employeeId → raterType = MANAGER
 export const submitRating = async (req: Request, res: Response) => {
   try {
     const { employeeId, ratedBy, weekStartDate, weekEndDate, managerRemarks, answers, status } = req.body;
@@ -232,7 +235,6 @@ export const submitRating = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Maximum 10 questions allowed per rating" });
     }
 
-    // Validate scores 1-10
     for (const a of answers) {
       if (!a.questionId || a.score < 1 || a.score > 10) {
         return res.status(400).json({ error: "Each answer must have questionId and score between 1-10" });
@@ -241,17 +243,21 @@ export const submitRating = async (req: Request, res: Response) => {
 
     const start = new Date(weekStartDate);
     const end = new Date(weekEndDate);
-    // overallScore out of 100: each question contributes equally (100/n points max)
+    const raterType = Number(employeeId) === Number(ratedBy) ? "SELF" : "MANAGER";
     const overallScore = Math.round((answers.reduce((sum: number, a: any) => sum + a.score, 0) / answers.length) * 10);
 
-    // Upsert rating
     const existing = await prisma.weeklyPerformanceRating.findUnique({
-      where: { employeeId_weekStartDate: { employeeId: Number(employeeId), weekStartDate: start } },
+      where: {
+        employeeId_weekStartDate_raterType: {
+          employeeId: Number(employeeId),
+          weekStartDate: start,
+          raterType: raterType as any,
+        },
+      },
     });
 
     let rating;
     if (existing) {
-      // Delete old answers and re-create
       await prisma.weeklyRatingAnswer.deleteMany({ where: { ratingId: existing.id } });
       rating = await prisma.weeklyPerformanceRating.update({
         where: { id: existing.id },
@@ -274,6 +280,7 @@ export const submitRating = async (req: Request, res: Response) => {
         data: {
           employeeId: Number(employeeId),
           ratedBy: Number(ratedBy),
+          raterType: raterType as any,
           weekStartDate: start,
           weekEndDate: end,
           weekLabel: getWeekLabel(start),
@@ -316,14 +323,14 @@ export const getRatingDetail = async (req: Request, res: Response) => {
   }
 };
 
-// Employee: Get own weekly ratings
+// Employee: Get weekly ratings RECEIVED FROM MANAGER (only manager-type, not own self ratings)
 export const getMyRatings = async (req: Request, res: Response) => {
   try {
     const empId = Number((req as any).user?.empId);
     if (!empId) return res.status(401).json({ error: "Unauthorized" });
 
     const ratings = await prisma.weeklyPerformanceRating.findMany({
-      where: { employeeId: empId, status: "SUBMITTED" },
+      where: { employeeId: empId, status: "SUBMITTED", raterType: "MANAGER" as any },
       include: {
         answers: { include: { question: true }, orderBy: { question: { displayOrder: "asc" } } },
       },
@@ -398,6 +405,151 @@ export const deleteRating = async (req: Request, res: Response) => {
 
     await prisma.weeklyPerformanceRating.delete({ where: { id } });
     return res.json({ message: "Rating deleted" });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SELF-RATING (Employee fills for themselves)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Get logged-in employee's self-rating for a specific week (to resume / view)
+export const getMySelfRatingForWeek = async (req: Request, res: Response) => {
+  try {
+    const empId = Number((req as any).user?.empId);
+    if (!empId) return res.status(401).json({ error: "Unauthorized" });
+    const weekStartDate = req.query.weekStartDate ? new Date(String(req.query.weekStartDate)) : null;
+    if (!weekStartDate) return res.status(400).json({ error: "weekStartDate is required" });
+
+    const rating = await prisma.weeklyPerformanceRating.findUnique({
+      where: {
+        employeeId_weekStartDate_raterType: {
+          employeeId: empId,
+          weekStartDate,
+          raterType: "SELF" as any,
+        },
+      },
+      include: {
+        answers: { include: { question: true }, orderBy: { question: { displayOrder: "asc" } } },
+      },
+    });
+    return res.json(rating);
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Get all self-ratings for the logged-in employee (history)
+export const getMySelfRatings = async (req: Request, res: Response) => {
+  try {
+    const empId = Number((req as any).user?.empId);
+    if (!empId) return res.status(401).json({ error: "Unauthorized" });
+
+    const ratings = await prisma.weeklyPerformanceRating.findMany({
+      where: { employeeId: empId, raterType: "SELF" as any },
+      include: {
+        answers: { include: { question: true }, orderBy: { question: { displayOrder: "asc" } } },
+      },
+      orderBy: { weekStartDate: "desc" },
+    });
+    return res.json(ratings);
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MANAGEMENT — Side-by-side comparison of self vs manager ratings
+// ═══════════════════════════════════════════════════════════════════════════
+export const getComparison = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.employeeId);
+    const weekStartParam = req.query.weekStartDate ? String(req.query.weekStartDate) : null;
+
+    const where: any = { employeeId };
+    if (weekStartParam) {
+      // Match by date-range to avoid IST vs UTC mismatches in storage.
+      // A week starting on "2026-04-20" in IST may be stored as "2026-04-19 18:30 UTC".
+      // So we match anything within a 48-hour window around the requested date.
+      const base = new Date(weekStartParam + "T00:00:00.000Z");
+      const rangeStart = new Date(base.getTime() - 12 * 3600000);  // 12h before UTC midnight
+      const rangeEnd   = new Date(base.getTime() + 36 * 3600000);  // 36h after UTC midnight
+      where.weekStartDate = { gte: rangeStart, lte: rangeEnd };
+    }
+
+    const ratings = await prisma.weeklyPerformanceRating.findMany({
+      where,
+      include: {
+        answers: { include: { question: true }, orderBy: { question: { displayOrder: "asc" } } },
+      },
+      orderBy: { weekStartDate: "desc" },
+    });
+
+    // Group by IST calendar date of weekStartDate so self & manager ratings
+    // for the same week merge even if stored at slightly different timestamps
+    // (e.g. self at 18:30 UTC = IST midnight, manager at 00:00 UTC).
+    const istDateKey = (d: Date) => {
+      const ist = new Date(d.getTime() + 5.5 * 3600000);
+      return ist.toISOString().slice(0, 10); // YYYY-MM-DD (IST)
+    };
+
+    const byWeek: Record<string, { self: any | null; manager: any | null; weekStartDate: Date; weekEndDate: Date }> = {};
+    for (const r of ratings) {
+      const key = istDateKey(r.weekStartDate);
+      if (!byWeek[key]) {
+        byWeek[key] = { self: null, manager: null, weekStartDate: r.weekStartDate, weekEndDate: r.weekEndDate };
+      }
+      if ((r as any).raterType === "SELF") byWeek[key].self = r;
+      else byWeek[key].manager = r;
+    }
+
+    // Build per-question comparison for each week
+    const result = Object.values(byWeek).map((wk) => {
+      const allQuestions = new Map<number, { id: number; text: string }>();
+      const selfAnswers = new Map<number, { score: number; remarks: string | null }>();
+      const mgrAnswers = new Map<number, { score: number; remarks: string | null }>();
+
+      if (wk.self) {
+        for (const a of wk.self.answers) {
+          allQuestions.set(a.questionId, { id: a.question.id, text: a.question.text });
+          selfAnswers.set(a.questionId, { score: a.score, remarks: a.remarks });
+        }
+      }
+      if (wk.manager) {
+        for (const a of wk.manager.answers) {
+          allQuestions.set(a.questionId, { id: a.question.id, text: a.question.text });
+          mgrAnswers.set(a.questionId, { score: a.score, remarks: a.remarks });
+        }
+      }
+
+      const comparison = Array.from(allQuestions.values()).map((q) => {
+        const s = selfAnswers.get(q.id) ?? null;
+        const m = mgrAnswers.get(q.id) ?? null;
+        return {
+          questionId: q.id,
+          questionText: q.text,
+          selfScore: s?.score ?? null,
+          managerScore: m?.score ?? null,
+          delta: s && m ? m.score - s.score : null,
+          selfRemarks: s?.remarks ?? null,
+          managerRemarks: m?.remarks ?? null,
+        };
+      });
+
+      return {
+        weekStartDate: wk.weekStartDate,
+        weekEndDate: wk.weekEndDate,
+        weekLabel: wk.self?.weekLabel ?? wk.manager?.weekLabel ?? null,
+        selfOverallScore: wk.self?.overallScore ?? null,
+        managerOverallScore: wk.manager?.overallScore ?? null,
+        managerRemarks: wk.manager?.managerRemarks ?? null,
+        selfRemarks: wk.self?.managerRemarks ?? null, // self uses same remarks field
+        comparison,
+      };
+    });
+
+    return res.json(result);
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }

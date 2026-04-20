@@ -96,24 +96,41 @@ async function isNightShift(employeeId: number, date: Date): Promise<boolean> {
   return hrs >= 12;
 }
 
+// Shift times are stored as UTC timestamps where UTC hours == IST hours
+// (e.g., "1970-01-01T11:30:00.000Z" represents 5 PM IST for General 2 shift).
+// Use UTC methods exclusively to avoid server-timezone dependency.
+
 function combineShiftStart(day: Date, shiftStart: Date) {
-  const d = new Date(day);
-  const istStart = new Date(shiftStart.getTime() + 5.5 * 3600000);
-  d.setHours(
-    istStart.getHours(),
-    istStart.getMinutes(),
-    istStart.getSeconds(),
-    0
-  );
-  return d;
+  // Get IST calendar date from 'day' (which may be UTC midnight of IST date)
+  const dayIst = new Date(day.getTime() + 5.5 * 3600000);
+  // Build result using IST date components + shift UTC time components
+  return new Date(Date.UTC(
+    dayIst.getUTCFullYear(),
+    dayIst.getUTCMonth(),
+    dayIst.getUTCDate(),
+    shiftStart.getUTCHours(),
+    shiftStart.getUTCMinutes(),
+    shiftStart.getUTCSeconds()
+  ));
 }
 
 function combineShiftEnd(day: Date, start: Date, end: Date) {
-  const d = new Date(day);
-  const istEnd = new Date(end.getTime() + 5.5 * 3600000);
-  d.setHours(istEnd.getHours(), istEnd.getMinutes(), istEnd.getSeconds(), 0);
-  if (end < start) d.setDate(d.getDate() + 1);
-  return d;
+  const dayIst = new Date(day.getTime() + 5.5 * 3600000);
+  const result = new Date(Date.UTC(
+    dayIst.getUTCFullYear(),
+    dayIst.getUTCMonth(),
+    dayIst.getUTCDate(),
+    end.getUTCHours(),
+    end.getUTCMinutes(),
+    end.getUTCSeconds()
+  ));
+  // Night shift: if end time-of-day is before start time-of-day, it rolls to next day
+  const endMins   = end.getUTCHours()   * 60 + end.getUTCMinutes();
+  const startMins = start.getUTCHours() * 60 + start.getUTCMinutes();
+  if (endMins < startMins) {
+    result.setUTCDate(result.getUTCDate() + 1);
+  }
+  return result;
 }
 
 function diffMinutes(a: Date, b: Date) {
@@ -621,6 +638,7 @@ export async function runBiometricSync(isFinalRun: boolean) {
           id: true,
           departmentId: true,
           roleId: true,
+          overtimeEnabled: true,
         },
       },
     },
@@ -628,6 +646,8 @@ export async function runBiometricSync(isFinalRun: boolean) {
 
   for (const rec of yAttendance) {
     if (!rec.checkOut) continue;
+    // Skip employees who don't have overtime enabled
+    if (!rec.employee.overtimeEnabled) continue;
 
     const shiftType = getShiftTypeByRoleAndDepartment(
       rec.employee.roleId,
@@ -683,6 +703,99 @@ export async function runBiometricSync(isFinalRun: boolean) {
 
 
 }
+
+// Standalone function that runs ONLY the Late Login + Overtime calculation
+// for a given attendance date. Does NOT hit the biometric device (COSEC).
+// Use this from debug endpoints or tests to verify shift-time logic.
+export async function runOtAndLateLoginForDate(targetDate: Date) {
+  const day = startOfDay(targetDate);
+
+  const allShifts = await prisma.shiftTemplate.findMany({
+    select: { id: true, shiftType: true, startTime: true, endTime: true },
+  });
+
+  const shiftsByType = new Map<ShiftType, typeof allShifts>();
+  for (const s of allShifts) {
+    if (!shiftsByType.has(s.shiftType)) shiftsByType.set(s.shiftType, []);
+    shiftsByType.get(s.shiftType)!.push(s);
+  }
+
+  const getShiftTypeByRoleAndDepartment = (roleId: number, departmentId: number): ShiftType => {
+    if (roleId === 1 || roleId === 3) return 'REPORTING_MANAGER';
+    if (departmentId === 3) return 'NURSING';
+    if (departmentId === 4) return 'MOD';
+    if (roleId === 2) return 'EXECUTIVE';
+    return 'EXECUTIVE';
+  };
+
+  const findNearestShiftStart = (date: Date, checkIn: Date, shifts: { startTime: Date }[]) => {
+    let nearest: Date | null = null; let minDiff = Infinity;
+    for (const s of shifts) {
+      const shiftStart = combineShiftStart(date, s.startTime);
+      const diff = Math.abs(checkIn.getTime() - shiftStart.getTime());
+      if (diff < minDiff) { minDiff = diff; nearest = shiftStart; }
+    }
+    return nearest;
+  };
+
+  const findNearestShiftEnd = (date: Date, checkOut: Date, shifts: { startTime: Date; endTime: Date }[]) => {
+    let nearest: Date | null = null; let minDiff = Infinity;
+    for (const s of shifts) {
+      const shiftEnd = combineShiftEnd(date, s.startTime, s.endTime);
+      const diff = Math.abs(checkOut.getTime() - shiftEnd.getTime());
+      if (diff < minDiff) { minDiff = diff; nearest = shiftEnd; }
+    }
+    return nearest;
+  };
+
+  const attendance = await prisma.attendance.findMany({
+    where: { date: day },
+    include: { employee: { select: { id: true, departmentId: true, roleId: true, overtimeEnabled: true } } },
+  });
+
+  for (const rec of attendance) {
+    const shiftType = getShiftTypeByRoleAndDepartment(rec.employee.roleId, rec.employee.departmentId);
+    const shifts = shiftsByType.get(shiftType);
+    if (!shifts || shifts.length === 0) continue;
+
+    // Late Login
+    if (rec.checkIn) {
+      const shiftStart = findNearestShiftStart(day, rec.checkIn, shifts);
+      if (shiftStart) {
+        const lateMin = Math.round((rec.checkIn.getTime() - shiftStart.getTime()) / 60000);
+        if (lateMin > 15) {
+          await prisma.lateLoginLog.upsert({
+            where: { employeeId_date: { employeeId: rec.employeeId, date: day } },
+            create: {
+              employeeId: rec.employeeId, date: day, shiftStart,
+              checkIn: rec.checkIn, lateMinutes: lateMin, source: 'TEMP_DEPT_SHIFT',
+            },
+            update: { shiftStart, checkIn: rec.checkIn, lateMinutes: lateMin },
+          });
+        }
+      }
+    }
+
+    // Overtime — only for employees with overtimeEnabled = true
+    if (rec.checkOut && rec.employee.overtimeEnabled) {
+      const schedEnd = findNearestShiftEnd(day, rec.checkOut, shifts);
+      if (schedEnd) {
+        const otMin = Math.round((rec.checkOut.getTime() - schedEnd.getTime()) / 60000);
+        if (otMin > 60 && otMin <= 720) {
+          await prisma.overtimeApproval.upsert({
+            where: { employeeId_date: { employeeId: rec.employeeId, date: day } },
+            create: {
+              employeeId: rec.employeeId, date: day, minutes: otMin,
+              scheduledEnd: schedEnd, checkOut: rec.checkOut, status: 'PENDING',
+            },
+            update: { minutes: otMin, scheduledEnd: schedEnd, checkOut: rec.checkOut },
+          });
+        }
+      }
+    }
+  }
+}
+
 async function notifyHRShiftSummary() {
   const today = startOfDay(new Date());
   const graceMinutes = 15;

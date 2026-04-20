@@ -2,6 +2,7 @@ import { Router } from "express";
 import {
   getQuestions, getQuestionsForEmployee, createQuestion, toggleQuestion, seedDefaultQuestions,
   getTeamForRating, submitRating, getRatingDetail, getAllRatings, deleteRating, getMyRatings,
+  getMySelfRatingForWeek, getMySelfRatings, getComparison,
 } from "./weekly-rating.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -19,6 +20,12 @@ router.get("/team", authenticateToken, getTeamForRating);
 router.get("/my", authenticateToken, getMyRatings);
 router.post("/rate", authenticateToken, submitRating);
 router.get("/all", authenticateToken, getAllRatings);
+// Self-rating (employee fills own)
+router.get("/self/week", authenticateToken, getMySelfRatingForWeek);
+router.get("/self", authenticateToken, getMySelfRatings);
+// Management comparison view
+router.get("/comparison/:employeeId", authenticateToken, getComparison);
+
 router.get("/:id", authenticateToken, getRatingDetail);
 router.delete("/:id", authenticateToken, deleteRating);
 

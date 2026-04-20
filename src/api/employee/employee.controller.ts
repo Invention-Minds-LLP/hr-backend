@@ -184,6 +184,7 @@ export const createEmployee = async (req: Request, res: Response) => {
       aadharNumber,
       licenseNumber,
       geoTrackingEnabled,
+      overtimeEnabled,
       experienceType
     } = req.body;
     const data = req.body;
@@ -236,6 +237,7 @@ export const createEmployee = async (req: Request, res: Response) => {
           sameAsPermanent,
           experienceType,
           geoTrackingEnabled: geoTrackingEnabled ?? false,
+          overtimeEnabled: overtimeEnabled ?? false,
           // Health & Wellness fields
           preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
           height: data.height ? parseFloat(data.height) : null,
@@ -361,6 +363,7 @@ export const createEmployee = async (req: Request, res: Response) => {
             totalYearsOfExperience,
             experience,
             geoTrackingEnabled,
+            overtimeEnabled,
             motherName,
             alternatePhone,
             uanNumber,
@@ -755,6 +758,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
         emergencyNotes: data.emergencyNotes,
 
         geoTrackingEnabled: data.geoTrackingEnabled,
+        overtimeEnabled: data.overtimeEnabled,
 
 
         motherName: data.motherName,
