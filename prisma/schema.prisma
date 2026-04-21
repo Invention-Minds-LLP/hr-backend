@@ -22,7 +22,12 @@ model Employee {
   branchId                Int
   dateOfJoining           DateTime
   employmentType          EmploymentType
+  probationStartDate      DateTime?
   probationEndDate        DateTime?
+  probationStatus         ProbationStatus?
+  probationConfirmedOn    DateTime?
+  probationConfirmedBy    Int?
+  probationRemarks        String?
   employmentStatus        EmploymentStatus
   roleId                  Int
   createdAt               DateTime         @default(now())
@@ -152,6 +157,7 @@ model Employee {
   pips                     EmployeePIP[]
   pipEmailLogs             PIPEmailLog[]
   pipResponses             PIPEmployeeResponse[]
+  probationRecords         ProbationRecord[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -2235,6 +2241,30 @@ enum EmploymentType {
   PROBATION
   DOCTOR
   TRAINEE
+}
+
+enum ProbationStatus {
+  IN_PROGRESS
+  CONFIRMED
+  EXTENDED
+  TERMINATED
+  WAIVED
+}
+
+model ProbationRecord {
+  id           Int             @id @default(autoincrement())
+  employeeId   Int
+  employee     Employee        @relation(fields: [employeeId], references: [id])
+  startDate    DateTime
+  endDate      DateTime
+  status       ProbationStatus
+  remarks      String?
+  decidedBy    Int?
+  decidedOn    DateTime?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @default(now()) @updatedAt
+
+  @@index([employeeId])
 }
 
 enum EmploymentStatus {

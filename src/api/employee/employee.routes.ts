@@ -30,7 +30,11 @@ import {
   getEmployeesByRole,
   getEmployeesByManager,
   bulkUpdateEmployeeExtras,
-  bulkUploadLeaveBalance
+  bulkUploadLeaveBalance,
+  extendProbation,
+  confirmProbation,
+  terminateProbation,
+  getProbationHistory
 } from "./employee.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 import { bulkUploadLeaveBalancesExcel } from "../leave/leave.controller";
@@ -66,6 +70,11 @@ router.post("/employees/:employeeId/sabbatical", startSabbatical);
 router.put("/sabbaticals/:id/extend", extendSabbatical);
 router.put("/sabbaticals/:id/end", endSabbatical);
 router.put("/sabbaticals/:id/terminate", terminateFromSabbatical);
+
+router.get("/:id/probation/history", authenticateToken, getProbationHistory);
+router.post("/:id/probation/extend", authenticateToken, extendProbation);
+router.post("/:id/probation/confirm", authenticateToken, confirmProbation);
+router.post("/:id/probation/terminate", authenticateToken, terminateProbation);
 
 
 

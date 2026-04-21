@@ -179,6 +179,27 @@ app.use("/api/management", managementRoutes);
 // Public endpoint — no auth required (employee responds via token link in email)
 app.post("/api/pip-respond/:token", respondViaToken);
 
+// Utility: backfill biometric attendance for one employee across a date range
+import { backfillEmployeeAttendance } from "./api/biometric/biometric.controller";
+app.post("/api/biometric/backfill-employee", async (req, res) => {
+  try {
+    const { employeeCode, fromDate, toDate } = req.body;
+    if (!employeeCode || !fromDate || !toDate) {
+      return res.status(400).json({
+        error: "employeeCode, fromDate (YYYY-MM-DD), toDate (YYYY-MM-DD) are required",
+      });
+    }
+    const result = await backfillEmployeeAttendance(
+      employeeCode,
+      new Date(fromDate),
+      new Date(toDate),
+    );
+    res.json(result);
+  } catch (err: any) {
+    console.error("[backfill-employee] failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Default route
 app.get("/", (req, res) => {

@@ -155,7 +155,12 @@ export const createEmployee = async (req: Request, res: Response) => {
       branchId,
       dateOfJoining,
       employmentType,
+      probationStartDate,
       probationEndDate,
+      probationStatus,
+      probationConfirmedOn,
+      probationConfirmedBy,
+      probationRemarks,
       employmentStatus,
       emergencyContacts,
       qualifications,
@@ -224,7 +229,12 @@ export const createEmployee = async (req: Request, res: Response) => {
           // designationId: designationId ?? null, // ✅ THIS IS THE FIX
           dateOfJoining: new Date(dateOfJoining),
           employmentType,
+          probationStartDate: probationStartDate ? new Date(probationStartDate) : null,
           probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
+          probationStatus: probationStatus ?? null,
+          probationConfirmedOn: probationConfirmedOn ? new Date(probationConfirmedOn) : null,
+          probationConfirmedBy: probationConfirmedBy ?? null,
+          probationRemarks: probationRemarks ?? null,
           employmentStatus,
           bloodGroup,
           age,
@@ -351,7 +361,12 @@ export const createEmployee = async (req: Request, res: Response) => {
             // designationId: designationId ?? null, // ✅ THIS IS THE FIX
             dateOfJoining: new Date(dateOfJoining),
             employmentType,
+            probationStartDate: probationStartDate ? new Date(probationStartDate) : null,
             probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
+            probationStatus: probationStatus ?? null,
+            probationConfirmedOn: probationConfirmedOn ? new Date(probationConfirmedOn) : null,
+            probationConfirmedBy: probationConfirmedBy ?? null,
+            probationRemarks: probationRemarks ?? null,
             employmentStatus,
             bloodGroup,
             age,
@@ -441,6 +456,29 @@ export const createEmployee = async (req: Request, res: Response) => {
         }
       });
       // (Optional) generate daily ShiftAssignment rows for the next N days here.
+    }
+
+    // Seed first probation record when starting on probation with start+end dates
+    if (
+      employmentType === 'PROBATION' &&
+      newEmployee.probationStartDate &&
+      newEmployee.probationEndDate
+    ) {
+      await prisma.probationRecord.create({
+        data: {
+          employeeId: newEmployee.id,
+          startDate: newEmployee.probationStartDate,
+          endDate: newEmployee.probationEndDate,
+          status: probationStatus ?? 'IN_PROGRESS',
+          remarks: probationRemarks ?? null,
+        },
+      });
+      if (!probationStatus) {
+        await prisma.employee.update({
+          where: { id: newEmployee.id },
+          data: { probationStatus: 'IN_PROGRESS' },
+        });
+      }
     }
 
     return res.status(201).json(newEmployee);
@@ -647,6 +685,9 @@ export const getEmployeeById = async (req: Request, res: Response) => {
           include: {
             shift: true              // Include shift template details
           }
+        },
+        probationRecords: {
+          orderBy: { createdAt: 'asc' }
         }
       }
     });
@@ -689,7 +730,9 @@ export const updateEmployee = async (req: Request, res: Response) => {
       rotationStartDate,     // ISO string | undefined
       dob,
       dateOfJoining,
+      probationStartDate,
       probationEndDate,
+      probationConfirmedOn,
       inchargeId,
       preEmploymentCheckDate,
       fatherName,
@@ -713,7 +756,9 @@ export const updateEmployee = async (req: Request, res: Response) => {
 
     employeeFields.dob = toDate(dob) ?? undefined;
     employeeFields.dateOfJoining = toDate(dateOfJoining) ?? undefined;
+    employeeFields.probationStartDate = toDate(probationStartDate);
     employeeFields.probationEndDate = toDate(probationEndDate);
+    employeeFields.probationConfirmedOn = toDate(probationConfirmedOn);
 
 
     const updatedEmployee = await prisma.employee.update({
@@ -859,7 +904,62 @@ export const updateEmployee = async (req: Request, res: Response) => {
       });
     }
 
+    // Sync ProbationRecord whenever start+end dates are present.
+    // This covers:
+    //   - Legacy backfill: HR edits a PERMANENT employee and records their past probation (e.g. CONFIRMED)
+    //   - First-time setup: PROBATION employee gets dates for the first time
+    //   - Data-entry correction: HR fixes a date on the current IN_PROGRESS record
+    // Transitions like extend / confirm / terminate still go through the dedicated action endpoints
+    // so the full audit trail is produced cleanly.
+    if (
+      updatedEmployee.probationStartDate &&
+      updatedEmployee.probationEndDate
+    ) {
+      const allRecords = await prisma.probationRecord.findMany({
+        where: { employeeId: updatedEmployee.id },
+        orderBy: { createdAt: 'desc' },
+      });
+      const inProgress = allRecords.find((r) => r.status === 'IN_PROGRESS');
 
+      if (inProgress) {
+        // Correction: keep the current active record in sync with the form
+        await prisma.probationRecord.update({
+          where: { id: inProgress.id },
+          data: {
+            startDate: updatedEmployee.probationStartDate,
+            endDate: updatedEmployee.probationEndDate,
+            remarks: updatedEmployee.probationRemarks ?? null,
+          },
+        });
+      } else if (allRecords.length === 0) {
+        // Backfill: no records yet → create the first record using the form status.
+        // If status is a terminal one (CONFIRMED/TERMINATED/WAIVED/EXTENDED) we stamp decidedOn
+        // so the history panel shows when the decision was taken.
+        const formStatus = (updatedEmployee.probationStatus as any) || 'IN_PROGRESS';
+        const isTerminal = formStatus !== 'IN_PROGRESS';
+        await prisma.probationRecord.create({
+          data: {
+            employeeId: updatedEmployee.id,
+            startDate: updatedEmployee.probationStartDate,
+            endDate: updatedEmployee.probationEndDate,
+            status: formStatus,
+            remarks: updatedEmployee.probationRemarks ?? null,
+            decidedOn: isTerminal
+              ? (updatedEmployee.probationConfirmedOn ?? new Date())
+              : null,
+          },
+        });
+        if (!updatedEmployee.probationStatus) {
+          await prisma.employee.update({
+            where: { id: updatedEmployee.id },
+            data: { probationStatus: 'IN_PROGRESS' },
+          });
+        }
+      }
+      // else: records exist but none are IN_PROGRESS (e.g. already CONFIRMED) →
+      // form is read-only from a history standpoint. Use Extend/Confirm/Terminate buttons
+      // to change state going forward.
+    }
 
     res.json(updatedEmployee);
   } catch (error) {
@@ -3797,5 +3897,155 @@ export const bulkUploadLeaveBalance = async (req: Request, res: Response) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Upload failed" });
+  }
+};
+
+// ── Probation Actions ──────────────────────────────────────────────────────
+
+export const extendProbation = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.id);
+    const { newEndDate, remarks } = req.body;
+    const decidedBy = (req as any).user?.empId ?? null;
+
+    if (!newEndDate) return res.status(400).json({ error: 'newEndDate is required' });
+
+    const result = await prisma.$transaction(async (tx) => {
+      const emp = await tx.employee.findUnique({ where: { id: employeeId } });
+      if (!emp) throw new Error('Employee not found');
+      if (!emp.probationStartDate || !emp.probationEndDate) {
+        throw new Error('Employee has no active probation to extend');
+      }
+
+      // Close the current in-progress record as EXTENDED
+      await tx.probationRecord.updateMany({
+        where: { employeeId, status: 'IN_PROGRESS' },
+        data: {
+          status: 'EXTENDED',
+          decidedBy,
+          decidedOn: new Date(),
+          remarks: remarks ?? null,
+        },
+      });
+
+      // Create a new IN_PROGRESS record for the extension
+      const newRecord = await tx.probationRecord.create({
+        data: {
+          employeeId,
+          startDate: emp.probationEndDate,
+          endDate: new Date(newEndDate),
+          status: 'IN_PROGRESS',
+          remarks: remarks ?? null,
+        },
+      });
+
+      // Update employee snapshot
+      const updated = await tx.employee.update({
+        where: { id: employeeId },
+        data: {
+          probationEndDate: new Date(newEndDate),
+          probationStatus: 'IN_PROGRESS',
+          probationRemarks: remarks ?? null,
+        },
+      });
+
+      return { employee: updated, record: newRecord };
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
+};
+
+export const confirmProbation = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.id);
+    const { confirmedOn, remarks } = req.body;
+    const decidedBy = (req as any).user?.empId ?? null;
+
+    const when = confirmedOn ? new Date(confirmedOn) : new Date();
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Close the current IN_PROGRESS record as CONFIRMED
+      await tx.probationRecord.updateMany({
+        where: { employeeId, status: 'IN_PROGRESS' },
+        data: {
+          status: 'CONFIRMED',
+          decidedBy,
+          decidedOn: when,
+          remarks: remarks ?? null,
+        },
+      });
+
+      const updated = await tx.employee.update({
+        where: { id: employeeId },
+        data: {
+          probationStatus: 'CONFIRMED',
+          probationConfirmedOn: when,
+          probationConfirmedBy: decidedBy,
+          probationRemarks: remarks ?? null,
+          employmentType: 'PERMANENT',
+        },
+      });
+
+      return updated;
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
+};
+
+export const terminateProbation = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.id);
+    const { remarks } = req.body;
+    const decidedBy = (req as any).user?.empId ?? null;
+
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.probationRecord.updateMany({
+        where: { employeeId, status: 'IN_PROGRESS' },
+        data: {
+          status: 'TERMINATED',
+          decidedBy,
+          decidedOn: new Date(),
+          remarks: remarks ?? null,
+        },
+      });
+
+      const updated = await tx.employee.update({
+        where: { id: employeeId },
+        data: {
+          probationStatus: 'TERMINATED',
+          probationRemarks: remarks ?? null,
+          employmentStatus: 'TERMINATED',
+        },
+      });
+
+      return updated;
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
+};
+
+export const getProbationHistory = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.id);
+    const records = await prisma.probationRecord.findMany({
+      where: { employeeId },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json(records);
+  } catch (err: any) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
   }
 };

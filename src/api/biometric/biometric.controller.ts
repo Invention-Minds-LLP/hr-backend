@@ -216,7 +216,9 @@ export async function runBiometricSync(isFinalRun: boolean) {
   });
 
 
-  const empMap = new Map(employees.map(e => [e.employeeCode!, e.id]));
+  // Normalize employeeCode to uppercase so biometric userid matches regardless of case
+  // (e.g. DB "JMRH234" vs device sending "jmrh234")
+  const empMap = new Map(employees.map(e => [String(e.employeeCode).toUpperCase().trim(), e.id]));
   // console.log(empMap)
 
 
@@ -230,7 +232,7 @@ export async function runBiometricSync(isFinalRun: boolean) {
 
   for (const r of todayRecords) {
     // console.log(r.userId, 'userId')
-    const employeeId = empMap.get(r.userid);
+    const employeeId = empMap.get(String(r.userid ?? '').toUpperCase().trim());
     // console.log(employeeId)
     if (!employeeId) continue;
 
@@ -322,7 +324,7 @@ export async function runBiometricSync(isFinalRun: boolean) {
   ====================================================== */
 
   for (const r of todayRecords) {
-    const employeeId = empMap.get(r.userid);
+    const employeeId = empMap.get(String(r.userid ?? '').toUpperCase().trim());
     if (!employeeId) continue;
 
     const punches = extractPunches(r);
@@ -794,6 +796,156 @@ export async function runOtAndLateLoginForDate(targetDate: Date) {
       }
     }
   }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// BACKFILL: Re-process biometric attendance for ONE employee across a
+// date range. Fetches COSEC per-day and upserts Attendance rows.
+// ════════════════════════════════════════════════════════════════════
+export async function backfillEmployeeAttendance(
+  employeeCode: string,
+  fromDate: Date,
+  toDate: Date
+) {
+  const normalizedCode = String(employeeCode).toUpperCase().trim();
+  console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`🔄 [BACKFILL] Starting for code="${employeeCode}" (normalized="${normalizedCode}")`);
+  console.log(`   Range: ${fromDate.toDateString()} → ${toDate.toDateString()}`);
+
+  const employee = await prisma.employee.findFirst({
+    where: { employeeCode: { equals: normalizedCode } },
+    select: { id: true, employeeCode: true, firstName: true, lastName: true },
+  });
+
+  if (!employee) {
+    console.log(`❌ [BACKFILL] Employee NOT FOUND for code: ${normalizedCode}`);
+    // Try case-insensitive search for debugging
+    const all = await prisma.employee.findMany({
+      where: { employeeCode: { contains: normalizedCode.slice(0, 4) } },
+      select: { employeeCode: true },
+      take: 5,
+    });
+    console.log(`   Did you mean one of these? ${all.map(e => e.employeeCode).join(', ')}`);
+    throw new Error(`Employee not found for code: ${employeeCode}`);
+  }
+
+  console.log(`✅ [BACKFILL] Found employee: id=${employee.id}, code=${employee.employeeCode}, name="${employee.firstName} ${employee.lastName}"`);
+
+  const start = startOfDay(fromDate);
+  const end = startOfDay(toDate);
+  if (end < start) throw new Error("toDate must be >= fromDate");
+
+  const results: any[] = [];
+  let dayIndex = 0;
+  const totalDays = Math.floor((end.getTime() - start.getTime()) / 86400000) + 1;
+
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    dayIndex++;
+    const day = new Date(d);
+    day.setHours(0, 0, 0, 0);
+    const dayStr = day.toDateString();
+
+    console.log(`\n──────────────────────────────────────────────`);
+    console.log(`📅 [BACKFILL] Day ${dayIndex}/${totalDays}: ${dayStr}`);
+
+    try {
+      console.log(`   🌐 Fetching COSEC attendance-daily for ${day.toDateString()}...`);
+      const records = await fetchAttendanceDaily(day);
+      console.log(`   📥 COSEC returned ${records.length} records`);
+
+      const r = records.find(
+        (rec: any) => String(rec.userid ?? '').toUpperCase().trim() === normalizedCode
+      );
+
+      if (!r) {
+        console.log(`   ⚠️  No record for code=${normalizedCode} on this day. Sample userids in response:`,
+          records.slice(0, 5).map((x: any) => x.userid));
+        results.push({ date: dayStr, status: 'NO_BIOMETRIC_DATA' });
+        continue;
+      }
+
+      console.log(`   ✔️  Found user record. userid=${r.userid}, processdate=${r.processdate}`);
+
+      const punches = extractPunches(r);
+      console.log(`   🕒 Punches (${punches.length}): ${punches.map(p => p.toISOString()).join(', ')}`);
+
+      if (!punches.length) {
+        console.log(`   ⚠️  No valid punches.`);
+        results.push({ date: dayStr, status: 'NO_PUNCHES' });
+        continue;
+      }
+
+      const prevDay = new Date(day);
+      prevDay.setDate(prevDay.getDate() - 1);
+
+      const night = await isNightShift(employee.id, day);
+      const wasNightYesterday = await isNightShift(employee.id, prevDay);
+      console.log(`   🌙 night shift today=${night}, was night yesterday=${wasNightYesterday}`);
+
+      let checkIn: Date | null = null;
+      if (wasNightYesterday) {
+        checkIn = punches.length > 1 ? punches[1] : null;
+      } else {
+        checkIn = punches[0];
+      }
+
+      const checkOut =
+        night || punches.length === 1 ? null : punches[punches.length - 1];
+
+      console.log(`   ▶️  checkIn=${checkIn?.toISOString() ?? 'null'}, checkOut=${checkOut?.toISOString() ?? 'null'}`);
+
+      let finalStatus = checkIn ? 'Present' : 'Absent';
+      if (checkIn && checkOut && !night && !wasNightYesterday) {
+        const workedMin = diffMinutes(checkIn, checkOut);
+        console.log(`   ⏱️  Worked ${workedMin} min`);
+        if (workedMin < 240) {
+          const allowed = await hasLeaveOrPermission(employee.id, day);
+          finalStatus = allowed ? 'Present' : 'ON_HOLD';
+          console.log(`   ⚠️  <240 min, leave/permission=${allowed} → status=${finalStatus}`);
+        }
+      }
+
+      console.log(`   💾 Upserting attendance: status=${finalStatus}`);
+      const attendance = await prisma.attendance.upsert({
+        where: { employeeId_date: { employeeId: employee.id, date: day } },
+        create: { employeeId: employee.id, date: day, checkIn, checkOut, status: finalStatus },
+        update: { checkIn, checkOut, status: finalStatus },
+      });
+      console.log(`   ✅ Attendance upserted id=${attendance.id}`);
+
+      await generateCompOffIfEligible(attendance);
+      if (finalStatus === 'Present') {
+        await autoCancelLeaveIfPresent(employee.id, day);
+      }
+
+      results.push({
+        date: dayStr,
+        status: finalStatus,
+        checkIn: checkIn?.toISOString() ?? null,
+        checkOut: checkOut?.toISOString() ?? null,
+        punches: punches.length,
+      });
+    } catch (err: any) {
+      console.log(`   ❌ ERROR on ${dayStr}:`, err.message);
+      results.push({ date: dayStr, status: 'ERROR', error: err.message });
+    }
+  }
+
+  console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`✅ [BACKFILL] Completed. Processed ${results.length} days`);
+  console.log(`   Status summary:`, results.reduce((acc: any, r: any) => {
+    acc[r.status] = (acc[r.status] ?? 0) + 1;
+    return acc;
+  }, {}));
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+
+  return {
+    employeeId: employee.id,
+    employeeCode: employee.employeeCode,
+    employeeName: `${employee.firstName} ${employee.lastName}`,
+    totalDays: results.length,
+    days: results,
+  };
 }
 
 async function notifyHRShiftSummary() {
