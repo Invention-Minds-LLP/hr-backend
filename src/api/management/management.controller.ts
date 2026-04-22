@@ -342,14 +342,16 @@ export const getAttendanceSummary = async (req: Request, res: Response) => {
       const isHoliday      = !!holidayTitle;
       const isWeekOff      = totalWeekoff > 0;
 
-      // Count statuses from the pre-fetched map
+      // Count statuses from the pre-fetched map.
+      // MySQL string compare is case-insensitive, but JS === is not, so normalize.
       const dayMap = attByDay.get(dayStr) ?? new Map<number, string>();
       let present = 0, leave = 0, permission = 0;
       const attendedIds = new Set<number>();
       for (const [empId, st] of dayMap.entries()) {
-        if (st === "PRESENT")    { present++;    attendedIds.add(empId); }
-        else if (st === "LEAVE") { leave++;      attendedIds.add(empId); }
-        else if (st === "PERMISSION") { permission++; attendedIds.add(empId); }
+        const s = (st || "").toUpperCase();
+        if (s === "PRESENT")    { present++;    attendedIds.add(empId); }
+        else if (s === "LEAVE") { leave++;      attendedIds.add(empId); }
+        else if (s === "PERMISSION") { permission++; attendedIds.add(empId); }
       }
 
       if (isHoliday) {
