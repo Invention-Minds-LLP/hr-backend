@@ -104,6 +104,8 @@ export const getPulse = async (req: Request, res: Response) => {
       presentToday,
       attendancePct,
       pendingApprovals: pendingLeaves + pendingPermissions,
+      pendingLeaves,
+      pendingPermissions,
       openPositions: openJobs,
       activePIPs,
       attritionMTD: resignationsThisMonth,
@@ -121,8 +123,8 @@ export const getPulse = async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════
 export const getWorkforce = async (_req: Request, res: Response) => {
   try {
-    const employees = await prisma.employee.findMany({
-      where: { employmentStatus: "ACTIVE" },
+    // Fetch ALL employees (every status) so the donut can show every segment.
+    const allEmployees = await prisma.employee.findMany({
       select: {
         firstName: true,
         lastName: true,
@@ -134,9 +136,12 @@ export const getWorkforce = async (_req: Request, res: Response) => {
       orderBy: [{ departmentId: "asc" }, { firstName: "asc" }],
     });
 
-    // By department + employment type
+    // Active slice — used for the by-dept breakdown (currently working staff)
+    const activeEmployees = allEmployees.filter((e) => e.employmentStatus === "ACTIVE");
+
+    // By department + employment type (active only)
     const deptMap = new Map<string, Record<string, number>>();
-    for (const e of employees) {
+    for (const e of activeEmployees) {
       const dept = e.Department?.name || "Unassigned";
       const type = e.employmentType || "Other";
       if (!deptMap.has(dept)) deptMap.set(dept, {});
@@ -149,20 +154,26 @@ export const getWorkforce = async (_req: Request, res: Response) => {
       .sort((a, b) => (b[1]["_total"] || 0) - (a[1]["_total"] || 0))
       .map(([dept, types]) => ({ dept, ...types }));
 
-    // By status (donut)
+    // By status (donut) — ALL statuses included
     const statusMap = new Map<string, number>();
-    for (const e of employees) {
-      const s = e.employmentStatus || "ACTIVE";
+    for (const e of allEmployees) {
+      const s = e.employmentStatus || "UNKNOWN";
       statusMap.set(s, (statusMap.get(s) || 0) + 1);
     }
 
-    const byStatus = Array.from(statusMap.entries()).map(([status, count]) => ({
-      status,
-      count,
-    }));
+    // Preserve a canonical status order so colors stay consistent
+    const statusOrder = ["ACTIVE", "NOTICE_PERIOD", "SABBATICAL", "SUSPENDED", "RESIGNED", "TERMINATED"];
+    const byStatus = statusOrder
+      .filter((s) => statusMap.has(s))
+      .map((s) => ({ status: s, count: statusMap.get(s)! }))
+      .concat(
+        Array.from(statusMap.entries())
+          .filter(([s]) => !statusOrder.includes(s))
+          .map(([status, count]) => ({ status, count })),
+      );
 
-    // Full employee roster for drill-down
-    const employeeList = employees.map((e) => ({
+    // Full employee roster (all statuses) for drill-down
+    const employeeList = allEmployees.map((e) => ({
       name: `${e.firstName} ${e.lastName}`,
       dept: e.Department?.name || "—",
       designation: e.designation?.name || "—",
@@ -170,7 +181,13 @@ export const getWorkforce = async (_req: Request, res: Response) => {
       status: e.employmentStatus,
     }));
 
-    res.json({ byDept, byStatus, total: employees.length, employeeList });
+    res.json({
+      byDept,
+      byStatus,
+      total: allEmployees.length,      // grand total across all statuses
+      activeTotal: activeEmployees.length, // separate field for "active only"
+      employeeList,
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -263,21 +280,56 @@ export const getAttendanceSummary = async (req: Request, res: Response) => {
       });
     }
 
+    // ── Fetch active employee roster once (for absent-list drill-down) ──
+    const activeEmployees = await prisma.employee.findMany({
+      where: { employmentStatus: { in: ["ACTIVE", "NOTICE_PERIOD"] } },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        employeeCode: true,
+        Department:  { select: { name: true } },
+        designation: { select: { name: true } },
+      },
+    });
+    const empMap = new Map(activeEmployees.map((e) => [e.id, {
+      id: e.id,
+      name: `${e.firstName ?? ""} ${e.lastName ?? ""}`.trim(),
+      employeeCode: e.employeeCode,
+      dept: e.Department?.name ?? "—",
+      designation: e.designation?.name ?? "—",
+    }]));
+
+    // Pull all attendance records across the full range in one query
+    const fullRangeRecords = await prisma.attendance.findMany({
+      where: { date: { gte: rangeStart, lte: rangeEnd } },
+      select: { employeeId: true, status: true, date: true },
+    });
+    // Group by yyyy-MM-dd → Map<employeeId, status>
+    const attByDay = new Map<string, Map<number, string>>();
+    for (const rec of fullRangeRecords) {
+      const key = format(new Date(rec.date), "yyyy-MM-dd");
+      if (!attByDay.has(key)) attByDay.set(key, new Map());
+      attByDay.get(key)!.set(rec.employeeId, rec.status);
+    }
+
     // ── Build daily summary ───────────────────────────────────
     const days: any[] = [];
 
     for (let i = numDays - 1; i >= 0; i--) {
       const d        = addDays(new Date(), -i);
-      const dayStart = startOfDayIST(d);
-      const dayEnd   = endOfDayIST(d);
       const dayStr   = format(d, "yyyy-MM-dd");
       const label    = numDays <= 7 ? format(d, "EEE dd") : format(d, "dd MMM");
       const monthKey = `${d.getFullYear()}-${d.getMonth() + 1}`;
 
       // Count employees whose approved week-off falls on this date
       let weekoffFromApprovals = 0;
-      for (const dates of empWeekOffDates.values()) {
-        if (dates.has(dayStr)) weekoffFromApprovals++;
+      const weekoffEmpIds = new Set<number>();
+      for (const [empId, dates] of empWeekOffDates.entries()) {
+        if (dates.has(dayStr)) {
+          weekoffFromApprovals++;
+          weekoffEmpIds.add(empId);
+        }
       }
 
       // Employees WITHOUT an approved shift this month → Sunday fallback
@@ -289,32 +341,47 @@ export const getAttendanceSummary = async (req: Request, res: Response) => {
       const holidayTitle   = holidayMap.get(dayStr);
       const isHoliday      = !!holidayTitle;
       const isWeekOff      = totalWeekoff > 0;
-      const [present, leave, permission] = await Promise.all([
-        prisma.attendance.count({ where: { date: { gte: dayStart, lte: dayEnd }, status: "PRESENT" } }),
-        prisma.attendance.count({ where: { date: { gte: dayStart, lte: dayEnd }, status: "LEAVE" } }),
-        prisma.attendance.count({ where: { date: { gte: dayStart, lte: dayEnd }, status: "PERMISSION" } }),
-      ]);
+
+      // Count statuses from the pre-fetched map
+      const dayMap = attByDay.get(dayStr) ?? new Map<number, string>();
+      let present = 0, leave = 0, permission = 0;
+      const attendedIds = new Set<number>();
+      for (const [empId, st] of dayMap.entries()) {
+        if (st === "PRESENT")    { present++;    attendedIds.add(empId); }
+        else if (st === "LEAVE") { leave++;      attendedIds.add(empId); }
+        else if (st === "PERMISSION") { permission++; attendedIds.add(empId); }
+      }
 
       if (isHoliday) {
         // Public holiday: nobody is absent
         days.push({
-          date: label, present, absent: 0, leave: 0, permission: 0,
+          date: label, dateStr: dayStr,
+          present, absent: 0, leave: 0, permission: 0,
           weekoff: Math.max(0, totalActive - present),
           isNonWorking: true, nonWorkingLabel: holidayTitle,
+          absentEmployees: [],
         });
       } else {
         // Working day (may have some employees on week-off)
-        // Week-off employees who actually came in should be counted as present, not weekoff.
-        // So net weekoff = only those on week-off who did NOT attend.
-        const weekoffNet       = Math.max(0, totalWeekoff - present);
-        // Of the present count, only those beyond the week-off pool are "regular" attendees.
+        const weekoffNet         = Math.max(0, totalWeekoff - present);
         const presentFromRegular = Math.max(0, present - totalWeekoff);
-        const expectedRegular  = Math.max(0, totalActive - totalWeekoff);
+        const expectedRegular    = Math.max(0, totalActive - totalWeekoff);
         const absent = Math.max(0, expectedRegular - presentFromRegular - leave - permission);
+
+        // Absent employee list: active minus on-weekoff minus those with any record today
+        const absentList: any[] = [];
+        for (const [empId, info] of empMap.entries()) {
+          if (weekoffEmpIds.has(empId)) continue;
+          if (attendedIds.has(empId)) continue;
+          absentList.push(info);
+        }
+
         days.push({
-          date: label, present, absent, leave, permission,
+          date: label, dateStr: dayStr,
+          present, absent, leave, permission,
           weekoff: weekoffNet,
           isNonWorking: false, nonWorkingLabel: isWeekOff ? "Week Off" : null,
+          absentEmployees: absentList,
         });
       }
     }
@@ -564,7 +631,12 @@ export const getActivePIPs = async (_req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════
 export const getAttritionTrend = async (_req: Request, res: Response) => {
   try {
-    const months: { month: string; submitted: number; exited: number }[] = [];
+    const months: {
+      month: string;
+      submitted: number;
+      exited: number;
+      resignations: any[];   // employees who resigned this month (for drill-down)
+    }[] = [];
 
     for (let i = 11; i >= 0; i--) {
       const d = subMonths(new Date(), i);
@@ -572,7 +644,7 @@ export const getAttritionTrend = async (_req: Request, res: Response) => {
       const mEnd = endOfMonth(d);
       const label = format(d, "MMM yy");
 
-      const [submitted, exited] = await Promise.all([
+      const [submitted, exited, resignList] = await Promise.all([
         prisma.resignationRequest.count({
           where: {
             createdAt: { gte: mStart, lte: mEnd },
@@ -585,9 +657,36 @@ export const getAttritionTrend = async (_req: Request, res: Response) => {
             status: "COMPLETED",
           },
         }),
+        prisma.resignationRequest.findMany({
+          where: {
+            createdAt: { gte: mStart, lte: mEnd },
+            status: { notIn: ["WITHDRAWN", "CANCELLED"] },
+          },
+          select: {
+            actualLastWorkingDay: true,
+            proposedLastWorkingDay: true,
+            status: true,
+            employee: {
+              select: {
+                firstName: true, lastName: true, employeeCode: true,
+                Department:  { select: { name: true } },
+                designation: { select: { name: true } },
+              },
+            },
+          },
+        }),
       ]);
 
-      months.push({ month: label, submitted, exited });
+      const resignations = resignList.map((r) => ({
+        name: `${r.employee?.firstName ?? ""} ${r.employee?.lastName ?? ""}`.trim(),
+        employeeCode: r.employee?.employeeCode ?? "",
+        dept: r.employee?.Department?.name ?? "—",
+        designation: r.employee?.designation?.name ?? "—",
+        lastDate: (r.actualLastWorkingDay ?? r.proposedLastWorkingDay)?.toISOString().slice(0, 10) ?? "—",
+        status: r.status,
+      }));
+
+      months.push({ month: label, submitted, exited, resignations });
     }
 
     // Top exit reason from exit interviews
@@ -1132,24 +1231,51 @@ export const getWeeklyTrend = async (_req: Request, res: Response) => {
         weekStartDate: true,
         weekLabel: true,
         overallScore: true,
-        employee: { select: { Department: { select: { name: true } } } },
+        ratedBy: true,
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            employeeCode: true,
+            Department: { select: { name: true } },
+            designation: { select: { name: true } },
+          },
+        },
       },
       orderBy: { weekStartDate: "asc" },
     });
 
+    // Collect unique rater IDs so we can show who rated in the drill-down
+    const raterIds = Array.from(new Set(ratings.map((r) => r.ratedBy)));
+    const raters = await prisma.employee.findMany({
+      where: { id: { in: raterIds } },
+      select: { id: true, firstName: true, lastName: true },
+    });
+    const raterName = new Map(raters.map((r) => [r.id, `${r.firstName} ${r.lastName}`]));
+
     // Group by week
-    const weekMap = new Map<string, { label: string; scores: number[] }>();
+    const weekMap = new Map<string, { label: string; scores: number[]; submissions: any[] }>();
     for (const r of ratings) {
       const key = format(new Date(r.weekStartDate), "yyyy-MM-dd");
       const label = r.weekLabel || format(new Date(r.weekStartDate), "dd MMM");
-      if (!weekMap.has(key)) weekMap.set(key, { label, scores: [] });
-      weekMap.get(key)!.scores.push(r.overallScore!);
+      if (!weekMap.has(key)) weekMap.set(key, { label, scores: [], submissions: [] });
+      const bucket = weekMap.get(key)!;
+      bucket.scores.push(r.overallScore!);
+      bucket.submissions.push({
+        name: `${r.employee?.firstName ?? ""} ${r.employee?.lastName ?? ""}`.trim(),
+        employeeCode: r.employee?.employeeCode ?? "",
+        dept: r.employee?.Department?.name ?? "—",
+        designation: r.employee?.designation?.name ?? "—",
+        score: r.overallScore,
+        ratedBy: raterName.get(r.ratedBy) ?? "—",
+      });
     }
 
     const weeks = Array.from(weekMap.entries()).map(([, v]) => ({
       label: v.label,
       avgScore: v.scores.length > 0 ? Math.round((v.scores.reduce((s, x) => s + x, 0) / v.scores.length) * 10) / 10 : 0,
       rated: v.scores.length,
+      submissions: v.submissions,
     }));
 
     // Trend: comparing last 4 weeks vs previous 4 weeks
@@ -1180,7 +1306,14 @@ export const getPerformanceDistribution = async (_req: Request, res: Response) =
         overallScore: true,
         status: true,
         cycle: true,
-        employee: { select: { Department: { select: { name: true } } } },
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            Department:  { select: { name: true } },
+            designation: { select: { name: true } },
+          },
+        },
       },
     });
 
@@ -1206,6 +1339,19 @@ export const getPerformanceDistribution = async (_req: Request, res: Response) =
       count: latest.filter((a) => (a.overallScore ?? 0) >= b.min && (a.overallScore ?? 0) <= b.max).length,
     }));
 
+    // Drill-down: per-employee row with the band label so frontend can filter
+    const bandFor = (score: number): string => {
+      const b = bands.find((bb) => score >= bb.min && score <= bb.max);
+      return b?.label ?? "—";
+    };
+    const employeeList = latest.map((a) => ({
+      name: `${a.employee?.firstName ?? ""} ${a.employee?.lastName ?? ""}`.trim(),
+      dept: a.employee?.Department?.name || "—",
+      designation: a.employee?.designation?.name || "—",
+      score: a.overallScore,
+      band: bandFor(a.overallScore ?? 0),
+    }));
+
     // Appraisal completion: employees with a submitted/completed appraisal vs total active
     const totalActive = await prisma.employee.count({ where: { employmentStatus: "ACTIVE" } });
     const withAppraisal = latest.length;
@@ -1226,7 +1372,7 @@ export const getPerformanceDistribution = async (_req: Request, res: Response) =
       }))
       .sort((a, b) => b.avg - a.avg);
 
-    res.json({ distribution, completionPct, withAppraisal, totalActive, deptAvg });
+    res.json({ distribution, completionPct, withAppraisal, totalActive, deptAvg, employeeList });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -1699,14 +1845,49 @@ export const getWorkforceInsights = async (_req: Request, res: Response) => {
     const employees = await prisma.employee.findMany({
       where: { employmentStatus: { in: ["ACTIVE", "NOTICE_PERIOD"] } },
       select: {
+        firstName: true,
+        lastName: true,
+        employeeCode: true,
         dob: true,
         gender: true,
         dateOfJoining: true,
         Department: { select: { name: true } },
+        designation: { select: { name: true } },
       },
     });
 
     const now = new Date();
+
+    // Helper to classify tenure into the same buckets as the chart
+    const tenureBandFor = (doj: Date | null): string => {
+      if (!doj) return "unknown";
+      const yrs = (now.getTime() - new Date(doj).getTime()) / (365.25 * 24 * 3600 * 1000);
+      if (yrs < 1) return "< 1 year";
+      if (yrs < 3) return "1 – 3 yrs";
+      if (yrs < 5) return "3 – 5 yrs";
+      if (yrs < 10) return "5 – 10 yrs";
+      return "> 10 yrs";
+    };
+
+    // Full employee list (used by frontend for drill-down popups)
+    const employeeList = employees.map((e) => {
+      const ageYrs = e.dob
+        ? (now.getTime() - new Date(e.dob).getTime()) / (365.25 * 24 * 3600 * 1000)
+        : null;
+      return {
+        name: `${e.firstName ?? ""} ${e.lastName ?? ""}`.trim(),
+        employeeCode: e.employeeCode,
+        dept: e.Department?.name || "Unassigned",
+        designation: e.designation?.name || "—",
+        gender: e.gender,
+        age: ageYrs != null ? Math.floor(ageYrs) : null,
+        ageBand: ageYrs != null ? (ageYrs <= 45 ? "≤ 45 years" : "> 45 years") : "unknown",
+        dateOfJoining: e.dateOfJoining
+          ? new Date(e.dateOfJoining).toISOString().slice(0, 10) : null,
+        tenureBand: tenureBandFor(e.dateOfJoining),
+        joiningYear: e.dateOfJoining ? new Date(e.dateOfJoining).getFullYear() : null,
+      };
+    });
 
     // ── Age-Gender Split ──────────────────────────────────
     const ageSplit = {
@@ -1744,16 +1925,45 @@ export const getWorkforceInsights = async (_req: Request, res: Response) => {
       }
     }
 
-    // ── Joining Year Trend ────────────────────────────────
+    // ── Joining vs Resignation Year Trend ─────────────────
+    // Joinings per year — from ALL employees regardless of current status
+    // (since the current query filters ACTIVE + NOTICE_PERIOD, query again for full history)
+    const allForTrend = await prisma.employee.findMany({
+      select: { dateOfJoining: true },
+    });
     const joiningYearMap = new Map<number, number>();
-    for (const e of employees) {
+    for (const e of allForTrend) {
       if (!e.dateOfJoining) continue;
       const yr = new Date(e.dateOfJoining).getFullYear();
       joiningYearMap.set(yr, (joiningYearMap.get(yr) || 0) + 1);
     }
-    const joiningTrend = Array.from(joiningYearMap.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([year, count]) => ({ year, count }));
+
+    // Resignations per year — from resignation requests that actually completed
+    const resignations = await prisma.resignationRequest.findMany({
+      where: { actualLastWorkingDay: { not: null } },
+      select: { actualLastWorkingDay: true },
+    });
+    const resignationYearMap = new Map<number, number>();
+    for (const r of resignations) {
+      if (!r.actualLastWorkingDay) continue;
+      const yr = new Date(r.actualLastWorkingDay).getFullYear();
+      resignationYearMap.set(yr, (resignationYearMap.get(yr) || 0) + 1);
+    }
+
+    // Build a combined year range so both series align on the X axis
+    const allYears = new Set<number>([
+      ...joiningYearMap.keys(),
+      ...resignationYearMap.keys(),
+    ]);
+    const joiningTrend = Array.from(allYears)
+      .sort((a, b) => a - b)
+      .map((year) => ({
+        year,
+        count: joiningYearMap.get(year) ?? 0,              // joinings (legacy field name kept)
+        joinings: joiningYearMap.get(year) ?? 0,
+        resignations: resignationYearMap.get(year) ?? 0,
+        net: (joiningYearMap.get(year) ?? 0) - (resignationYearMap.get(year) ?? 0),
+      }));
 
     // ── Dept Gender Breakdown ─────────────────────────────
     const deptGenderMap = new Map<string, { male: number; female: number; other: number }>();
@@ -1769,7 +1979,7 @@ export const getWorkforceInsights = async (_req: Request, res: Response) => {
       .map(([dept, v]) => ({ dept, ...v, total: v.male + v.female + v.other }))
       .sort((a, b) => b.total - a.total);
 
-    res.json({ ageSplitChart, tenureBuckets, joiningTrend, deptGender });
+    res.json({ ageSplitChart, tenureBuckets, joiningTrend, deptGender, employeeList });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -1873,8 +2083,12 @@ export const getQualifications = async (_req: Request, res: Response) => {
           employee: {
             select: {
               id: true,
+              firstName: true,
+              lastName: true,
+              employeeCode: true,
               employmentStatus: true,
               Department: { select: { name: true } },
+              designation: { select: { name: true } },
             },
           },
         },
@@ -1886,25 +2100,72 @@ export const getQualifications = async (_req: Request, res: Response) => {
       (q) => q.employee.employmentStatus === "ACTIVE" || q.employee.employmentStatus === "NOTICE_PERIOD"
     );
 
-    // Unique employees with at least one qualification
-    const coveredEmployeeIds = new Set(active.map((q) => q.employee.id));
+    // Academic hierarchy — higher rank = higher qualification.
+    // We pick ONLY the highest degree per employee so someone with SSLC + PU + Bachelor
+    // gets counted once under "Bachelor", not three times.
+    const degreeRank = (raw: string): { rank: number; canonical: string } => {
+      const u = raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
+      if (/(PHD|DOCTORATE)/.test(u))                            return { rank: 6, canonical: "PhD" };
+      if (/(MASTER|MTECH|MSC|MA|MCOM|MBA|MCA|ME|MED|POSTGRAD|PG)/.test(u))
+                                                                 return { rank: 5, canonical: "Master" };
+      if (/(BACHELOR|BTECH|BSC|BA|BCOM|BBA|BCA|BE|BED|UG|GRADUATE)/.test(u))
+                                                                 return { rank: 4, canonical: "Bachelor" };
+      if (/DIPLOMA/.test(u))                                    return { rank: 3, canonical: "Diploma" };
+      if (/(PU|PUC|HSC|12)/.test(u))                             return { rank: 2, canonical: "PU" };
+      if (/(SSLC|10)/.test(u))                                   return { rank: 1, canonical: "SSLC" };
+      return { rank: 0, canonical: raw.trim() || "Other" };
+    };
+
+    // Reduce to one qualification per employee = the highest one
+    const highestByEmp = new Map<number, {
+      degree: string;
+      rawDegree: string;
+      institution: string | null;
+      dept: string;
+      designation: string;
+      name: string;
+      employeeCode: string;
+      year: number | null;
+      grade: string | null;
+      rank: number;
+    }>();
+    for (const q of active) {
+      const raw = (q.degreeName || q.degree || "Other").trim();
+      const { rank, canonical } = degreeRank(raw);
+      const cur = highestByEmp.get(q.employee.id);
+      if (!cur || rank > cur.rank) {
+        highestByEmp.set(q.employee.id, {
+          degree: canonical,
+          rawDegree: raw,
+          institution: q.institution ?? null,
+          dept: q.employee.Department?.name || "Unassigned",
+          designation: q.employee.designation?.name || "—",
+          name: `${q.employee.firstName ?? ""} ${q.employee.lastName ?? ""}`.trim(),
+          employeeCode: q.employee.employeeCode,
+          year: q.year ?? null,
+          grade: q.grade ?? null,
+          rank,
+        });
+      }
+    }
+
+    const coveredEmployeeIds = new Set(highestByEmp.keys());
     const coveragePct = totalActive > 0 ? Math.round((coveredEmployeeIds.size / totalActive) * 100) : 0;
 
-    // Degree type distribution (use degreeName if available, fall back to degree)
+    // Degree type distribution — based on highest per employee
     const degreeMap = new Map<string, number>();
-    for (const q of active) {
-      const key = (q.degreeName || q.degree || "Other").trim();
-      degreeMap.set(key, (degreeMap.get(key) || 0) + 1);
+    for (const { degree } of highestByEmp.values()) {
+      degreeMap.set(degree, (degreeMap.get(degree) || 0) + 1);
     }
     const degreeDistribution = Array.from(degreeMap.entries())
       .map(([degree, count]) => ({ degree, count }))
       .sort((a, b) => b.count - a.count);
 
-    // Top institutions
+    // Top institutions — use only the HIGHEST qualification's institution per employee
     const instMap = new Map<string, number>();
-    for (const q of active) {
-      if (!q.institution) continue;
-      const key = q.institution.trim();
+    for (const { institution } of highestByEmp.values()) {
+      if (!institution) continue;
+      const key = institution.trim();
       instMap.set(key, (instMap.get(key) || 0) + 1);
     }
     const topInstitutions = Array.from(instMap.entries())
@@ -1912,16 +2173,14 @@ export const getQualifications = async (_req: Request, res: Response) => {
       .sort((a, b) => b.count - a.count)
       .slice(0, 10);
 
-    // Department-wise qualification breakdown — most common degree per dept
+    // Department-wise — most common highest-degree per dept
     const deptMap = new Map<string, { deptDegrees: Map<string, number>; total: number; empIds: Set<number> }>();
-    for (const q of active) {
-      const dept = q.employee.Department?.name || "Unassigned";
-      if (!deptMap.has(dept)) deptMap.set(dept, { deptDegrees: new Map(), total: 0, empIds: new Set() });
-      const entry = deptMap.get(dept)!;
-      const deg = (q.degreeName || q.degree || "Other").trim();
-      entry.deptDegrees.set(deg, (entry.deptDegrees.get(deg) || 0) + 1);
+    for (const [empId, v] of highestByEmp.entries()) {
+      if (!deptMap.has(v.dept)) deptMap.set(v.dept, { deptDegrees: new Map(), total: 0, empIds: new Set() });
+      const entry = deptMap.get(v.dept)!;
+      entry.deptDegrees.set(v.degree, (entry.deptDegrees.get(v.degree) || 0) + 1);
       entry.total++;
-      entry.empIds.add(q.employee.id);
+      entry.empIds.add(empId);
     }
     const deptBreakdown = Array.from(deptMap.entries())
       .map(([dept, v]) => {
@@ -1951,6 +2210,18 @@ export const getQualifications = async (_req: Request, res: Response) => {
       topInstitutions,
       deptBreakdown,
       graduationDecades,
+      // Per-employee highest qualification — powers drill-down popups
+      employeeList: Array.from(highestByEmp.values()).map((v) => ({
+        name: v.name,
+        employeeCode: v.employeeCode,
+        dept: v.dept,
+        designation: v.designation,
+        degree: v.degree,
+        rawDegree: v.rawDegree,
+        institution: v.institution,
+        year: v.year,
+        grade: v.grade,
+      })),
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
