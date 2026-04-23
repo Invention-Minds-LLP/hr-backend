@@ -2229,3 +2229,172 @@ export const getQualifications = async (_req: Request, res: Response) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 19 — EL ENCASHMENT & BALANCE INSIGHTS
+// GET /api/management/el-insights
+// KPI tiles + balance distribution + top offenders for management oversight
+// ═══════════════════════════════════════════════════════════════════════════════
+export const getElInsights = async (_req: Request, res: Response) => {
+  try {
+    // Current financial year
+    const now = new Date();
+    const fyStartYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+
+    const el = await prisma.leaveType.findFirst({ where: { name: "EL" } });
+    if (!el) return res.status(404).json({ error: "EL leave type not found" });
+
+    const policy = await prisma.leavePolicy.findFirst({
+      where: { leaveTypeId: el.id, isActive: true },
+      orderBy: { createdAt: "desc" },
+    });
+    const policyMaxBalance     = policy?.maxBalance ?? 60;
+    const policyMaxCarryForward = policy?.maxCarryForward ?? 45;
+
+    // Thresholds used by the insights section.
+    // Real encashment eligibility IS the policy max (60 days).
+    // The 55-day "approaching" list is a proactive heads-up — these people are
+    // close to the hard policy limit, so management can plan pay-out in advance.
+    const THRESHOLD_ELIGIBLE    = policyMaxBalance; // 60 — actual encashment eligibility (policy)
+    const THRESHOLD_APPROACHING = 55;               // 55 — approaching eligibility heads-up
+    const THRESHOLD_WATCHLIST   = 50;               // 50 — broader watchlist
+
+    // Pull all current-year EL balances + employee info
+    const balances = await prisma.employeeLeaveBalance.findMany({
+      where: { leaveTypeId: el.id, year: fyStartYear },
+    });
+    const empIds = balances.map(b => b.employeeId);
+    const employees = await prisma.employee.findMany({
+      where: { id: { in: empIds }, employmentStatus: { in: ["ACTIVE", "NOTICE_PERIOD"] } },
+      select: {
+        id: true, employeeCode: true, firstName: true, lastName: true,
+        Department:  { select: { name: true } },
+        designation: { select: { name: true } },
+      },
+    });
+    const empMap = new Map(employees.map(e => [e.id, e]));
+
+    // Last leave taken per employee (to spot leave-hoarders)
+    const lastLeaves = await prisma.leaveRequest.findMany({
+      where: {
+        employeeId: { in: empIds },
+        leaveTypeId: el.id,
+        status: "APPROVED",
+      },
+      select: { employeeId: true, endDate: true },
+      orderBy: { endDate: "desc" },
+    });
+    const lastLeaveMap = new Map<number, Date>();
+    for (const l of lastLeaves) {
+      if (!lastLeaveMap.has(l.employeeId)) {
+        lastLeaveMap.set(l.employeeId, l.endDate);
+      }
+    }
+
+    // Build rows
+    const rows: any[] = [];
+    for (const bal of balances) {
+      const emp = empMap.get(bal.employeeId);
+      if (!emp) continue; // skip non-active employees
+      const balance = Math.max(0, bal.totalAllowed - bal.used);
+      // Days past the APPROACHING threshold (55) — the heads-up buffer
+      const daysOver55 = Math.max(0, balance - THRESHOLD_APPROACHING);
+      // Days past the actual ELIGIBLE threshold (60, policy max) — real liability
+      const daysOver60 = Math.max(0, balance - THRESHOLD_ELIGIBLE);
+      const lastLeaveDate = lastLeaveMap.get(bal.employeeId) ?? null;
+      rows.push({
+        employeeId: bal.employeeId,
+        employeeCode: emp.employeeCode,
+        employeeName: `${emp.firstName} ${emp.lastName}`,
+        dept: emp.Department?.name ?? "—",
+        designation: emp.designation?.name ?? "—",
+        totalAllowed: bal.totalAllowed,
+        used: bal.used,
+        balance,
+        daysOver55,
+        daysOver60,
+        lastLeaveDate: lastLeaveDate ? lastLeaveDate.toISOString().slice(0, 10) : null,
+      });
+    }
+
+    // ── Summary KPIs ────────────────────────────────────────
+    // Eligible NOW = balance ≥ policy max (60). These people CAN be encashed today.
+    const countEligible    = rows.filter(r => r.balance >= THRESHOLD_ELIGIBLE).length;
+    // Approaching = above 55 but not yet eligible. Heads-up for planning.
+    const countApproaching = rows.filter(r => r.balance > THRESHOLD_APPROACHING).length;
+    // Wider watchlist
+    const countWatch       = rows.filter(r => r.balance > THRESHOLD_WATCHLIST).length;
+    // Actual encashment liability in days — only balances over policy max count
+    const totalEligibleDays = rows.reduce((s, r) => s + r.daysOver60, 0);
+    // Days already over the 55 heads-up threshold (includes eligible + approaching)
+    const totalDaysOver55   = rows.reduce((s, r) => s + r.daysOver55, 0);
+
+    // ── Distribution buckets ────────────────────────────────
+    const buckets = [
+      { label: "0–30 days",    key: "b1", min: 0,   max: 30,  count: 0 },
+      { label: "30–45 days",   key: "b2", min: 30,  max: 45,  count: 0 },
+      { label: "45–55 days",   key: "b3", min: 45,  max: 55,  count: 0 },
+      { label: "55–60 days",   key: "b4", min: 55,  max: 60,  count: 0 },
+      { label: "60+ days",     key: "b5", min: 60,  max: Infinity, count: 0 },
+    ];
+    for (const r of rows) {
+      const b = buckets.find(b => r.balance >= b.min && r.balance < b.max);
+      if (b) b.count++;
+    }
+
+    // Tag each row with its bucket for drill-down filtering
+    const rowsWithBucket = rows.map(r => {
+      const b = buckets.find(b => r.balance >= b.min && r.balance < b.max);
+      return { ...r, bucket: b?.label ?? "Unknown" };
+    });
+
+    // ── Top offenders (highest balance) ─────────────────────
+    const topOffenders = [...rowsWithBucket]
+      .sort((a, b) => b.balance - a.balance)
+      .slice(0, 10);
+
+    // ── Department-wise average balance (bonus for Option C flavor) ─────
+    const deptMap = new Map<string, { total: number; count: number; overThreshold: number }>();
+    for (const r of rowsWithBucket) {
+      const cur = deptMap.get(r.dept) ?? { total: 0, count: 0, overThreshold: 0 };
+      cur.total += r.balance;
+      cur.count++;
+      if (r.balance > THRESHOLD_ELIGIBLE) cur.overThreshold++;
+      deptMap.set(r.dept, cur);
+    }
+    const deptAvg = Array.from(deptMap.entries())
+      .map(([dept, v]) => ({
+        dept,
+        headcount: v.count,
+        avgBalance: Math.round(v.total / v.count),
+        overThreshold: v.overThreshold,
+      }))
+      .sort((a, b) => b.avgBalance - a.avgBalance);
+
+    return res.json({
+      year: fyStartYear,
+      policyMaxBalance,
+      policyMaxCarryForward,
+      thresholds: {
+        eligible: THRESHOLD_ELIGIBLE,        // 60 — actual encashment eligibility
+        approaching: THRESHOLD_APPROACHING,  // 55 — heads-up threshold
+        watchlist: THRESHOLD_WATCHLIST,      // 50 — broader watch
+      },
+      summary: {
+        totalEmployees: rows.length,
+        countEligible,        // balance >= 60, actually eligible now
+        countApproaching,     // balance > 55, heads-up (includes eligible)
+        countWatch,           // balance > 50, broader watchlist
+        totalEligibleDays,    // days over 60 — real encashment liability
+        totalDaysOver55,      // days over 55 — includes approaching window
+      },
+      distribution: buckets,
+      topOffenders,
+      deptAvg,
+      employeeList: rowsWithBucket,
+    });
+  } catch (err: any) {
+    console.error("getElInsights error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+};

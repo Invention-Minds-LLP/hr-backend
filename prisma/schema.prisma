@@ -511,6 +511,9 @@ model PermissionRequest {
   inChargeDecision  ApprovalDecision  @default(PENDING)
   isHROverride      Boolean           @default(false)
   hrOverrideReason  String?
+  cancelledAt       DateTime?
+  cancelledBy       Int?
+  cancellationReason String?
   employee          Employee          @relation(fields: [employeeId], references: [id])
 
   @@index([employeeId], map: "PermissionRequest_employeeId_fkey")
@@ -2294,6 +2297,7 @@ enum PermissionStatus {
   PENDING
   APPROVED
   REJECTED
+  CANCELLED
 }
 
 enum ShiftType {

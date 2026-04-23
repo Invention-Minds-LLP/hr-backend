@@ -23,6 +23,14 @@ export const getEncashmentEligible = async (req: Request, res: Response) => {
     const maxBalance = policy?.maxBalance ?? 60;
     const encashable = policy?.encashable ?? false;
 
+    // Two thresholds:
+    //  ELIGIBILITY_THRESHOLD — actual encashment cap (policy maxBalance, usually 60).
+    //    Employees at or past this can be encashed NOW.
+    //  APPROACHING_THRESHOLD — proactive heads-up (55). Employees above this but
+    //    below the cap are shown in the list so HR can plan pay-out in advance.
+    const ELIGIBILITY_THRESHOLD   = maxBalance;  // 60
+    const APPROACHING_THRESHOLD   = 55;          // heads-up line
+
     // Get all EL balances for the year
     const balances = await prisma.employeeLeaveBalance.findMany({
       where: { leaveTypeId: el.id, year },
@@ -53,8 +61,11 @@ export const getEncashmentEligible = async (req: Request, res: Response) => {
       encashmentByEmp.set(e.employeeId, existing);
     }
 
-    // Build result
-    const eligible: any[] = [];
+    // Build rows — we include everyone above the APPROACHING line in the main list,
+    // but tag each with a status so the UI can clearly show "eligible now" vs
+    // "approaching cap".
+    const visibleList: any[] = [];   // balance > 55 (heads-up + eligible)
+    const eligibleOnly:  any[] = [];  // balance >= 60 (truly eligible)
     const all: any[] = [];
 
     for (const bal of balances) {
@@ -62,9 +73,17 @@ export const getEncashmentEligible = async (req: Request, res: Response) => {
       if (!emp) continue;
 
       const currentBalance = bal.totalAllowed - bal.used;
+      const excessOverEligibility  = Math.max(0, currentBalance - ELIGIBILITY_THRESHOLD);  // days over 60
+      const excessOverApproaching  = Math.max(0, currentBalance - APPROACHING_THRESHOLD);  // days over 55
       const excessOverCarryForward = Math.max(0, currentBalance - maxCarryForward);
       const encashmentData = encashmentByEmp.get(bal.employeeId);
       const totalEncashed = encashmentData?.totalEncashed ?? 0;
+
+      const isEligible    = currentBalance >= ELIGIBILITY_THRESHOLD;
+      const isApproaching = !isEligible && currentBalance > APPROACHING_THRESHOLD;
+      const status: 'ELIGIBLE' | 'APPROACHING' | 'SAFE' =
+        isEligible    ? 'ELIGIBLE'    :
+        isApproaching ? 'APPROACHING' : 'SAFE';
 
       const row = {
         employeeId: bal.employeeId,
@@ -77,33 +96,47 @@ export const getEncashmentEligible = async (req: Request, res: Response) => {
         used: bal.used,
         currentBalance,
         maxCarryForward,
-        maxBalance,
+        maxBalance,                           // 60 — policy cap
+        approachingThreshold: APPROACHING_THRESHOLD,  // 55
         excessOverCarryForward,
-        encashmentEligible: excessOverCarryForward,
+        excessOverEligibility,    // days >= 60 (can actually be encashed)
+        excessOverApproaching,    // days > 55 (proactive buffer)
+        // `encashmentEligible` kept for backward compat — reflects days payable now
+        encashmentEligible: excessOverEligibility,
+        status,                   // 'ELIGIBLE' | 'APPROACHING' | 'SAFE'
+        isEligible,
+        isApproaching,
         totalEncashed,
-        pendingEncashment: Math.max(0, excessOverCarryForward - totalEncashed),
+        pendingEncashment: Math.max(0, excessOverEligibility - totalEncashed),
         encashmentHistory: encashmentData?.entries ?? [],
       };
 
       all.push(row);
-      if (excessOverCarryForward > 0) {
-        eligible.push(row);
-      }
+      if (isEligible) eligibleOnly.push(row);
+      if (isEligible || isApproaching) visibleList.push(row);
     }
 
-    // Sort eligible by excess descending
-    eligible.sort((a, b) => b.excessOverCarryForward - a.excessOverCarryForward);
+    // Sort the visible list by balance descending so the most urgent cases top
+    visibleList.sort((a, b) => b.currentBalance - a.currentBalance);
+    eligibleOnly.sort((a, b) => b.currentBalance - a.currentBalance);
 
     return res.json({
       year,
       maxCarryForward,
       maxBalance,
+      eligibilityThreshold: ELIGIBILITY_THRESHOLD,  // 60
+      approachingThreshold: APPROACHING_THRESHOLD,  // 55
       encashable,
       totalEmployees: all.length,
-      eligibleCount: eligible.length,
-      totalExcessDays: eligible.reduce((sum, e) => sum + e.excessOverCarryForward, 0),
+      eligibleCount:    eligibleOnly.length,        // balance ≥ 60 — can be paid out now
+      approachingCount: visibleList.length - eligibleOnly.length, // 55 < balance < 60
+      totalExcessDays: eligibleOnly.reduce((sum, e) => sum + e.excessOverEligibility, 0),
       totalEncashedDays: all.reduce((sum, e) => sum + e.totalEncashed, 0),
-      eligible,
+      // `eligible` now contains everyone HR should be aware of (≥ 55),
+      // with a `status` field on each row so the UI can colour/label them.
+      eligible: visibleList,
+      // Strict list if the UI only wants people who can be encashed right now
+      eligibleOnly,
       all,
     });
   } catch (error: any) {

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { createLeaveBalances, createLeaveRequest, createLeaveType, getBlockedDates, getCompOffCredits, getLeaveBalance, getLeaveDashboard, getLeaveRequests, getLeaveTypes, getMonthlyCasualUsage, getWhoIsOnLeaveBuckets, getWhoIsOnLeaveToday, updateLeaveStatus, updateLeaveType, uploadPrescription, triggerFYRollover, purgeAndRerunFYRollover, triggerELAccrual } from "./leave.controller";
+import { createLeaveBalances, createLeaveRequest, createLeaveType, getBlockedDates, getCompOffCredits, getLeaveBalance, getLeaveDashboard, getLeaveRequests, getLeaveTypes, getMonthlyCasualUsage, getWhoIsOnLeaveBuckets, getWhoIsOnLeaveToday, updateLeaveStatus, updateLeaveType, uploadPrescription, triggerFYRollover, purgeAndRerunFYRollover, triggerELAccrual, updateLeaveRequest, cancelLeaveRequest } from "./leave.controller";
 import { autoCancelLeaveIfPresent } from "../biometric/biometric.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -22,6 +22,9 @@ router.get(
 router.get("/comp-off/credits", getCompOffCredits);
 router.put("/update-leave-type/:id", updateLeaveType);
 router.patch("/:id/status",authenticateToken, updateLeaveStatus);
+// Edit / cancel a pending leave (only allowed when no approver has acted)
+router.put("/:id", authenticateToken, updateLeaveRequest);
+router.patch("/:id/cancel", authenticateToken, cancelLeaveRequest);
 router.get('/:id/dashboard',authenticateToken, getLeaveDashboard);
 router.get('/leave-today',authenticateToken, getWhoIsOnLeaveBuckets);
 router.get('/blocked/:employeeId', authenticateToken, getBlockedDates);

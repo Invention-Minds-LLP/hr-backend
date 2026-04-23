@@ -167,6 +167,125 @@ export const createPermissionRequest = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to create permission request" });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────
+// EDIT a pending permission request
+// Allowed only when no approver has acted (incharge / RM/HOD / HR all PENDING).
+// ─────────────────────────────────────────────────────────────────
+export const updatePermissionRequest = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { day, startTime, endTime, reason, permissionType, timing } = req.body;
+    const userId = (req as any).user?.empId ?? null;
+
+    const existing = await prisma.permissionRequest.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: "Permission request not found" });
+
+    if (userId && existing.employeeId !== Number(userId)) {
+      return res.status(403).json({ error: "You can only edit your own permission request" });
+    }
+
+    if (existing.status !== "PENDING") {
+      return res.status(400).json({ error: `Cannot edit a ${existing.status.toLowerCase()} permission request` });
+    }
+    if (
+      existing.inChargeDecision !== "PENDING" ||
+      existing.hodDecision      !== "PENDING" ||
+      existing.hrDecision       !== "PENDING"
+    ) {
+      return res.status(400).json({ error: "Cannot edit — at least one approver has already acted" });
+    }
+
+    const data: any = { updatedAt: new Date() };
+    if (day)                          data.day            = new Date(day);
+    if (startTime !== undefined)      data.startTime      = startTime ? new Date(startTime) : null;
+    if (endTime   !== undefined)      data.endTime        = endTime ? new Date(endTime) : null;
+    if (reason !== undefined)         data.reason         = reason;
+    if (permissionType !== undefined) data.permissionType = permissionType;
+    if (timing !== undefined)         data.timing         = timing;
+
+    const updated = await prisma.permissionRequest.update({ where: { id }, data });
+    return res.json(updated);
+  } catch (err: any) {
+    console.error("Error updating permission request:", err);
+    return res.status(500).json({ error: err.message || "Failed to update permission request" });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────
+// CANCEL a pending permission request
+// ─────────────────────────────────────────────────────────────────
+export const cancelPermissionRequest = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { reason } = req.body ?? {};
+    const userId = (req as any).user?.empId ?? null;
+
+    const existing = await prisma.permissionRequest.findUnique({
+      where: { id },
+      include: {
+        employee: {
+          select: {
+            firstName: true, lastName: true,
+            reportingManager: true, inchargeId: true,
+          },
+        },
+      },
+    });
+    if (!existing) return res.status(404).json({ error: "Permission request not found" });
+
+    if (userId && existing.employeeId !== Number(userId)) {
+      return res.status(403).json({ error: "You can only cancel your own permission request" });
+    }
+    if (existing.status === "CANCELLED") {
+      return res.status(400).json({ error: "Already cancelled" });
+    }
+    if (
+      existing.status !== "PENDING" ||
+      existing.inChargeDecision !== "PENDING" ||
+      existing.hodDecision      !== "PENDING" ||
+      existing.hrDecision       !== "PENDING"
+    ) {
+      return res.status(400).json({ error: "Cannot cancel — request has already been actioned" });
+    }
+
+    const updated = await prisma.permissionRequest.update({
+      where: { id },
+      data: {
+        status: "CANCELLED",
+        cancelledAt: new Date(),
+        cancelledBy: userId ? Number(userId) : null,
+        cancellationReason: reason ?? "Cancelled by employee",
+      },
+    });
+
+    // ── Notify the approver who would have reviewed this request ─────
+    // Matches createPermissionRequest: notify incharge (preferred) or reporting manager.
+    const emp = existing.employee;
+    const notifyTo = emp?.inchargeId ?? emp?.reportingManager;
+    if (notifyTo) {
+      const name = [emp?.firstName, emp?.lastName].filter(Boolean).join(" ");
+      const dayLabel = new Date(existing.day).toLocaleDateString("en-GB", {
+        day: "2-digit", month: "short", year: "numeric",
+      });
+      const message =
+        `${name} has CANCELLED their permission request for ${dayLabel}. ` +
+        `Reason: ${reason ?? "Cancelled by employee"}.`;
+      try {
+        await createNotification(notifyTo, message);
+      } catch (notifyErr) {
+        console.error(`Failed to notify ${notifyTo}:`, notifyErr);
+        // Don't fail the cancellation if notification delivery fails
+      }
+    }
+
+    return res.json(updated);
+  } catch (err: any) {
+    console.error("Error cancelling permission request:", err);
+    return res.status(500).json({ error: err.message || "Failed to cancel permission request" });
+  }
+};
+
 export const getPermissionRequests = async (_req: Request, res: Response) => {
   try {
     const requests = await prisma.permissionRequest.findMany({

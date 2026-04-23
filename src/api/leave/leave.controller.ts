@@ -284,6 +284,146 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────
+// EDIT a pending leave request
+// Only allowed when no approver (incharge / RM/HOD / HR) has acted yet,
+// AND the overall status is still PENDING.
+// ─────────────────────────────────────────────────────────────────
+export const updateLeaveRequest = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { startDate, endDate, reason, isHalfDay, halfDaySession, leaveTypeId } = req.body;
+    const userId = (req as any).user?.empId ?? null;
+
+    const existing = await prisma.leaveRequest.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: "Leave request not found" });
+
+    // Only the owner may edit
+    if (userId && existing.employeeId !== Number(userId)) {
+      return res.status(403).json({ error: "You can only edit your own leave request" });
+    }
+
+    // Block edit once any approver has acted
+    if (existing.status !== "PENDING") {
+      return res.status(400).json({ error: `Cannot edit a ${existing.status.toLowerCase()} leave request` });
+    }
+    if (
+      existing.inChargeDecision !== "PENDING" ||
+      existing.hodDecision      !== "PENDING" ||
+      existing.hrDecision       !== "PENDING"
+    ) {
+      return res.status(400).json({ error: "Cannot edit — at least one approver has already acted" });
+    }
+
+    // Build a partial update payload; only include fields the user actually sent
+    const data: any = { updatedAt: new Date() };
+    if (startDate)         data.startDate = new Date(startDate);
+    if (endDate)           data.endDate   = new Date(endDate);
+    if (reason !== undefined)         data.reason         = reason;
+    if (isHalfDay !== undefined)      data.isHalfDay      = !!isHalfDay;
+    if (halfDaySession !== undefined) data.halfDaySession = halfDaySession;
+    if (leaveTypeId)       data.leaveTypeId = Number(leaveTypeId);
+
+    if (data.startDate && data.endDate && data.endDate < data.startDate) {
+      return res.status(400).json({ error: "endDate cannot be before startDate" });
+    }
+
+    const updated = await prisma.leaveRequest.update({ where: { id }, data });
+    return res.json(updated);
+  } catch (err: any) {
+    console.error("Error updating leave request:", err);
+    return res.status(500).json({ error: err.message || "Failed to update leave request" });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────
+// CANCEL a pending leave request
+// Same rule as edit — disallowed once any approver has acted.
+// ─────────────────────────────────────────────────────────────────
+export const cancelLeaveRequest = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { reason } = req.body ?? {};
+    const userId = (req as any).user?.empId ?? null;
+
+    const existing = await prisma.leaveRequest.findUnique({
+      where: { id },
+      include: {
+        leaveType: true,
+        employee: {
+          select: {
+            firstName: true, lastName: true, employeeCode: true,
+            reportingManager: true, inchargeId: true, departmentId: true,
+          },
+        },
+      },
+    });
+    if (!existing) return res.status(404).json({ error: "Leave request not found" });
+
+    if (userId && existing.employeeId !== Number(userId)) {
+      return res.status(403).json({ error: "You can only cancel your own leave request" });
+    }
+    if (existing.status === "CANCELLED") {
+      return res.status(400).json({ error: "Already cancelled" });
+    }
+    if (
+      existing.status !== "PENDING" ||
+      existing.inChargeDecision !== "PENDING" ||
+      existing.hodDecision      !== "PENDING" ||
+      existing.hrDecision       !== "PENDING"
+    ) {
+      return res.status(400).json({ error: "Cannot cancel — request has already been actioned" });
+    }
+
+    const updated = await prisma.leaveRequest.update({
+      where: { id },
+      data: {
+        status: "CANCELLED",
+        cancelledAt: new Date(),
+        cancelledBy: userId ? Number(userId) : null,
+        cancellationReason: reason ?? "Cancelled by employee",
+      },
+    });
+
+    // ── Notify the same people who were notified on creation ────────
+    const emp = existing.employee;
+    const recipients = new Set<number>();
+    if (emp.departmentId === 1) {
+      // HR employee → only their reporting manager
+      if (emp.reportingManager) recipients.add(emp.reportingManager);
+    } else {
+      if (emp.inchargeId)       recipients.add(emp.inchargeId);
+      if (emp.reportingManager) recipients.add(emp.reportingManager);
+      const hrManagers = await prisma.employee.findMany({
+        where: { departmentId: 1, employmentStatus: "ACTIVE" },
+        select: { id: true },
+      });
+      hrManagers.forEach((hr) => recipients.add(hr.id));
+    }
+
+    const name = [emp.firstName, emp.lastName].filter(Boolean).join(" ");
+    const days = daysInclusive(existing.startDate, existing.endDate);
+    const message =
+      `${name} has CANCELLED their ${existing.leaveType?.name ?? "leave"} request for ${days} day(s), ` +
+      `from ${fmtDate(existing.startDate)} to ${fmtDate(existing.endDate)}. ` +
+      `Reason: ${reason ?? "Cancelled by employee"}.`;
+
+    for (const rid of recipients) {
+      try {
+        await createNotification(rid, message);
+      } catch (notifyErr) {
+        console.error(`Failed to notify recipient ${rid}:`, notifyErr);
+        // Don't fail the cancellation if notification delivery fails
+      }
+    }
+
+    return res.json(updated);
+  } catch (err: any) {
+    console.error("Error cancelling leave request:", err);
+    return res.status(500).json({ error: err.message || "Failed to cancel leave request" });
+  }
+};
+
 // Get All Leave Requests (optional)
 export const getLeaveRequests = async (_req: Request, res: Response) => {
   try {

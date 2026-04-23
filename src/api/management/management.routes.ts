@@ -23,6 +23,7 @@ import {
   getAbsenteeism,
   getMobileLoginActivity,
   getQualifications,
+  getElInsights,
 } from "./management.controller";
 
 const router = Router();
@@ -49,5 +50,6 @@ router.get("/absenteeism", authenticateToken, getAbsenteeism);
 router.get("/workforce-insights", authenticateToken, getWorkforceInsights);
 router.get("/mobile-login-activity", authenticateToken, getMobileLoginActivity);
 router.get("/qualifications", authenticateToken, getQualifications);
+router.get("/el-insights", authenticateToken, getElInsights);
 
 export default router;
