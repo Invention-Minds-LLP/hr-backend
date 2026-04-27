@@ -2244,6 +2244,7 @@ enum EmploymentType {
   PROBATION
   DOCTOR
   TRAINEE
+  INTERNSHIP
 }
 
 enum ProbationStatus {
