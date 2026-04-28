@@ -24,6 +24,8 @@ import {
   getMobileLoginActivity,
   getQualifications,
   getElInsights,
+  getTrainingInsights,
+  getTrainingCalendar,
 } from "./management.controller";
 
 const router = Router();
@@ -51,5 +53,7 @@ router.get("/workforce-insights", authenticateToken, getWorkforceInsights);
 router.get("/mobile-login-activity", authenticateToken, getMobileLoginActivity);
 router.get("/qualifications", authenticateToken, getQualifications);
 router.get("/el-insights", authenticateToken, getElInsights);
+router.get("/training-insights", authenticateToken, getTrainingInsights);
+router.get("/training-calendar", authenticateToken, getTrainingCalendar);
 
 export default router;

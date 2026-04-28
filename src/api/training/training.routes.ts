@@ -10,6 +10,8 @@ import {
   markTrainingAttendance,
   getTrainingAttendance,
   bulkMarkTrainingAttendance,
+  getAssignableEmployees,
+  updateTrainingStatus,
 } from "./training.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -20,6 +22,9 @@ router.post("/", authenticateToken, createTraining);
 
 // Assign employees to a training
 router.post("/assign", authenticateToken, assignTraining);
+
+// Returns the list of employees the logged-in user can assign training to
+router.get("/assignable-employees", authenticateToken, getAssignableEmployees);
 
 // Get all trainings or employee-specific
 router.get("/", authenticateToken, getTrainings);
@@ -34,6 +39,7 @@ router.post("/feedback", authenticateToken, submitTrainingFeedback);
 router.get("/feedback/summary/:trainingId", authenticateToken, getTrainingFeedbackSummary);
 
 router.put("/:id", authenticateToken, updateTraining);
+router.patch("/:id/status", authenticateToken, updateTrainingStatus);
 // Mark single employee attendance
 router.post(
   "/attendance/:trainingId",

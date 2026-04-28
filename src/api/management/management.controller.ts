@@ -2398,3 +2398,348 @@ export const getElInsights = async (_req: Request, res: Response) => {
     return res.status(500).json({ error: err.message });
   }
 };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 19 — TRAINING INSIGHTS (Calendar + Performance + Feedback)
+// GET /api/management/training-insights
+// ═══════════════════════════════════════════════════════════════════════════════
+export const getTrainingInsights = async (_req: Request, res: Response) => {
+  try {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd   = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    const yearStart  = new Date(now.getFullYear(), 0, 1);
+
+    // ── KPI tiles ────────────────────────────────────────────
+    const [
+      trainingsThisMonth,
+      assignmentsAll,
+      completedAssignments,
+      attempts,
+      pendingAssignedTests,
+    ] = await Promise.all([
+      prisma.training.count({
+        where: {
+          OR: [
+            { startDate: { gte: monthStart, lte: monthEnd } },
+            { endDate:   { gte: monthStart, lte: monthEnd } },
+            { AND: [{ startDate: { lte: monthStart } }, { endDate: { gte: monthEnd } }] },
+          ],
+        },
+      }),
+      prisma.trainingAssignment.count({}),
+      prisma.trainingAssignment.count({ where: { status: "Completed" } }),
+      prisma.evaluationAttempt.findMany({
+        where: { status: "Completed", createdAt: { gte: yearStart } },
+        select: { score: true, employeeId: true, testId: true, createdAt: true },
+      }),
+      prisma.assignedTest.count({ where: { status: { not: "Completed" } } }),
+    ]);
+
+    const avgCompletionPct = assignmentsAll > 0
+      ? Math.round((completedAssignments / assignmentsAll) * 100)
+      : 0;
+    const avgTestScore = attempts.length > 0
+      ? Math.round(attempts.reduce((s, a) => s + (a.score ?? 0), 0) / attempts.length)
+      : 0;
+
+    // ── Department Participation (improved) ──────────────────
+    const allAssignments = await prisma.trainingAssignment.findMany({
+      include: {
+        employee: {
+          select: {
+            id: true, firstName: true, lastName: true, employeeCode: true,
+            Department:  { select: { name: true } },
+            designation: { select: { name: true } },
+          },
+        },
+        training: { select: { id: true, title: true } },
+      },
+    });
+
+    const deptMap = new Map<string, { total: number; completed: number; trainings: Set<number> }>();
+    for (const a of allAssignments) {
+      const dept = a.employee?.Department?.name || "Unassigned";
+      const cur = deptMap.get(dept) || { total: 0, completed: 0, trainings: new Set() };
+      cur.total++;
+      if (a.status === "Completed") cur.completed++;
+      if (a.training?.id) cur.trainings.add(a.training.id);
+      deptMap.set(dept, cur);
+    }
+    const deptParticipation = Array.from(deptMap.entries())
+      .map(([dept, v]) => ({
+        dept,
+        assignedEmployees: v.total,
+        completed: v.completed,
+        pending: v.total - v.completed,
+        completionPct: v.total > 0 ? Math.round((v.completed / v.total) * 100) : 0,
+        trainingsCovered: v.trainings.size,
+      }))
+      .sort((a, b) => b.assignedEmployees - a.assignedEmployees);
+
+    // ── Test Score Distribution ──────────────────────────────
+    const scoreBands = [
+      { label: "Excellent (80-100)", min: 80, max: 100, color: "#22c55e", count: 0 },
+      { label: "Good (60-79)",       min: 60, max: 79,  color: "#60a5fa", count: 0 },
+      { label: "Average (40-59)",    min: 40, max: 59,  color: "#f59e0b", count: 0 },
+      { label: "Below Avg (<40)",    min: 0,  max: 39,  color: "#ef4444", count: 0 },
+    ];
+    for (const a of attempts) {
+      const s = a.score ?? 0;
+      const b = scoreBands.find(b => s >= b.min && s <= b.max);
+      if (b) b.count++;
+    }
+
+    // Per-employee average score (for top/low lists)
+    const empScoreMap = new Map<number, { total: number; count: number }>();
+    for (const a of attempts) {
+      const cur = empScoreMap.get(a.employeeId) ?? { total: 0, count: 0 };
+      cur.total += a.score ?? 0;
+      cur.count++;
+      empScoreMap.set(a.employeeId, cur);
+    }
+    const perfEmpIds = Array.from(empScoreMap.keys());
+    const empDetails = await prisma.employee.findMany({
+      where: { id: { in: perfEmpIds } },
+      select: {
+        id: true, firstName: true, lastName: true, employeeCode: true,
+        Department:  { select: { name: true } },
+        designation: { select: { name: true } },
+      },
+    });
+    const perfEmpMap = new Map(empDetails.map(e => [e.id, e]));
+
+    // Helper to map a numeric score to a band label (matches scoreBands above)
+    const bandFor = (score: number): string => {
+      const b = scoreBands.find((b) => score >= b.min && score <= b.max);
+      return b?.label ?? "—";
+    };
+
+    const performers = perfEmpIds.map(id => {
+      const v = empScoreMap.get(id)!;
+      const e = perfEmpMap.get(id);
+      const avgScore = Math.round(v.total / v.count);
+      return {
+        employeeId: id,
+        name: e ? `${e.firstName} ${e.lastName}` : `#${id}`,
+        employeeCode: e?.employeeCode ?? "",
+        dept: e?.Department?.name ?? "—",
+        designation: e?.designation?.name ?? "—",
+        avgScore,
+        band: bandFor(avgScore),       // drill-down uses this
+        attemptsCount: v.count,
+      };
+    });
+
+    // Granular per-attempt rows so a dept drill-down can show
+    // exactly which training and which test produced each score.
+    const tests = await prisma.evaluationTest.findMany({
+      where: { id: { in: [...new Set(attempts.map((a) => a.testId))] } },
+      select: {
+        id: true, name: true, passingPercent: true,
+        TrainingTest: { select: { training: { select: { id: true, title: true } } } },
+      },
+    });
+    const testMap = new Map(tests.map((t) => [t.id, t]));
+
+    const attemptDetails = attempts.map((a) => {
+      const e = perfEmpMap.get(a.employeeId);
+      const t = testMap.get(a.testId);
+      const trainingTitle = t?.TrainingTest?.[0]?.training?.title ?? "—";
+      return {
+        employeeId: a.employeeId,
+        name: e ? `${e.firstName} ${e.lastName}` : `#${a.employeeId}`,
+        employeeCode: e?.employeeCode ?? "",
+        dept: e?.Department?.name ?? "—",
+        designation: e?.designation?.name ?? "—",
+        trainingTitle,
+        testName: t?.name ?? "—",
+        score: a.score ?? 0,
+        passingPercent: t?.passingPercent ?? 0,
+        passed: (a.score ?? 0) >= (t?.passingPercent ?? 0),
+        attemptDate: a.createdAt.toISOString().slice(0, 10),
+        band: bandFor(a.score ?? 0),
+      };
+    });
+
+    const topPerformers = [...performers].sort((a, b) => b.avgScore - a.avgScore).slice(0, 10);
+    const lowPerformers = [...performers]
+      .filter(p => p.avgScore < 60 && p.attemptsCount >= 1)
+      .sort((a, b) => a.avgScore - b.avgScore)
+      .slice(0, 10);
+
+    // ── Feedback / Top trainings ─────────────────────────────
+    const feedbacks = await prisma.trainingFeedback.findMany({
+      include: { training: { select: { id: true, title: true, startDate: true } } },
+    });
+    const trMap = new Map<number, {
+      title: string;
+      ratings: number[];
+      trainerRatings: number[];
+      contentRatings: number[];
+      relevanceRatings: number[];
+      startDate: Date | null;
+    }>();
+    for (const f of feedbacks) {
+      const t = f.training;
+      if (!t) continue;
+      const cur = trMap.get(t.id) ?? {
+        title: t.title, ratings: [], trainerRatings: [],
+        contentRatings: [], relevanceRatings: [], startDate: t.startDate,
+      };
+      if (f.rating)         cur.ratings.push(f.rating);
+      if (f.trainerRating)  cur.trainerRatings.push(f.trainerRating);
+      if (f.contentQuality) cur.contentRatings.push(f.contentQuality);
+      if (f.relevance)      cur.relevanceRatings.push(f.relevance);
+      trMap.set(t.id, cur);
+    }
+    const avg = (arr: number[]) =>
+      arr.length === 0 ? 0 : Math.round((arr.reduce((s, x) => s + x, 0) / arr.length) * 10) / 10;
+
+    const trainingFeedbackList = Array.from(trMap.entries()).map(([id, v]) => ({
+      trainingId: id,
+      title: v.title,
+      startDate: v.startDate ? v.startDate.toISOString().slice(0, 10) : null,
+      avgRating:    avg(v.ratings),
+      avgTrainer:   avg(v.trainerRatings),
+      avgContent:   avg(v.contentRatings),
+      avgRelevance: avg(v.relevanceRatings),
+      feedbackCount: v.ratings.length,
+    }));
+
+    const topRatedTrainings = [...trainingFeedbackList]
+      .filter(t => t.feedbackCount > 0)
+      .sort((a, b) => b.avgRating - a.avgRating).slice(0, 5);
+    const lowRatedTrainings = [...trainingFeedbackList]
+      .filter(t => t.feedbackCount > 0)
+      .sort((a, b) => a.avgRating - b.avgRating).slice(0, 5);
+
+    return res.json({
+      kpis: {
+        trainingsThisMonth,
+        totalAssigned: assignmentsAll,
+        avgCompletionPct,
+        avgTestScore,
+        pendingAssignedTests,
+      },
+      deptParticipation,
+      scoreDistribution: scoreBands,
+      topPerformers,
+      lowPerformers,
+      topRatedTrainings,
+      lowRatedTrainings,
+      // Per-employee detail rows for drill-down (avg score across all attempts)
+      employeeList: performers,
+      // Granular per-attempt detail rows (employee × training × test)
+      // — used for dept drill-down so management sees which trainings/tests
+      // contributed to each dept's numbers.
+      attemptDetails,
+    });
+  } catch (err: any) {
+    console.error("getTrainingInsights error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 20 — TRAINING CALENDAR (month view)
+// GET /api/management/training-calendar?month=YYYY-MM
+// ═══════════════════════════════════════════════════════════════════════════════
+export const getTrainingCalendar = async (req: Request, res: Response) => {
+  try {
+    const monthParam = String(req.query.month || "");
+    const m = monthParam.match(/^(\d{4})-(\d{1,2})$/);
+    const now = new Date();
+    const year  = m ? Number(m[1]) : now.getFullYear();
+    const month = m ? Number(m[2]) - 1 : now.getMonth();
+
+    const monthStart = new Date(year, month, 1);
+    const monthEnd   = new Date(year, month + 1, 0, 23, 59, 59, 999);
+
+    const trainings = await prisma.training.findMany({
+      where: {
+        OR: [
+          { startDate: { gte: monthStart, lte: monthEnd } },
+          { endDate:   { gte: monthStart, lte: monthEnd } },
+          { AND: [{ startDate: { lte: monthStart } }, { endDate: { gte: monthEnd } }] },
+        ],
+      },
+      include: {
+        department:         { select: { name: true } },
+        TrainingAttendance: { select: { employeeId: true, date: true, status: true } },
+        assignedEmployees:  { select: { employeeId: true, status: true } },
+      },
+      orderBy: { startDate: "asc" },
+    });
+
+    type DayEntry = {
+      trainingId: number;
+      title: string;
+      dept: string;
+      mode: string;
+      startDate: string;
+      endDate: string;
+      assignedCount: number;
+      attendedCount: number;
+      attendancePct: number;
+    };
+    const byDay: Record<string, DayEntry[]> = {};
+
+    for (const t of trainings) {
+      // startDate / endDate are nullable on the Training model — skip rows without dates
+      if (!t.startDate) continue;
+      const start = new Date(t.startDate);
+      const end   = new Date(t.endDate ?? t.startDate);
+
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        if (d < monthStart || d > monthEnd) continue;
+        const key = d.toISOString().slice(0, 10);
+        const dayAttendance = t.TrainingAttendance.filter(
+          (a: any) => a.date && new Date(a.date).toISOString().slice(0, 10) === key
+        );
+        const attended = dayAttendance.filter(
+          (a: any) => (a.status || "").toUpperCase() === "PRESENT"
+        ).length;
+        const assigned = t.assignedEmployees.length;
+
+        if (!byDay[key]) byDay[key] = [];
+        byDay[key].push({
+          trainingId: t.id,
+          title: t.title,
+          dept: t.department?.name ?? "All depts",
+          mode: t.mode ?? "—",
+          startDate: t.startDate.toISOString().slice(0, 10),
+          endDate:   (t.endDate ?? t.startDate).toISOString().slice(0, 10),
+          assignedCount: assigned,
+          attendedCount: attended,
+          attendancePct: assigned > 0 ? Math.round((attended / assigned) * 100) : 0,
+        });
+      }
+    }
+
+    const days: { date: string; dayOfMonth: number; trainings: DayEntry[]; total: number; totalAttended: number }[] = [];
+    const totalDays = monthEnd.getDate();
+    for (let dom = 1; dom <= totalDays; dom++) {
+      const d = new Date(year, month, dom);
+      const key = d.toISOString().slice(0, 10);
+      const list = byDay[key] ?? [];
+      days.push({
+        date: key,
+        dayOfMonth: dom,
+        trainings: list,
+        total: list.length,
+        totalAttended: list.reduce((s, x) => s + x.attendedCount, 0),
+      });
+    }
+
+    return res.json({
+      year, month: month + 1,
+      monthLabel: monthStart.toLocaleString("en-US", { month: "long", year: "numeric" }),
+      totalTrainings: trainings.length,
+      days,
+    });
+  } catch (err: any) {
+    console.error("getTrainingCalendar error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+};

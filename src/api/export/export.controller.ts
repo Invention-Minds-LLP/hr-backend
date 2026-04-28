@@ -2,11 +2,21 @@ import { Request, Response } from 'express';
 import XLSX from 'xlsx';
 import { prisma } from '../../lib/prisma';
 
+// All dates in this export module render in IST (Asia/Kolkata). Using
+// toISOString() for "YYYY-MM-DD" silently shifts dates back one day for any
+// value stored as IST midnight (which becomes 18:30 the previous day in UTC),
+// e.g. a leave applied for April 6 IST would export as April 5 — confusing.
+// `en-CA` produces YYYY-MM-DD so the format matches the previous behaviour.
 const fmt = (d: Date | null | undefined): string =>
-  d ? new Date(d).toISOString().split('T')[0] : '';
+  d ? new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) : '';
 
-const fmtT = (d: Date | null | undefined): string =>
-  d ? new Date(d).toISOString().replace('T', ' ').split('.')[0] : '';
+const fmtT = (d: Date | null | undefined): string => {
+  if (!d) return '';
+  const dt = new Date(d);
+  const date = dt.toLocaleDateString('en-CA',  { timeZone: 'Asia/Kolkata' });
+  const time = dt.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false });
+  return `${date} ${time}`;
+};
 
 const MONTH_NAMES = [
   '', 'January', 'February', 'March', 'April', 'May', 'June',

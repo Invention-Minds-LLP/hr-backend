@@ -96,7 +96,8 @@ export const loginUser = async (req: Request, res: Response) => {
         roleId: true,
         gender: true,
         employmentStatus: true,
-        role: { select: { name: true } }
+        role: { select: { name: true } },
+        Department: { select: { name: true } }
       }
     })
 
@@ -148,6 +149,7 @@ export const loginUser = async (req: Request, res: Response) => {
       role: roleName,
       empId: employee.id,
       deptId: employee.departmentId,
+      departmentName: employee.Department?.name || '',
       designation: employee?.designation?.name || '',
       photoUrl: employee.photoUrl || null,
       roleId: employee.roleId,

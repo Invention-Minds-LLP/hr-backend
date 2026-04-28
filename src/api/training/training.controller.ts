@@ -7,6 +7,72 @@ import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import test from "node:test";
 
 /* ======================================================
+   TRAINING ACCESS CONTROL
+   ====================================================== */
+
+type TrainingScope =
+  | { allowed: false; reason: string }
+  | { allowed: true; mode: 'ALL' }                          // HR Manager
+  | { allowed: true; mode: 'OWN_REPORTS'; managerEmpId: number } // Reporting Manager
+  | { allowed: true; mode: 'DEPT'; departmentId: number };  // Nursing Incharge / Nursing Educator
+
+const NURSING_DEPT_NAME = 'Nursing';
+// Accept the two common spellings — confirm with HR which one your DB uses.
+const NURSING_EDUCATOR_DESIGNATIONS = ['nurse educator', 'nursing educator'];
+
+/**
+ * Resolves what the logged-in user is allowed to do in the training module.
+ *  - HR Manager (roleId 1)                                     → manage everyone
+ *  - Reporting Manager (roleId 3)                              → only their direct reports
+ *  - Incharge (roleId 5) of the Nursing department             → all Nursing dept employees
+ *  - Executive whose designation is "Nursing Educator"         → all Nursing dept employees
+ *  - Anyone else                                               → not allowed
+ */
+async function getTrainingScope(req: AuthenticatedRequest): Promise<TrainingScope> {
+  const user = req.user;
+  if (!user) return { allowed: false, reason: 'Unauthorized' };
+
+  const roleId = Number(user.roleId);
+  const empId = Number(user.empId);
+  const deptId = Number(user.deptId);
+
+  // 1. HR Manager — full scope
+  if (roleId === 1) return { allowed: true, mode: 'ALL' };
+
+  // 2. Reporting Manager — only their reports
+  if (roleId === 3) return { allowed: true, mode: 'OWN_REPORTS', managerEmpId: empId };
+
+  // 3. Look up Nursing dept once (required for the next two checks)
+  const nursingDept = await prisma.department.findFirst({
+    where: { name: NURSING_DEPT_NAME },
+    select: { id: true },
+  });
+
+  // 4. Nursing Incharge
+  if (nursingDept && roleId === 5 && deptId === nursingDept.id) {
+    return { allowed: true, mode: 'DEPT', departmentId: nursingDept.id };
+  }
+
+  // 5. Nursing Educator (designation-based) — fetch the employee's designation since it isn't in JWT
+  if (nursingDept && empId) {
+    const me = await prisma.employee.findUnique({
+      where: { id: empId },
+      select: { departmentId: true, designation: { select: { name: true } } },
+    });
+    const designationName = me?.designation?.name?.trim().toLowerCase();
+    if (
+      me?.departmentId === nursingDept.id &&
+      designationName &&
+      NURSING_EDUCATOR_DESIGNATIONS.includes(designationName)
+    ) {
+      return { allowed: true, mode: 'DEPT', departmentId: nursingDept.id };
+    }
+  }
+
+  return { allowed: false, reason: 'You do not have permission to manage trainings' };
+}
+
+/* ======================================================
    TRAINING CRUD + ASSIGNMENT
    ====================================================== */
 
@@ -15,7 +81,15 @@ import test from "node:test";
  */
 export const createTraining = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const userId = req.user?.userId;
+    const scope = await getTrainingScope(req);
+    if (!scope.allowed) {
+      return res.status(400).json({ error: scope.reason });
+    }
+
+    // Use empId (Employee.id) so it lines up with how the rest of the module
+    // identifies "who created/owns this" — both the visibility filter in
+    // getTrainings and the status-change check use empId.
+    const empId = req.user?.userId;
     const {
       title,
       description,
@@ -40,7 +114,7 @@ export const createTraining = async (req: AuthenticatedRequest, res: Response) =
         startDate: startDate ? new Date(startDate) : null,
         endDate: endDate ? new Date(endDate) : null,
         departmentId,
-        createdBy: Number(userId),
+        createdBy: Number(empId),
         status: "ACTIVE",
 
         // 👇 store JSON trainers directly
@@ -130,9 +204,52 @@ export const createTraining = async (req: AuthenticatedRequest, res: Response) =
 //     res.status(500).json({ error: "Failed to assign training" });
 //   }
 // };
-export const assignTraining = async (req: Request, res: Response) => {
+export const assignTraining = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { trainingId, employeeIds, assignedBy } = req.body;
+    const scope = await getTrainingScope(req);
+    if (!scope.allowed) {
+      return res.status(400).json({ error: scope.reason });
+    }
+
+    const { trainingId, employeeIds, assignedBy } = req.body as {
+      trainingId: number;
+      employeeIds: number[];
+      assignedBy: number;
+    };
+
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) {
+      return res.status(400).json({ error: 'employeeIds is required' });
+    }
+
+    // Validate that every requested employee falls inside the caller's scope.
+    if (scope.mode === 'OWN_REPORTS') {
+      const allowed = await prisma.employee.findMany({
+        where: { id: { in: employeeIds }, reportingManager: scope.managerEmpId },
+        select: { id: true },
+      });
+      const allowedIds = new Set(allowed.map((e) => e.id));
+      const outside = employeeIds.filter((id) => !allowedIds.has(Number(id)));
+      if (outside.length) {
+        return res.status(400).json({
+          error: 'Some of the selected employees are not in your team. Please review your selection.',
+          outsideScope: outside,
+        });
+      }
+    } else if (scope.mode === 'DEPT') {
+      const allowed = await prisma.employee.findMany({
+        where: { id: { in: employeeIds }, departmentId: scope.departmentId },
+        select: { id: true },
+      });
+      const allowedIds = new Set(allowed.map((e) => e.id));
+      const outside = employeeIds.filter((id) => !allowedIds.has(Number(id)));
+      if (outside.length) {
+        return res.status(400).json({
+          error: 'Some of the selected employees are not in the Nursing department. Please review your selection.',
+          outsideScope: outside,
+        });
+      }
+    }
+    // mode === 'ALL' (HR) → no extra check, all employees are in scope
 
     const training = await prisma.training.findUnique({
       where: { id: trainingId },
@@ -210,7 +327,7 @@ export const assignTraining = async (req: Request, res: Response) => {
 /**
  * Get all trainings or filter by employeeId
  */
-export const getTrainings = async (req: Request, res: Response) => {
+export const getTrainings = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { employeeId } = req.query;
     const whereClause: any = {};
@@ -220,6 +337,16 @@ export const getTrainings = async (req: Request, res: Response) => {
       whereClause.assignedEmployees = {
         some: { employeeId: Number(employeeId) },
       };
+    } else {
+      // Option B visibility: HR Manager sees every training; everyone else
+      // (Reporting Manager / Nursing Incharge / Nursing Educator) sees only the
+      // trainings they themselves created. Note: a non-allowed user reaching
+      // here will simply get an empty list since they can't have created any.
+      const roleId = Number(req.user?.roleId);
+      const empId = Number(req.user?.userId);
+      if (roleId !== 1 && empId) {
+        whereClause.createdBy = empId;
+      }
     }
 
     const trainings = await prisma.training.findMany({
@@ -608,5 +735,96 @@ export const bulkMarkTrainingAttendance = async (req: AuthenticatedRequest, res:
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to update bulk attendance" });
+  }
+};
+
+/**
+ * Returns the list of employees the logged-in user is allowed to assign training to.
+ *  - HR Manager      → all active employees
+ *  - Reporting Mgr   → only their direct reports
+ *  - Nursing Incharge / Nursing Educator → all Nursing dept employees
+ *  - others          → 403
+ */
+export const getAssignableEmployees = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const scope = await getTrainingScope(req);
+    if (!scope.allowed) {
+      // Don't error out — just return an empty list. The UI guards prevent
+      // unauthorized users from reaching this endpoint normally; if they do,
+      // the assign dialog simply has no one to pick.
+      return res.json([]);
+    }
+
+    const where: any = { employmentStatus: 'ACTIVE' };
+    if (scope.mode === 'OWN_REPORTS') {
+      where.reportingManager = scope.managerEmpId;
+    } else if (scope.mode === 'DEPT') {
+      where.departmentId = scope.departmentId;
+    }
+    // mode === 'ALL' → no extra filter
+
+    const employees = await prisma.employee.findMany({
+      where,
+      select: {
+        id: true,
+        employeeCode: true,
+        firstName: true,
+        lastName: true,
+        departmentId: true,
+        Department: { select: { name: true } },
+        designation: { select: { name: true } },
+      },
+      orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+    });
+
+    res.json(employees);
+  } catch (err) {
+    console.error('Failed to fetch assignable employees:', err);
+    res.status(500).json({ error: 'Failed to fetch assignable employees' });
+  }
+};
+
+/**
+ * Manually change a training's status.
+ * Body: { status: 'DRAFT' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED' }
+ *
+ * Only HR Manager can change any training; other allowed roles (RM /
+ * Nursing Incharge / Nursing Educator) can only change trainings they created.
+ */
+export const updateTrainingStatus = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const scope = await getTrainingScope(req);
+    if (!scope.allowed) {
+      return res.status(400).json({ error: scope.reason });
+    }
+
+    const id = Number(req.params.id);
+    const { status } = req.body as { status: string };
+    const allowed = ['DRAFT', 'ACTIVE', 'COMPLETED', 'CANCELLED'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ error: `Status must be one of ${allowed.join(', ')}` });
+    }
+
+    const training = await prisma.training.findUnique({ where: { id } });
+    if (!training) return res.status(404).json({ error: 'Training not found' });
+
+    const empId = Number(req.user?.userId);
+    console.log(scope)
+    console.log(training.createdBy, empId)
+    if (scope.mode !== 'ALL' && training.createdBy !== empId) {
+      return res.status(400).json({
+        error: 'You can only change the status of trainings you created.',
+      });
+    }
+
+    const updated = await prisma.training.update({
+      where: { id },
+      data: { status: status as any },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error('Failed to update training status:', err);
+    res.status(500).json({ error: 'Failed to update training status' });
   }
 };

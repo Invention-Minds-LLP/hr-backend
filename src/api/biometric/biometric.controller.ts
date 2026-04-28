@@ -184,6 +184,69 @@ async function fetchAttendanceDaily(date: Date) {
   return res.data['attendance-daily'] || [];
 }
 
+/**
+ * Debug helper — runs an arbitrary COSEC attendance-daily query and returns
+ * the FULL list of userids plus a presence check for the code you care about.
+ * Used by the /api/biometric/cosec-debug endpoint so we can answer: "does
+ * COSEC actually return JMRH463 when we hit it from here?" without grepping
+ * server logs.
+ *
+ * Pass `noFilter: true` to skip `range=organization;id=2;active=1` entirely
+ * (replicates your Postman test URL). Pass `active: 0` to test the toggle.
+ */
+export async function debugFetchCosec(opts: {
+  date: Date;
+  checkCode?: string;
+  noFilter?: boolean;
+  active?: 0 | 1;
+  orgId?: number;
+}) {
+  const range = getCosecRange(opts.date);
+  const fields = 'userid,processdate,punch1,punch2,punch3,punch4,punch5,punch6,punch7,punch8,punch9,punch10';
+  let filter = '';
+  if (!opts.noFilter) {
+    const orgId  = opts.orgId  ?? 2;
+    const active = opts.active === undefined ? 1 : opts.active;
+    filter = `;range=organization;id=${orgId};active=${active}`;
+  }
+  const url =
+    `${COSEC_BASE_URL}/attendance-daily` +
+    `?action=get;field-name=${fields};date-range=${range}${filter};format=json`;
+
+  const t0 = Date.now();
+  const res = await axios.get(url, {
+    auth: { username: COSEC_USERNAME, password: COSEC_PASSWORD },
+    timeout: 300000,
+  });
+  const elapsedMs = Date.now() - t0;
+
+  const records: any[] = res.data['attendance-daily'] || [];
+  const allUserids = records.map((r) => String(r.userid ?? '').trim());
+
+  let presence: any = null;
+  if (opts.checkCode) {
+    const target = opts.checkCode.toUpperCase().trim();
+    const exact  = allUserids.find((u) => u.toUpperCase() === target);
+    const containing = allUserids.filter((u) => u.toUpperCase().includes(target.slice(0, 4)));
+    presence = {
+      checkCode: opts.checkCode,
+      foundExact: !!exact,
+      exactValue: exact ?? null,
+      // First 10 userids whose first 4 chars match — useful to spot near misses
+      // (e.g. you searched JMRH463 but COSEC has JMRH0463).
+      similarUserids: containing.slice(0, 10),
+    };
+  }
+
+  return {
+    url,
+    elapsedMs,
+    totalRecords: records.length,
+    allUserids,
+    presence,
+  };
+}
+
 /* ---------------------------------
    MAIN BIOMETRIC SYNC
 ---------------------------------- */
@@ -858,9 +921,19 @@ export async function backfillEmployeeAttendance(
       );
 
       if (!r) {
+        const sampleUserids = records.slice(0, 5).map((x: any) => x.userid);
         console.log(`   ⚠️  No record for code=${normalizedCode} on this day. Sample userids in response:`,
-          records.slice(0, 5).map((x: any) => x.userid));
-        results.push({ date: dayStr, status: 'NO_BIOMETRIC_DATA' });
+          sampleUserids);
+        // Surface diagnostics in the API response so the caller doesn't need
+        // to grep server logs. cosecRecordCount=0 means COSEC returned nothing
+        // (unreachable / wrong org id / wrong date format). >0 means the user
+        // isn't in COSEC's response for that day (possibly inactive / wrong code).
+        results.push({
+          date: dayStr,
+          status: 'NO_BIOMETRIC_DATA',
+          cosecRecordCount: records.length,
+          sampleUserids,
+        });
         continue;
       }
 
