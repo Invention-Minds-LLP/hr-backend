@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authenticateToken } from "../../middleware/authMiddleware";
 import {
   getPulse,
+  getAttention,
   getWorkforce,
   getWorkforceInsights,
   getAttendanceSummary,
@@ -31,6 +32,7 @@ import {
 const router = Router();
 
 router.get("/pulse", authenticateToken, getPulse);
+router.get("/attention", authenticateToken, getAttention);
 router.get("/workforce", authenticateToken, getWorkforce);
 router.get("/attendance-summary", authenticateToken, getAttendanceSummary);
 router.get("/leave-calendar", authenticateToken, getLeaveCalendar);

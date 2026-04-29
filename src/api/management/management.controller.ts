@@ -99,6 +99,77 @@ export const getPulse = async (req: Request, res: Response) => {
         ? Math.round((trainingCompleted / trainingTotal) * 100)
         : 0;
 
+    // ── Period comparisons (vs last month) ───────────────────────
+    // Cheap parallel fetch — only the four metrics where MoM delta is
+    // meaningful. Transient counts (pending leaves, OT pending) are
+    // point-in-time so we don't bother with their deltas.
+    const prevMonthStart = startOfMonth(subMonths(new Date(), 1));
+    const prevMonthEnd   = endOfMonth(subMonths(new Date(), 1));
+
+    const [
+      prevHeadcount,            // active employees as of end of last month
+      prevAttritionFullMonth,   // resignations during entire previous month
+      prevTrainingTotal,        // assignments due in last month
+      prevTrainingCompleted,
+      prevAttendanceAvg,        // avg daily attendance % in last month
+    ] = await Promise.all([
+      // Active count at end of last month — anyone whose status was ACTIVE then
+      // (good-enough proxy: employees joined before end-of-prev-month and not
+      // exited before end-of-prev-month is harder to compute without an audit
+      // log; we use current ACTIVE employees with dateOfJoining <= prevMonthEnd
+      // as the closest reasonable approximation).
+      prisma.employee.count({
+        where: {
+          employmentStatus: "ACTIVE",
+          dateOfJoining: { lte: prevMonthEnd },
+        },
+      }),
+
+      prisma.resignationRequest.count({
+        where: {
+          createdAt: { gte: prevMonthStart, lte: prevMonthEnd },
+          status: { notIn: ["WITHDRAWN", "CANCELLED", "REJECTED"] },
+        },
+      }),
+
+      prisma.trainingAssignment.count({
+        where: { createdAt: { gte: prevMonthStart, lte: prevMonthEnd } },
+      }),
+
+      prisma.trainingAssignment.count({
+        where: {
+          status: "Completed",
+          createdAt: { gte: prevMonthStart, lte: prevMonthEnd },
+        },
+      }),
+
+      // Avg attendance % across last month — single SQL aggregate.
+      // Counts PRESENT rows divided by total attendance rows.
+      (async () => {
+        const [presentCount, totalCount] = await Promise.all([
+          prisma.attendance.count({
+            where: {
+              date: { gte: prevMonthStart, lte: prevMonthEnd },
+              status: "PRESENT",
+            },
+          }),
+          prisma.attendance.count({
+            where: { date: { gte: prevMonthStart, lte: prevMonthEnd } },
+          }),
+        ]);
+        return totalCount > 0 ? Math.round((presentCount / totalCount) * 100) : 0;
+      })(),
+    ]);
+
+    const prevTrainingPct = prevTrainingTotal > 0
+      ? Math.round((prevTrainingCompleted / prevTrainingTotal) * 100)
+      : 0;
+
+    // delta() returns null when prev=0 (avoids divide-by-zero / nonsense %).
+    // Return the absolute diff so the UI can show "↑ 3" or "↑ 4.2%" cleanly.
+    const delta = (curr: number, prev: number) =>
+      prev === 0 ? null : Number(((curr - prev) * 100 / prev).toFixed(1));
+
     res.json({
       headcount: totalHeadcount,
       presentToday,
@@ -111,8 +182,296 @@ export const getPulse = async (req: Request, res: Response) => {
       attritionMTD: resignationsThisMonth,
       otPending,
       trainingCompletionPct: trainingPct,
+      // Comparison block — null = no prior data, frontend hides delta chip.
+      comparisons: {
+        headcount: { prev: prevHeadcount,        deltaPct: delta(totalHeadcount, prevHeadcount) },
+        attendancePct: {
+          prev: prevAttendanceAvg,
+          // attendance % is ALREADY a percentage, so use absolute-point delta
+          // (e.g. "84% vs 87% = -3 points") — `deltaPct` carried percentage diff
+          // would be misleading.
+          deltaPoints: prevAttendanceAvg ? Number((attendancePct - prevAttendanceAvg).toFixed(1)) : null,
+        },
+        attritionMTD:          { prev: prevAttritionFullMonth, deltaPct: delta(resignationsThisMonth, prevAttritionFullMonth) },
+        trainingCompletionPct: { prev: prevTrainingPct,        deltaPoints: prevTrainingPct ? Number((trainingPct - prevTrainingPct).toFixed(1)) : null },
+      },
     });
   } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════
+// ATTENTION NEEDED — auto-flagged items requiring management review
+// GET /api/management/attention
+//
+// Runs threshold checks across attendance, attrition, OT, recruitment
+// and training. Returns a sorted list of alerts ({ severity, title,
+// message, sectionId }). The frontend renders them as red/yellow/blue
+// chips at the top of the dashboard so management can see "what needs
+// my attention today" at a glance, without scrolling 19 sections.
+//
+// Thresholds are env-overridable so HR/Ops can tune them per hospital
+// without code changes. See ATTENTION_THRESHOLDS below.
+// ═══════════════════════════════════════════════════════════
+
+const ATTENTION_THRESHOLDS = {
+  attendancePctRed:    Number(process.env.ATTN_ATTENDANCE_RED)    || 80,   // <80% → red
+  attendancePctYellow: Number(process.env.ATTN_ATTENDANCE_YELLOW) || 90,   // 80-89% → yellow
+  pendingLeavesYellow: Number(process.env.ATTN_PENDING_LEAVES)    || 20,
+  pendingPermsYellow:  Number(process.env.ATTN_PENDING_PERMS)     || 20,
+  pipRed:              Number(process.env.ATTN_PIP_RED)           || 5,
+  pipYellow:           Number(process.env.ATTN_PIP_YELLOW)        || 2,
+  attritionMtdRed:     Number(process.env.ATTN_ATTRITION_RED)     || 5,
+  attritionMtdYellow:  Number(process.env.ATTN_ATTRITION_YELLOW)  || 2,
+  otPendingYellow:     Number(process.env.ATTN_OT_PENDING)        || 30,
+  openJobsYellow:      Number(process.env.ATTN_OPEN_JOBS)         || 10,
+  trainingPctRed:      Number(process.env.ATTN_TRAINING_RED)      || 50,
+  trainingPctYellow:   Number(process.env.ATTN_TRAINING_YELLOW)   || 70,
+};
+
+type AttentionItem = {
+  severity: 'red' | 'yellow' | 'info';
+  icon: string;
+  title: string;
+  message: string;
+  sectionId?: string;   // anchor on the dashboard to scroll to
+  metric?: number;
+};
+
+export const getAttention = async (_req: Request, res: Response) => {
+  try {
+    const todayStart = startOfDayIST();
+    const todayEnd   = endOfDayIST();
+    const monthStart = startOfMonth(new Date());
+    const monthEnd   = endOfMonth(new Date());
+    const T = ATTENTION_THRESHOLDS;
+
+    const [
+      headcount,
+      presentToday,
+      pendingLeaves,
+      pendingPerms,
+      activePIPs,
+      attritionMTD,
+      otPending,
+      openJobs,
+      trainTotal,
+      trainCompleted,
+      // Departments where today's attendance is unusually low (<70%) — surfaced
+      // separately so management can spot a single struggling department, not
+      // just an aggregate dip.
+      lowDeptAttendance,
+    ] = await Promise.all([
+      prisma.employee.count({ where: { employmentStatus: "ACTIVE" } }),
+      prisma.attendance.count({
+        where: { date: { gte: todayStart, lte: todayEnd }, status: "PRESENT" },
+      }),
+      prisma.leaveRequest.count({ where: { status: "PENDING" } }),
+      prisma.permissionRequest.count({ where: { status: "PENDING" } }),
+      prisma.employeePIP.count({
+        where: { status: { in: ["WARNING_ISSUED", "PIP_ACTIVE", "PIP_EXTENDED"] } },
+      }),
+      prisma.resignationRequest.count({
+        where: {
+          createdAt: { gte: monthStart, lte: monthEnd },
+          status: { notIn: ["WITHDRAWN", "CANCELLED", "REJECTED"] },
+        },
+      }),
+      prisma.overtimeApproval.count({
+        where: { status: "PENDING", managerStatus: "APPROVED", minutes: { gt: 60 } } as any,
+      }),
+      prisma.job.count({ where: { status: "OPEN" } }),
+      prisma.trainingAssignment.count(),
+      prisma.trainingAssignment.count({ where: { status: "Completed" } }),
+      // Per-department attendance today. Done with two simple Prisma calls
+      // (groupBy + count) instead of a $queryRaw — keeps it portable across
+      // Postgres / MySQL and side-steps the ::int cast that makes the raw
+      // query DB-specific.
+      (async (): Promise<any[]> => {
+        try {
+          const deptCounts = await prisma.employee.groupBy({
+            by: ['departmentId'],
+            where: { employmentStatus: 'ACTIVE' },
+            _count: { _all: true },
+          });
+          const deptIds = deptCounts.map((c) => c.departmentId);
+          const [depts, presentByDept] = await Promise.all([
+            prisma.department.findMany({
+              where: { id: { in: deptIds } },
+              select: { id: true, name: true },
+            }),
+            prisma.attendance.findMany({
+              where: {
+                date:   { gte: todayStart, lte: todayEnd },
+                status: 'PRESENT',
+                employee: { employmentStatus: 'ACTIVE' },
+              },
+              select: { employee: { select: { departmentId: true } } },
+            }),
+          ]);
+          const presentMap = new Map<number, number>();
+          for (const a of presentByDept) {
+            const did = a.employee?.departmentId;
+            if (did != null) presentMap.set(did, (presentMap.get(did) ?? 0) + 1);
+          }
+          const nameMap = new Map(depts.map((d) => [d.id, d.name]));
+          return deptCounts
+            .map((c) => {
+              const total   = c._count._all;
+              const present = presentMap.get(c.departmentId) ?? 0;
+              const pct = total ? Math.round((present * 100) / total) : 0;
+              return {
+                departmentId:   c.departmentId,
+                departmentName: nameMap.get(c.departmentId) ?? `Dept ${c.departmentId}`,
+                total, present, pct,
+              };
+            })
+            .filter((r) => r.pct < 70 && r.total >= 5);
+        } catch (e) {
+          console.error('[getAttention] dept-attendance aggregation failed:', e);
+          return [];
+        }
+      })(),
+    ]);
+
+    const attendancePct = headcount > 0 ? Math.round((presentToday / headcount) * 100) : 0;
+    const trainingPct   = trainTotal > 0 ? Math.round((trainCompleted / trainTotal) * 100) : 0;
+
+    const items: AttentionItem[] = [];
+
+    // ── Attendance ─────────────────────────────────────────────
+    if (attendancePct < T.attendancePctRed) {
+      items.push({
+        severity: 'red', icon: '⚠️', sectionId: 'sec-attendance',
+        title: 'Critically low attendance today',
+        message: `Only ${attendancePct}% present today (${presentToday}/${headcount}). Threshold ${T.attendancePctRed}%.`,
+        metric: attendancePct,
+      });
+    } else if (attendancePct < T.attendancePctYellow) {
+      items.push({
+        severity: 'yellow', icon: '⏰', sectionId: 'sec-attendance',
+        title: 'Attendance below target',
+        message: `${attendancePct}% present today (${presentToday}/${headcount}).`,
+        metric: attendancePct,
+      });
+    }
+
+    // Department-specific dips
+    for (const d of lowDeptAttendance) {
+      items.push({
+        severity: d.pct < 50 ? 'red' : 'yellow', icon: '🏥', sectionId: 'sec-dept-risk',
+        title: `${d.departmentName}: low attendance today`,
+        message: `${d.pct}% present in ${d.departmentName} (${d.present}/${d.total}).`,
+        metric: d.pct,
+      });
+    }
+
+    // ── PIP ────────────────────────────────────────────────────
+    if (activePIPs >= T.pipRed) {
+      items.push({
+        severity: 'red', icon: '📉', sectionId: 'sec-pip',
+        title: 'High number of active PIPs',
+        message: `${activePIPs} performance improvement plans currently active.`,
+        metric: activePIPs,
+      });
+    } else if (activePIPs >= T.pipYellow) {
+      items.push({
+        severity: 'yellow', icon: '📉', sectionId: 'sec-pip',
+        title: 'Active PIPs require review',
+        message: `${activePIPs} performance improvement plans active.`,
+        metric: activePIPs,
+      });
+    }
+
+    // ── Attrition this month ──────────────────────────────────
+    if (attritionMTD >= T.attritionMtdRed) {
+      items.push({
+        severity: 'red', icon: '📤', sectionId: 'sec-attrition',
+        title: 'Elevated attrition this month',
+        message: `${attritionMTD} resignation(s) recorded so far this month.`,
+        metric: attritionMTD,
+      });
+    } else if (attritionMTD >= T.attritionMtdYellow) {
+      items.push({
+        severity: 'yellow', icon: '📤', sectionId: 'sec-attrition',
+        title: 'Attrition activity to watch',
+        message: `${attritionMTD} resignation(s) this month.`,
+        metric: attritionMTD,
+      });
+    }
+
+    // ── Pending approvals ─────────────────────────────────────
+    if (pendingLeaves >= T.pendingLeavesYellow) {
+      items.push({
+        severity: 'yellow', icon: '📋', sectionId: 'sec-attendance',
+        title: 'Leave approvals piling up',
+        message: `${pendingLeaves} leave request(s) awaiting decision.`,
+        metric: pendingLeaves,
+      });
+    }
+    if (pendingPerms >= T.pendingPermsYellow) {
+      items.push({
+        severity: 'yellow', icon: '🕒', sectionId: 'sec-attendance',
+        title: 'Permission requests pending',
+        message: `${pendingPerms} permission request(s) awaiting decision.`,
+        metric: pendingPerms,
+      });
+    }
+    if (otPending >= T.otPendingYellow) {
+      items.push({
+        severity: 'yellow', icon: '⏱️', sectionId: 'sec-ot',
+        title: 'Overtime approvals pending',
+        message: `${otPending} OT request(s) awaiting management approval.`,
+        metric: otPending,
+      });
+    }
+
+    // ── Recruitment ───────────────────────────────────────────
+    // Frontend combines Attrition + Recruitment into one section, so the
+    // alert links to that combined section.
+    if (openJobs >= T.openJobsYellow) {
+      items.push({
+        severity: 'yellow', icon: '💼', sectionId: 'sec-attrition',
+        title: 'Many open positions',
+        message: `${openJobs} job position(s) currently open.`,
+        metric: openJobs,
+      });
+    }
+
+    // ── Training compliance ───────────────────────────────────
+    if (trainTotal > 0 && trainingPct < T.trainingPctRed) {
+      items.push({
+        severity: 'red', icon: '🎓', sectionId: 'sec-training',
+        title: 'Training completion lagging',
+        message: `Only ${trainingPct}% of assigned training completed.`,
+        metric: trainingPct,
+      });
+    } else if (trainTotal > 0 && trainingPct < T.trainingPctYellow) {
+      items.push({
+        severity: 'yellow', icon: '🎓', sectionId: 'sec-training',
+        title: 'Training completion below target',
+        message: `${trainingPct}% of assigned training completed.`,
+        metric: trainingPct,
+      });
+    }
+
+    // Sort: red first, then yellow, then info — within each group keep insertion order
+    const sevRank = { red: 0, yellow: 1, info: 2 } as const;
+    items.sort((a, b) => sevRank[a.severity] - sevRank[b.severity]);
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      counts: {
+        red:    items.filter((i) => i.severity === 'red').length,
+        yellow: items.filter((i) => i.severity === 'yellow').length,
+        info:   items.filter((i) => i.severity === 'info').length,
+      },
+      items,
+      thresholds: T,
+    });
+  } catch (err: any) {
+    console.error('[getAttention] failed:', err);
     res.status(500).json({ error: err.message });
   }
 };
