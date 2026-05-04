@@ -17,7 +17,11 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
     ) {
         const employee = await prisma.employee.findFirst({
             where: { phone },
-            include: { designation: true, role: { select: { name: true } } }
+            include: {
+                designation: true,
+                role: { select: { name: true } },
+                Branch: { select: { attendanceMode: true } }
+            }
         });
 
         if (!employee) {
@@ -75,7 +79,8 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
             deptId: employee.departmentId,
             designation: employee.designation?.name || '',
             photoUrl: employee.photoUrl || null,
-            roleId: employee.roleId
+            roleId: employee.roleId,
+            attendanceMode: employee.Branch?.attendanceMode ?? 'MOBILE'
         });
     }
 
@@ -246,7 +251,8 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
         include: {
             employee: {
                 include: {
-                    designation: true
+                    designation: true,
+                    Branch: { select: { attendanceMode: true } }
                 }
             }
         }
@@ -309,7 +315,8 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
         designation: employee.designation?.name || '',
         photoUrl: employee.photoUrl || null,
         roleId: employee.roleId,
-        gender: employee.gender || ''
+        gender: employee.gender || '',
+        attendanceMode: employee.Branch?.attendanceMode ?? 'MOBILE'
     });
 
 };

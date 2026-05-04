@@ -7,6 +7,9 @@ import cron from 'node-cron';
 import { runBiometricSync } from "../api/biometric/biometric.controller";
 import { initFinancialYearRolloverCron, initELAccrualCron, initNewJoineeLeaveAllocationCron } from "../api/leave/leave.controller";
 import { initAppraisalAutoDraftCron } from "../api/appraisal/appraisal-v2.controller";
+import { initDirectorySyncCron } from "./directory-sync.scheduler";
+import { expireStaleOffers, processReferralBonusEligibility } from "../api/recruiting/recruiting.controller";
+import { runIncidentDailyTasks } from "../api/incident/incident.controller";
 
 export async function startSchedulers() {
   initSurveyScheduler();
@@ -22,6 +25,46 @@ export async function startSchedulers() {
   initELAccrualCron();
   initFinancialYearRolloverCron();
   initNewJoineeLeaveAllocationCron();
+
+  initDirectorySyncCron();
+
+  // Daily at 02:00 — flip any unsigned offers past their proposedJoinAt to EXPIRED
+  cron.schedule("0 2 * * *", async () => {
+    try {
+      const r = await expireStaleOffers();
+      if (r.expired > 0) console.log(`[CRON] auto-expired ${r.expired} stale offers`);
+    } catch (e) {
+      console.error("[CRON] expireStaleOffers failed", e);
+    }
+  });
+
+  // Daily at 02:30 — advance referral-bonus lifecycle
+  // (PENDING_JOIN → PENDING_PROBATION → ELIGIBLE based on probation window)
+  cron.schedule("30 2 * * *", async () => {
+    try {
+      const r = await processReferralBonusEligibility();
+      if (r.joined || r.eligible) {
+        console.log(`[CRON] referral-bonus: joined→probation=${r.joined}, probation→eligible=${r.eligible}`);
+      }
+    } catch (e) {
+      console.error("[CRON] processReferralBonusEligibility failed", e);
+    }
+  });
+
+  // Daily at 03:00 — incident SLA escalation + mandatory-reporting nudges.
+  // Picks up incidents that breached their dueDate and bumps severity +
+  // notifies HR/Mgmt + assignee. Also nudges anyone responsible for an
+  // incident flagged for external authority reporting.
+  cron.schedule("0 3 * * *", async () => {
+    try {
+      const r = await runIncidentDailyTasks();
+      if (r.escalated || r.nudged) {
+        console.log(`[CRON] incident daily: escalated=${r.escalated}, nudged=${r.nudged}`);
+      }
+    } catch (e) {
+      console.error("[CRON] runIncidentDailyTasks failed", e);
+    }
+  });
 }
 const schedules = [
   // 00

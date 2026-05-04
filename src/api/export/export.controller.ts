@@ -1060,10 +1060,21 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
           'Description', 'Status', 'Attachment', 'Created On', 'Last Updated On',
         ];
 
-        const rows = incidents.map(i => [
-          i.employee.employeeCode,
-          `${i.employee.firstName} ${i.employee.lastName}`,
-          `${i.reporter.firstName} ${i.reporter.lastName}`,
+        // Both `employee` and `reporter` are nullable on the Incident model
+        // — `employee` may be empty for incidents that aren't tied to a
+        // specific person (equipment damage, security event), and `reporter`
+        // is null for anonymous public reports. Fall back gracefully so the
+        // export never crashes on either case.
+        const rows = incidents.map((i: any) => [
+          i.employee?.employeeCode ?? '',
+          i.employee
+            ? `${i.employee.firstName} ${i.employee.lastName}`.trim()
+            : '',
+          i.isAnonymous
+            ? 'Anonymous'
+            : (i.reporter
+                ? `${i.reporter.firstName} ${i.reporter.lastName}`.trim()
+                : ''),
           i.title, i.description, i.status, i.attachment ?? '',
           fmt(i.createdAt), fmt(i.updatedAt),
         ]);

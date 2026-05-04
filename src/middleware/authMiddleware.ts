@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import { getEmployeeAccess } from "../lib/employeeAccess";
 
 const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret"; // make sure to store in .env
 
@@ -7,27 +8,74 @@ export interface AuthenticatedRequest extends Request {
   user?: any; // you can type this properly if you like
 }
 
-export const authenticateToken = (
+/**
+ * Authenticate the request and ensure the holder still has system access.
+ *
+ * Three layers of defence:
+ *   1. JWT signature must verify against JWT_SECRET.
+ *   2. The employee must currently be in ACTIVE / NOTICE_PERIOD status.
+ *   3. The token's `iat` (issued-at) must be ≥ employee.accessRevokedAt
+ *      — so revoking access kills every existing token instantly.
+ *
+ * Candidate-portal tokens (no `empId` claim) bypass employee checks since
+ * they aren't backed by an Employee row. They're authenticated only via
+ * the JWT signature, which is correct for the candidate flows.
+ */
+export const authenticateToken = async (
   req: AuthenticatedRequest,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ) => {
   const token = req.headers['authorization']?.split(' ')[1];
   if (!token) {
-     res.status(401).json({ message: "Unauthorized: No token provided" });
-     return;
-  }
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // attach decoded payload to request
-    next();
-     return
-  } catch (error) {
-    console.error("JWT verification failed:", error);
-     res.status(403).json({ message: "Forbidden: Invalid token" });
+    res.status(401).json({ message: "Unauthorized: No token provided" });
     return;
   }
+
+  let decoded: any;
+  try {
+    decoded = jwt.verify(token, JWT_SECRET);
+  } catch (error) {
+    console.error("JWT verification failed:", error);
+    res.status(403).json({ message: "Forbidden: Invalid token" });
+    return;
+  }
+
+  // Employee-backed tokens have an empId claim. Candidate-portal tokens
+  // don't and skip the employment-status / revoke check.
+  const empId = Number(decoded?.empId ?? 0);
+  if (empId > 0) {
+    try {
+      const access = await getEmployeeAccess(empId);
+      if (!access.exists) {
+        res.status(403).json({ message: "Forbidden: account not found" });
+        return;
+      }
+      if (!access.active) {
+        res.status(403).json({
+          message: `Forbidden: account is ${access.status?.toLowerCase() ?? 'inactive'}`,
+        });
+        return;
+      }
+      // Compare the token's iat (in seconds) against accessRevokedAt.
+      // A token issued BEFORE the revoke timestamp is no longer trusted.
+      if (access.accessRevokedAt && typeof decoded.iat === 'number') {
+        const tokenIssuedMs = decoded.iat * 1000;
+        if (tokenIssuedMs < access.accessRevokedAt.getTime()) {
+          res.status(401).json({ message: "Session expired. Please log in again." });
+          return;
+        }
+      }
+    } catch (e) {
+      // If the access check itself errors (DB hiccup), we fail-open with a
+      // warning rather than locking everyone out. The signature was already
+      // verified, so this only widens the existing risk window briefly.
+      console.error("[auth] access check failed, allowing request:", e);
+    }
+  }
+
+  req.user = decoded;
+  next();
 };
 
 /**

@@ -87,6 +87,13 @@ model Employee {
   experienceType          String?
   overtimeEnabled         Boolean?         @default(false)
 
+  // Access-revocation timestamp. When HR fires/suspends an employee or the
+  // resignation cron flips them to RESIGNED, this is set to "now". The auth
+  // middleware refuses any JWT whose `iat` is older than this value, so all
+  // existing browser sessions die instantly. Independent of `employmentStatus`
+  // so we can keep an audit trail of when access was actually killed.
+  accessRevokedAt         DateTime?
+
   Address                  Address[]
   AnnouncementAck          AnnouncementAck[]
   appraisals               AppraisalForm[]
@@ -158,6 +165,13 @@ model Employee {
   pipEmailLogs             PIPEmailLog[]
   pipResponses             PIPEmployeeResponse[]
   probationRecords         ProbationRecord[]
+  interviewPanels          InterviewPanelMember[]
+  referredApplications     Application[]               @relation("ReferredApplications")
+  // Manpower-requisition relations — see ManpowerRequisition for direction details.
+  manpowerRequisitionsRaised   ManpowerRequisition[]   @relation("ManpowerRaisedBy")
+  manpowerRequisitionsHoD      ManpowerRequisition[]   @relation("ManpowerApprovedHoD")
+  manpowerRequisitionsSMO      ManpowerRequisition[]   @relation("ManpowerApprovedSMO")
+  manpowerRequisitionsHR       ManpowerRequisition[]   @relation("ManpowerReceivedHR")
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -250,12 +264,19 @@ model Department {
 }
 
 model Branch {
-  id        Int        @id @default(autoincrement())
-  name      String     @unique
-  location  String?
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @default(now()) @updatedAt
-  employees Employee[]
+  id             Int            @id @default(autoincrement())
+  name           String         @unique
+  location       String?
+  attendanceMode AttendanceMode @default(MOBILE)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @default(now()) @updatedAt
+  employees      Employee[]
+}
+
+enum AttendanceMode {
+  BIOMETRIC
+  MOBILE
+  BOTH
 }
 
 model Role {
@@ -1103,6 +1124,9 @@ model Job {
   status                JobStatus            @default(OPEN)
   createdBy             Int
   backfillForEmployeeId Int?
+  // Minimum professional references the candidate must supply before HR
+  // can extend a final offer. Per-job so senior/regulated roles can demand more.
+  minReferencesRequired Int                  @default(2)
   createdAt             DateTime             @default(now())
   updatedAt             DateTime             @default(now()) @updatedAt
   applications          Application[]
@@ -1164,17 +1188,65 @@ model Application {
   qualification         String?
   source                String?
   shortlistNote         String?
+  // ── Referral (how the application arrived) ─────────────────────
+  // `referralType` is structured; legacy `source` String is kept for
+  // backward compat and free-text overrides (e.g. specific job-board name).
+  referralType          ReferralType?
+  referrerEmployeeId    Int?            // FK to Employee — only when INTERNAL
+  referrerName          String?         // free text — used for EXTERNAL/AGENCY
+  referrerEmail         String?
+  referrerPhone         String?
+  referrerCompany       String?         // agency name, college, etc.
+  referralBonusStatus   ReferralBonusStatus @default(NOT_APPLICABLE)
+  referralBonusAmount   Float?
+  referralBonusPaidAt   DateTime?
+  referralBonusNote     String?         @db.Text  // payout reference / forfeit reason
+
+  // ── DPDP-compliance consent flags ──────────────────────────────
+  // Single timestamp covers both reference-checks AND BGV — the candidate
+  // signs one consent that authorises both. Split into two fields if
+  // policy ever requires separate consent flows.
+  referencesConsentAt   DateTime?
+  bgvConsentAt          DateTime?
+
   candidate             Candidate               @relation(fields: [candidateId], references: [id])
   job                   Job                     @relation(fields: [jobId], references: [id])
+  referrerEmployee      Employee?               @relation("ReferredApplications", fields: [referrerEmployeeId], references: [id])
   CandidateAssignedTest CandidateAssignedTest[]
   interviews            Interview[]
   offer                 Offer?
+  auditLogs             ApplicationAuditLog[]
+  references            CandidateReference[]
+  bgv                   BackgroundVerification?
 
   @@index([jobId, status])
   @@index([candidateId])
   @@index([updatedAt])
+  @@index([referrerEmployeeId])
+  @@index([referralType])
+  @@index([referralBonusStatus])
   @@index([status])
   @@index([jobId])
+}
+
+// Audit trail of every status change / significant action on an Application.
+// Lets HR / management see WHO did WHAT and WHEN — useful for compliance and
+// debugging "why did this candidate get rejected?".
+model ApplicationAuditLog {
+  id            Int      @id @default(autoincrement())
+  applicationId Int
+  action        String   // e.g. "STATUS_CHANGE", "OFFER_SENT", "INTERVIEW_SCHEDULED"
+  fromStatus    String?  // optional previous status (when applicable)
+  toStatus      String?  // optional new status (when applicable)
+  note          String?  @db.Text
+  performedBy   Int?     // employeeId of the user who did it (null = system / candidate)
+  performedAt   DateTime @default(now())
+
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@index([performedAt])
+  @@index([action])
 }
 
 model Interview {
@@ -1183,6 +1255,8 @@ model Interview {
   stage                   String
   startTime               DateTime
   endTime                 DateTime
+  // DEPRECATED: legacy CSV of panel employee IDs. Kept temporarily for backward
+  // compatibility — new code must use the `panel` relation (InterviewPanelMember).
   panelUserIds            String?
   feedbackUrl             String?
   feedbackDue             DateTime?
@@ -1195,11 +1269,30 @@ model Interview {
   candidateAssignedTest   CandidateAssignedTest? @relation(fields: [candidateAssignedTestId], references: [id])
   InterviewFeedback       InterviewFeedback[]
   InterviewHRReview       InterviewHRReview?
+  panel                   InterviewPanelMember[]
 
   @@index([startTime])
   @@index([applicationId])
   @@index([stage])
   @@index([candidateAssignedTestId])
+}
+
+// Junction table replacing the CSV `panelUserIds` field on Interview.
+// One row per (interview, employee) pair. This makes overlap queries
+// trivial (`InterviewPanelMember.findMany({ where: { employeeId: { in: [...] } } })`)
+// and removes the contains-string bug entirely.
+model InterviewPanelMember {
+  id          Int      @id @default(autoincrement())
+  interviewId Int
+  employeeId  Int
+  createdAt   DateTime @default(now())
+
+  interview   Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+  employee    Employee  @relation(fields: [employeeId], references: [id])
+
+  @@unique([interviewId, employeeId])
+  @@index([employeeId])
+  @@index([interviewId])
 }
 
 model Offer {
@@ -1214,6 +1307,17 @@ model Offer {
   proposedJoinAt DateTime?
   joinOutcome    JoinOutcome?
   noShowReason   String?
+  // Offer-letter contents (used to render the PDF + persisted for audit)
+  ctc            Float?       // Annual CTC in INR
+  joinLocation   String?      // city / branch / hospital
+  workMode       String?      // OFFICE / REMOTE / HYBRID
+  customNotes    String?      @db.Text   // any extra text HR wants in the letter
+  // Email send audit — store CC / BCC the email was sent to
+  ccEmails       String?      // CSV
+  bccEmails      String?      // CSV
+  // Optional URL where the generated PDF was archived (FTP / S3). Null if
+  // we only attach to email and regenerate on demand.
+  offerLetterUrl String?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @default(now()) @updatedAt
   application    Application  @relation(fields: [applicationId], references: [id])
@@ -1221,6 +1325,96 @@ model Offer {
   @@index([status])
   @@index([proposedJoinAt])
   @@index([signedAt])
+}
+
+// ─── Recruitment: Reference checks ──────────────────────────────────
+// Tied to Application (not Candidate) — different roles may require
+// different references for the same person.
+model CandidateReference {
+  id              Int            @id @default(autoincrement())
+  applicationId   Int
+  refereeName     String
+  refereeRelation String         // e.g. "Reporting Manager", "Peer", "HR"
+  refereeCompany  String?
+  refereeEmail    String?
+  refereePhone    String?
+
+  // Check workflow — populated when HR contacts the referee.
+  checkStatus     RefCheckStatus @default(PENDING)
+  checkedBy       Int?           // Employee.id who performed the check
+  checkedAt       DateTime?
+  feedback        String?        @db.Text
+  rating          Int?           // 1..5 — overall sentiment from the call
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @default(now()) @updatedAt
+  application     Application    @relation(fields: [applicationId], references: [id])
+
+  @@index([applicationId])
+  @@index([checkStatus])
+}
+
+// ─── Recruitment: Background Verification ───────────────────────────
+// One BGV record per Application (1:1). The actual checks live as rows
+// in BgvCheck so HR can mark each one independently.
+model BackgroundVerification {
+  id              Int           @id @default(autoincrement())
+  applicationId   Int           @unique
+  status          BgvStatus     @default(NOT_INITIATED)
+  vendor          String?       // "Internal HR" / agency name — free text since no API integration
+  vendorRef       String?       // optional vendor case ID for cross-reference
+  initiatedBy     Int?          // Employee who clicked "Initiate BGV"
+  initiatedAt     DateTime?
+  completedAt     DateTime?
+  reportUrl       String?       // FTP/S3 URL of the consolidated final report
+  overallNote     String?       @db.Text
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @default(now()) @updatedAt
+
+  application     Application   @relation(fields: [applicationId], references: [id])
+  checks          BgvCheck[]
+  documents       BgvDocument[]
+
+  @@index([status])
+}
+
+model BgvCheck {
+  id           Int             @id @default(autoincrement())
+  bgvId        Int
+  type         BgvCheckType
+  status       BgvCheckStatus  @default(PENDING)
+  evidenceUrl  String?
+  note         String?         @db.Text
+  // Discrepancy resolution audit
+  resolutionNote String?       @db.Text
+  resolvedBy   Int?            // Employee who marked DISCREPANCY_RESOLVED
+  resolvedAt   DateTime?
+  updatedAt    DateTime        @updatedAt
+  createdAt    DateTime        @default(now())
+
+  bgv          BackgroundVerification @relation(fields: [bgvId], references: [id])
+
+  @@unique([bgvId, type])      // one row per check-type per BGV
+  @@index([bgvId])
+  @@index([status])
+}
+
+// Documents the candidate provides to support BGV (Aadhaar, PAN, mark-sheets,
+// relieving letters, payslips, etc.). Stored separately so HR can collect them
+// independently of marking individual checks.
+model BgvDocument {
+  id          Int       @id @default(autoincrement())
+  bgvId       Int
+  docType     String    // "AADHAAR" / "PAN" / "MARKSHEET_10" / "RELIEVING_LETTER_<COMPANY>" etc.
+  fileName    String
+  fileUrl     String
+  uploadedBy  Int?      // Employee who attached it (HR), or null if candidate-uploaded
+  receivedAt  DateTime  @default(now())
+
+  bgv         BackgroundVerification @relation(fields: [bgvId], references: [id])
+
+  @@index([bgvId])
+  @@index([docType])
 }
 
 model Announcement {
@@ -1283,26 +1477,30 @@ model Internship {
 }
 
 model CandidateAssignedTest {
-  id             Int            @id @default(autoincrement())
+  id             Int                          @id @default(autoincrement())
   applicationId  Int
   candidateId    Int
   testId         Int
   assignedBy     Int
-  assignedAt     DateTime       @default(now())
+  assignedAt     DateTime                     @default(now())
   testDate       DateTime?
   deadlineDate   DateTime?
-  status         String         @default("NotStarted")
-  attempts       Int            @default(0)
+  // String for backward compat with existing rows. Application code MUST use
+  // the `CandidateTestStatusValues` constant to enforce the same values that
+  // would be in an enum (NotStarted / InProgress / Completed / Cancelled).
+  status         String                       @default("NotStarted")
+  attempts       Int                          @default(0)
   startedAt      DateTime?
   completedAt    DateTime?
   score          Float?
   response       String?
+  // Same story — kept as String for forward-compat. Allowed: PASS / FAIL / null.
   reviewDecision String?
   reviewNote     String?
   reviewedAt     DateTime?
   reviewedBy     Int?
-  application    Application    @relation(fields: [applicationId], references: [id])
-  test           EvaluationTest @relation(fields: [testId], references: [id])
+  application    Application                  @relation(fields: [applicationId], references: [id])
+  test           EvaluationTest               @relation(fields: [testId], references: [id])
   Interview      Interview[]
 
   @@index([applicationId])
@@ -1561,7 +1759,29 @@ model ManpowerRequisition {
   smoRejectedBy         String?
   smoRejectedComments   String?
   smoRejectedDate       DateTime?
+
+  // ── Strong FKs back to the Employee table ───────────────────
+  // Existing String columns (raisedBy, approvedByHoD, etc.) keep the
+  // *display name / signature label* shown on the printed requisition
+  // form. These Int columns are the system-of-record for "who" — used
+  // by filters, role checks, and notifications. Backfilled from the
+  // String columns via prisma/backfillRequisitionRaisers.ts.
+  raisedByEmployeeId    Int?
+  approvedByHoDEmpId    Int?
+  approvedBySMOEmpId    Int?
+  receivedByHREmpId     Int?
+
+  raisedByEmployee      Employee? @relation("ManpowerRaisedBy",     fields: [raisedByEmployeeId], references: [id])
+  hodApproverEmployee   Employee? @relation("ManpowerApprovedHoD",  fields: [approvedByHoDEmpId], references: [id])
+  smoApproverEmployee   Employee? @relation("ManpowerApprovedSMO",  fields: [approvedBySMOEmpId], references: [id])
+  hrReceiverEmployee    Employee? @relation("ManpowerReceivedHR",   fields: [receivedByHREmpId],  references: [id])
+
   job                   Job?      @relation(fields: [jobId], references: [id])
+
+  @@index([raisedByEmployeeId])
+  @@index([approvedByHoDEmpId])
+  @@index([approvedBySMOEmpId])
+  @@index([receivedByHREmpId])
 }
 
 model Grievance {
@@ -1767,21 +1987,261 @@ model TrainingAttendance {
   @@index([employeeId])
 }
 
+// ─── Incident Management ─────────────────────────────────────────────
+// `Incident` is intentionally industry-neutral. Categories live in a
+// separate `IncidentCategory` table so each customer (factory, IT,
+// retail, hospital, etc.) can configure their own list at deployment.
+// `status` tracks where in the workflow the case is; `outcome` tracks
+// what the investigation concluded — they are orthogonal.
 model Incident {
+  id              Int               @id @default(autoincrement())
+
+  // Who & what
+  title           String
+  description     String            @db.LongText
+  categoryId      Int?              // FK → IncidentCategory (null only for legacy rows)
+  category        IncidentCategory? @relation(fields: [categoryId], references: [id])
+  subcategory     String?
+  severity        IncidentSeverity  @default(MEDIUM)
+  status          IncidentStatus    @default(OPEN)
+  outcome         IncidentOutcome?
+  outcomeRecordedAt DateTime?
+  outcomeRecordedBy Int?
+
+  // Discretion
+  isAnonymous     Boolean           @default(false)
+  confidentiality String            @default("STANDARD")  // STANDARD · HR_PRIVATE · MGMT_ONLY
+
+  // Generic compliance flags — let any framework (ISO 45001 / 27001 / DPDP /
+  // POSH / Factories Act, etc.) hook into the same column without bloating
+  // the model with framework-specific booleans.
+  requiresRCA            Boolean    @default(false)
+  requiresExternalReport Boolean    @default(false)
+
+  // When & where
+  // Defaults to now() purely so prisma db push can apply against existing
+  // rows. The controller still treats this as a real "when did it happen"
+  // value supplied by the reporter — defaulting only kicks in if the
+  // caller forgets to send it.
+  incidentDate    DateTime          @default(now())
+  reportedAt      DateTime          @default(now())
+  location        String?
+  departmentId    Int?              // dept where it occurred (may differ from employee's dept)
+
+  // People — every "person" field is nullable to support anonymous reports
+  // and incidents without a specific accused (e.g. equipment failure).
+  employeeId      Int?              // person involved / accused
+  reportedBy      Int?              // null when isAnonymous = true
+  assignedTo      Int?              // investigator
+  reviewerEmpId   Int?              // HR / HOD reviewer who signs off
+
+  // SLA
+  dueDate         DateTime?
+  acknowledgedAt  DateTime?
+  resolvedAt      DateTime?
+  closedAt        DateTime?
+
+  // Resolution (filled in as the investigation progresses)
+  rootCause       String?           @db.Text
+  actionTaken     String?           @db.Text       // disciplinary / corrective action
+  preventiveAction String?          @db.Text
+  rejectionReason String?
+
+  // When outcome = FALSE_REPORT, capture whether HR took counter-action
+  // against the reporter (filing a malicious complaint is itself misconduct
+  // under most policies).
+  falseReportConsequenceTaken Boolean @default(false)
+  falseReportConsequenceNote  String? @db.Text
+
+  // External reporting (industry-agnostic — police, regulator, ISO auditor,
+  // data-protection board, factory inspector, etc.)
+  reportedToAuthority   Boolean     @default(false)
+  authorityName         String?
+  authorityReportNote   String?     @db.Text
+  authorityReportedAt   DateTime?
+
+  // Linked incidents — same root cause grouped together
+  parentIncidentId Int?
+  parentIncident   Incident?         @relation("IncidentLinks", fields: [parentIncidentId], references: [id])
+  linkedIncidents  Incident[]        @relation("IncidentLinks")
+
+  // Legacy single-attachment column kept for backward compat with old rows.
+  // New writes use the IncidentAttachment table for multi-file support.
+  attachment      String?
+
+  // Phase 4 — public anonymous-report tracking. Set when an incident is
+  // filed via the public form (no login). The reporter can come back to
+  // GET /api/incidents/public/track/:token to read sanitised status info
+  // (no comments, no internal names).
+  publicTrackingToken String? @unique
+  // Last time the auto-escalation cron acted on this incident — used to
+  // avoid re-escalating the same row every day forever.
+  lastEscalatedAt     DateTime?
+
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @default(now()) @updatedAt
+
+  // Relations
+  employee        Employee?         @relation("IncidentEmployee", fields: [employeeId], references: [id])
+  reporter        Employee?         @relation("IncidentReporter", fields: [reportedBy], references: [id])
+  attachments     IncidentAttachment[]
+  comments        IncidentComment[]
+  witnesses       IncidentWitness[]
+  auditLogs       IncidentAuditLog[]
+  // Phase 2 relations
+  capaActions     IncidentCAPA[]
+  rca             IncidentRCA?
+
+  @@index([employeeId])
+  @@index([reportedBy])
+  @@index([assignedTo])
+  @@index([categoryId])
+  @@index([status])
+  @@index([severity])
+  @@index([incidentDate])
+  @@index([dueDate])
+}
+
+// Configurable category catalogue — each org tunes their own list.
+// `defaultAssigneeRoleId` lets new incidents auto-route to a role
+// (e.g. Safety → EHS Manager, Cyber → IT Head, Misconduct → HR Head).
+model IncidentCategory {
+  id                    Int       @id @default(autoincrement())
+  name                  String    @unique
+  description           String?
+  defaultSeverity       String?                            // pre-fill suggestion (LOW/MEDIUM/HIGH/CRITICAL)
+  defaultSlaHours       Int?                               // SLA in hours from reportedAt
+  defaultAssigneeRoleId Int?                               // role for auto-assign
+  isAnonymousAllowed    Boolean   @default(true)           // per-category whistleblower toggle
+  requiresRCAByDefault  Boolean   @default(false)
+  requiresExternalReportByDefault Boolean @default(false)
+  isActive              Boolean   @default(true)
+  sortOrder             Int       @default(0)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @default(now()) @updatedAt
+
+  incidents             Incident[]
+}
+
+model IncidentAttachment {
   id          Int      @id @default(autoincrement())
-  employeeId  Int
-  reportedBy  Int
-  title       String
-  description String   @db.LongText
-  status      String
-  attachment  String?
+  incidentId  Int
+  fileName    String
+  fileUrl     String
+  uploadedBy  Int?
+  uploadedAt  DateTime @default(now())
+  incident    Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@index([incidentId])
+}
+
+model IncidentComment {
+  id          Int      @id @default(autoincrement())
+  incidentId  Int
+  authorId    Int                                            // employee posting the note
+  body        String   @db.Text
+  isInternal  Boolean  @default(false)                       // visible only to investigators / HR
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) @updatedAt
-  employee    Employee @relation("IncidentEmployee", fields: [employeeId], references: [id])
-  reporter    Employee @relation("IncidentReporter", fields: [reportedBy], references: [id])
+  incident    Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
 
-  @@index([employeeId], map: "Incident_employeeId_fkey")
-  @@index([reportedBy], map: "Incident_reportedBy_fkey")
+  @@index([incidentId])
+}
+
+model IncidentWitness {
+  id           Int      @id @default(autoincrement())
+  incidentId   Int
+  // A witness can be an employee (linked) or an external person (free text).
+  witnessEmpId Int?
+  witnessName  String?
+  contactInfo  String?
+  statement    String?  @db.Text
+  recordedAt   DateTime @default(now())
+  incident     Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@index([incidentId])
+}
+
+// Phase 2 — Investigation tools
+
+// Corrective & Preventive Actions tied to an incident. One incident can
+// spawn multiple CAPAs (e.g. one corrective + two preventive). Each has
+// its own owner and lifecycle (PENDING → IN_PROGRESS → DONE / CANCELLED).
+// Industry-neutral: same shape works for ISO 9001 quality NCRs, ISO 45001
+// safety actions, ISO 27001 security controls, etc.
+model IncidentCAPA {
+  id            Int       @id @default(autoincrement())
+  incidentId    Int
+  // CORRECTIVE = fix the issue that just happened.
+  // PREVENTIVE = make sure it doesn't happen again.
+  type          String    @default("CORRECTIVE")
+  description   String    @db.Text
+  ownerId       Int?      // employee accountable for executing the action
+  dueDate       DateTime?
+  status        String    @default("PENDING")     // PENDING / IN_PROGRESS / DONE / CANCELLED
+  completedAt   DateTime?
+  completedNote String?   @db.Text
+  createdBy     Int?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @default(now()) @updatedAt
+
+  incident      Incident  @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@index([incidentId])
+  @@index([ownerId])
+  @@index([status])
+  @@index([dueDate])
+}
+
+// Structured Root-Cause Analysis. One RCA per incident (1:1). Supports two
+// industry-standard methods — 5-Why (text chain) and Fishbone / Ishikawa
+// (categorical causes). The `method` field discriminates which fields are
+// meaningful; the others stay null.
+model IncidentRCA {
+  id                 Int       @id @default(autoincrement())
+  incidentId         Int       @unique
+  method             String    @default("FIVE_WHY")  // FIVE_WHY / FISHBONE
+
+  // Common
+  problemStatement   String?   @db.Text
+  rootCauseSummary   String?   @db.Text
+
+  // 5-Why — five chained "why?" questions drilling toward the root cause
+  why1               String?   @db.Text
+  why2               String?   @db.Text
+  why3               String?   @db.Text
+  why4               String?   @db.Text
+  why5               String?   @db.Text
+
+  // Fishbone — six classic cause categories (the "6Ms")
+  causesPeople       String?   @db.Text
+  causesProcess      String?   @db.Text
+  causesEquipment    String?   @db.Text
+  causesEnvironment  String?   @db.Text
+  causesMaterial     String?   @db.Text
+  causesMethod       String?   @db.Text
+
+  conductedBy        Int?
+  conductedAt        DateTime  @default(now())
+  updatedAt          DateTime  @default(now()) @updatedAt
+
+  incident           Incident  @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+}
+
+// Append-only audit log of every state change / assignment / outcome.
+// Required for HR/legal traceability; also feeds the activity feed in the UI.
+model IncidentAuditLog {
+  id           Int      @id @default(autoincrement())
+  incidentId   Int
+  action       String                                       // STATUS_CHANGED / ASSIGNED / COMMENTED / OUTCOME / etc.
+  fromValue    String?
+  toValue      String?
+  note         String?  @db.Text
+  performedBy  Int?
+  performedAt  DateTime @default(now())
+  incident     Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@index([incidentId])
 }
 
 model Designation {
@@ -2463,6 +2923,64 @@ enum JoinOutcome {
   DEFERRED
 }
 
+// ─── Recruitment: Referral / References / BGV enums ─────────────────
+enum ReferralType {
+  INTERNAL    // referred by an existing employee
+  EXTERNAL    // referred by an outside individual (friend, ex-colleague)
+  AGENCY      // recruitment agency / consultancy
+  JOB_BOARD   // Naukri, LinkedIn Jobs, Indeed, etc.
+  SOCIAL      // organic social-media application
+  WALK_IN
+  OTHER
+}
+
+// Lifecycle of an internal-referral payout. Most referrals start at
+// PENDING_JOIN once the offer is signed, then advance via cron.
+enum ReferralBonusStatus {
+  NOT_APPLICABLE      // no bonus owed (e.g. EXTERNAL/AGENCY)
+  PENDING_JOIN        // waiting for candidate to actually join
+  PENDING_PROBATION   // joined; waiting on probation completion (e.g. 90 days)
+  ELIGIBLE            // probation cleared; HR can pay
+  PAID
+  FORFEITED           // candidate left / terminated before probation
+}
+
+enum RefCheckStatus {
+  PENDING
+  IN_PROGRESS
+  DONE
+  UNREACHABLE
+  FLAGGED      // referee gave concerning feedback
+}
+
+enum BgvStatus {
+  NOT_INITIATED
+  IN_PROGRESS
+  CLEAR
+  FLAGGED      // discrepancies found, awaiting decision
+  FAILED       // hard fail — should block joining
+}
+
+enum BgvCheckType {
+  EDUCATION
+  EMPLOYMENT
+  CRIMINAL
+  ADDRESS
+  IDENTITY     // Aadhaar/PAN/passport
+  DRUG
+  REFERENCE
+  CREDIT
+}
+
+enum BgvCheckStatus {
+  PENDING
+  CLEAR
+  DISCREPANCY            // flagged; resolution pending
+  DISCREPANCY_RESOLVED   // HR/candidate explained satisfactorily
+  FAILED
+  SKIPPED
+}
+
 enum InternshipStatus {
   DRAFT
   OFFERED
@@ -2921,6 +3439,39 @@ enum PIPResponseMethod {
   EMAIL_LINK
   HR_LOGGED
   EMPLOYEE_SELF
+}
+
+// ─── Incident Management enums ──────────────────────────────────────
+// `IncidentStatus` tracks where in the workflow a case sits.
+// `IncidentOutcome` is filled in when investigation closes — it captures
+// the verdict, separate from where in the workflow the case is.
+enum IncidentSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum IncidentStatus {
+  OPEN
+  ACKNOWLEDGED
+  INVESTIGATING
+  ESCALATED
+  RESOLVED
+  CLOSED
+  REJECTED
+  DUPLICATE
+  WITHDRAWN
+}
+
+enum IncidentOutcome {
+  SUBSTANTIATED              // proven true ("convicted")
+  PARTIALLY_SUBSTANTIATED
+  UNSUBSTANTIATED            // can't be proven (≠ false)
+  FALSE_REPORT               // proven knowingly false ("wrongly created")
+  WITHDRAWN
+  DUPLICATE
+  NOT_A_VIOLATION
 }
 
 model PIPEmployeeResponse {

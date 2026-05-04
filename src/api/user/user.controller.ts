@@ -86,6 +86,8 @@ export const loginUser = async (req: Request, res: Response) => {
       include: { employee: true }
     });
 
+
+
     const employee = await prisma.employee.findUnique({
       where: { employeeCode },
       select: {
@@ -100,6 +102,7 @@ export const loginUser = async (req: Request, res: Response) => {
         Department: { select: { name: true } }
       }
     })
+    
 
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 

@@ -3,6 +3,7 @@ import { Request, Response } from "express";
 
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
+import { getEmployeeAccess } from "../../lib/employeeAccess";
 
 // --- SSE Client list (for live updates) ---
 let clients: Client[] = [];
@@ -68,6 +69,17 @@ export const broadcastNotification = (notification: { employeeId: number | null;
 
 export const createNotification = async (employeeId: number, message: string) => {
   try {
+    // Don't write notifications for ex-employees / suspended / sabbatical.
+    // They can't see them (auth gate blocks login) and storing them just
+    // pollutes the DB + fires a wasted socket broadcast and push.
+    const access = await getEmployeeAccess(employeeId);
+    if (!access.active) {
+      console.log(
+        `[notify] skipping notification for emp ${employeeId} — status=${access.status ?? 'missing'}`,
+      );
+      return null;
+    }
+
     const notification = await prisma.notification.create({
       data: {
         employeeId,
@@ -175,6 +187,16 @@ export const sendPushNotification = async (
   employeeId: number,
   message: string
 ) => {
+  // Belt-and-braces — if someone calls this directly (bypassing
+  // createNotification), still refuse to push to inactive accounts.
+  const access = await getEmployeeAccess(employeeId);
+  if (!access.active) {
+    console.log(
+      `[push] skipping push for emp ${employeeId} — status=${access.status ?? 'missing'}`,
+    );
+    return;
+  }
+
   const tokens = await prisma.deviceToken.findMany({
     where: { employeeId }
   });

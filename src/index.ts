@@ -180,7 +180,7 @@ app.use("/api/management", managementRoutes);
 app.post("/api/pip-respond/:token", respondViaToken);
 
 // Utility: backfill biometric attendance for one employee across a date range
-import { backfillEmployeeAttendance } from "./api/biometric/biometric.controller";
+import { backfillEmployeeAttendance, runBiometricSync, debugFetchCosec } from "./api/biometric/biometric.controller";
 app.post("/api/biometric/backfill-employee", async (req, res) => {
   try {
     const { employeeCode, fromDate, toDate } = req.body;
@@ -198,6 +198,78 @@ app.post("/api/biometric/backfill-employee", async (req, res) => {
   } catch (err: any) {
     console.error("[backfill-employee] failed:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Manually trigger the full biometric sync (the same job the cron runs every
+ * 20 minutes). Useful for testing whether the COSEC integration is alive
+ * without waiting for the next scheduled run.
+ *
+ * Body: { isFinalRun?: boolean } — defaults to false (intra-day mode).
+ *       Pass true to mimic the 22:00 end-of-day pass.
+ *
+ * The sync is heavy (fetches all active employees + hits COSEC API). To avoid
+ * holding the HTTP request open for minutes, this kicks the job off in the
+ * background and returns immediately. Watch the server console for progress.
+ */
+app.post("/api/biometric/run-sync", async (req, res) => {
+  const isFinalRun = !!(req.body || {}).isFinalRun;
+  console.log(`[manual] biometric sync requested | isFinalRun=${isFinalRun}`);
+
+  // Fire-and-forget so the caller isn't blocked. Errors are logged.
+  runBiometricSync(isFinalRun)
+    .then(() => console.log(`[manual] biometric sync finished | isFinalRun=${isFinalRun}`))
+    .catch((err) => console.error("[manual] biometric sync failed:", err));
+
+  res.status(202).json({
+    started: true,
+    isFinalRun,
+    message: "Biometric sync started in the background. Watch server logs for progress.",
+  });
+});
+
+/**
+ * Debug COSEC reachability + filter behaviour from inside this process.
+ * Lets you see EXACTLY what the backend gets back, instead of trusting that
+ * Postman + the backend hit the same endpoint identically.
+ *
+ * Body (all optional):
+ *   {
+ *     "date":      "YYYY-MM-DD",   // defaults to today
+ *     "checkCode": "JMRH463",      // userid you're looking for
+ *     "noFilter":  false,          // true = strip range/id/active (matches plain Postman test)
+ *     "active":    1,              // 0 or 1 — defaults to 1
+ *     "orgId":     2               // defaults to 2
+ *   }
+ *
+ * Response includes the resolved URL, total record count, every userid in the
+ * response, and (if checkCode given) whether the exact code was found + a list
+ * of similar codes for catching typos / casing issues.
+ *
+ * Run twice for a clear comparison: once with noFilter=false (matches our cron),
+ * once with noFilter=true (matches your working Postman query). Difference in
+ * `totalRecords` and `presence.foundExact` tells you exactly which filter
+ * is dropping the user.
+ */
+app.post("/api/biometric/cosec-debug", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const date = body.date ? new Date(body.date) : new Date();
+    if (Number.isNaN(date.getTime())) {
+      return res.status(400).json({ error: "Invalid date — use YYYY-MM-DD" });
+    }
+    const result = await debugFetchCosec({
+      date,
+      checkCode: body.checkCode,
+      noFilter:  !!body.noFilter,
+      active:    body.active === 0 || body.active === 1 ? body.active : undefined,
+      orgId:     body.orgId !== undefined ? Number(body.orgId) : undefined,
+    });
+    res.json(result);
+  } catch (err: any) {
+    console.error("[cosec-debug] failed:", err?.message || err);
+    res.status(500).json({ error: err?.message || String(err) });
   }
 });
 

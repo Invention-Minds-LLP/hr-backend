@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
+import { revokeEmployeeAccess } from "../../lib/employeeAccess";
 import type { Prisma } from "@prisma/client";
 const prisma = new PrismaClient();
 import formidable from "formidable";
@@ -14,6 +15,7 @@ import { connect } from "http2";
 import { Employee } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import cron from 'node-cron';
+import { syncEmployeeToDirectory, deactivateEmployeeInDirectory } from "../../lib/directory";
 
 
 const FTP_CONFIG = {
@@ -481,6 +483,9 @@ export const createEmployee = async (req: Request, res: Response) => {
       }
     }
 
+    // Push to central directory so the unified mobile app can resolve this phone
+    syncEmployeeToDirectory(newEmployee).catch(() => { /* non-blocking */ });
+
     return res.status(201).json(newEmployee);
   } catch (error) {
     console.error(error);
@@ -760,6 +765,16 @@ export const updateEmployee = async (req: Request, res: Response) => {
     employeeFields.probationEndDate = toDate(probationEndDate);
     employeeFields.probationConfirmedOn = toDate(probationConfirmedOn);
 
+    // ── Capture the BEFORE state of employmentStatus so we can detect a
+    // transition to a non-active state and revoke access accordingly. The
+    // dedicated terminate / sabbatical endpoints already do this, but a
+    // generic PUT /employees/:id can also flip the field — this catch-all
+    // closes that hole.
+    const beforeRow = await prisma.employee.findUnique({
+      where: { id: Number(id) },
+      select: { employmentStatus: true },
+    });
+    const beforeStatus = beforeRow?.employmentStatus;
 
     const updatedEmployee = await prisma.employee.update({
       where: { id: Number(id) },
@@ -961,6 +976,30 @@ export const updateEmployee = async (req: Request, res: Response) => {
       // to change state going forward.
     }
 
+    // Push to central directory in case phone/name/code/active changed
+    syncEmployeeToDirectory(updatedEmployee).catch(() => { /* non-blocking */ });
+
+    // ── Status-transition revoke ──────────────────────────────
+    // If this update flipped the employee from an active state
+    // (ACTIVE / NOTICE_PERIOD) to a non-active state (TERMINATED /
+    // RESIGNED / SUSPENDED / SABBATICAL), wipe their device tokens,
+    // mobile sessions and stamp accessRevokedAt. Catches the gap where
+    // HR uses the generic PUT /employees/:id instead of the dedicated
+    // terminate / sabbatical endpoints.
+    const ACTIVE = new Set(['ACTIVE', 'NOTICE_PERIOD']);
+    const wasActive = ACTIVE.has(String(beforeStatus));
+    const isActive  = ACTIVE.has(String(updatedEmployee.employmentStatus));
+    if (wasActive && !isActive) {
+      try {
+        await revokeEmployeeAccess(
+          Number(id),
+          `Status changed via updateEmployee: ${beforeStatus} → ${updatedEmployee.employmentStatus}`,
+        );
+      } catch (e) {
+        console.error('[updateEmployee] revokeEmployeeAccess failed:', e);
+      }
+    }
+
     res.json(updatedEmployee);
   } catch (error) {
     console.error(error); // <-- log actual error
@@ -973,9 +1012,19 @@ export const deleteEmployee = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
+    // Capture phone first so we can deactivate the directory entry after delete
+    const employee = await prisma.employee.findUnique({
+      where: { id: Number(id) },
+      select: { phone: true },
+    });
+
     await prisma.employee.delete({
       where: { id: Number(id) }
     });
+
+    if (employee?.phone) {
+      deactivateEmployeeInDirectory(employee.phone).catch(() => { /* non-blocking */ });
+    }
 
     res.json({ message: "Employee deleted successfully" });
   } catch (error) {
@@ -3394,6 +3443,12 @@ export const startSabbatical = async (req: Request, res: Response) => {
       return sabbatical;
     });
 
+    // Revoke session/access — sabbatical employees should not retain
+    // active logins (they're not working while on sabbatical).
+    try {
+      await revokeEmployeeAccess(Number(employeeId), 'Sabbatical started');
+    } catch (e) { console.error('[sabbatical] revokeEmployeeAccess failed:', e); }
+
     res.json(result);
   } catch (err: any) {
     console.error(err);
@@ -3456,6 +3511,11 @@ export const terminateFromSabbatical = async (req: Request, res: Response) => {
         where: { id: sabbatical.employeeId },
         data: { employmentStatus: "TERMINATED" }
       });
+
+      // Revoke session/access on TERMINATED.
+      try {
+        await revokeEmployeeAccess(sabbatical.employeeId, 'Sabbatical completed → terminated');
+      } catch (e) { console.error('[sabbatical-complete] revokeEmployeeAccess failed:', e); }
 
       return sabbatical;
     });
@@ -4028,6 +4088,11 @@ export const terminateProbation = async (req: Request, res: Response) => {
 
       return updated;
     });
+
+    // Probation termination → kill the employee's access.
+    try {
+      await revokeEmployeeAccess(employeeId, 'Probation terminated');
+    } catch (e) { console.error('[probation-terminate] revokeEmployeeAccess failed:', e); }
 
     res.json(result);
   } catch (err: any) {

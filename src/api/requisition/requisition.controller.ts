@@ -49,6 +49,65 @@ export const createRequisition = async (req: Request, res: Response) => {
       closedOn
     } = req.body;
 
+    // ── Look up the raiser's role BEFORE creating ───────────────
+    // The raiser's seniority decides:
+    //   1. Initial status (RAISED / HOD_APPROVED / COO_APPROVED)
+    //   2. Which approval fields to auto-fill (so the workflow doesn't
+    //      get stuck waiting on a self-approval that nobody will do)
+    //   3. Who the next-level notification goes to (block below)
+    const raiserId = Number(createdBy ?? raisedBy);
+    const raiser = Number.isFinite(raiserId)
+      ? await prisma.employee.findUnique({
+          where: { id: raiserId },
+          select: { id: true, roleId: true, firstName: true, lastName: true },
+        })
+      : null;
+    const raiserRoleId = raiser?.roleId ?? null;
+    const now = new Date();
+
+    // Auto-approval block — only populated when the raiser is HOD (3) or
+    // Management (4), in which case the steps they OUTRANK are pre-stamped
+    // as approved by them. Fields not in this object fall back to whatever
+    // the request body sent (so HR / a frontend that already pre-fills them
+    // still wins).
+    let initialStatus: string = 'RAISED';
+    const autoApproval: Record<string, any> = {};
+
+    // Display name derived from the looked-up Employee row — never trust the
+    // request body's `raisedBy` field alone, since it can be missing or empty
+    // string. Empty string isn't caught by `??` (only null/undefined are), so
+    // we use a `firstNonEmpty` helper to skip blank values too.
+    const raiserDisplayName = raiser ? `${raiser.firstName} ${raiser.lastName}`.trim() : null;
+    const firstNonEmpty = (...vals: (string | null | undefined)[]): string | null => {
+      for (const v of vals) {
+        if (v !== null && v !== undefined && String(v).trim() !== '') return String(v);
+      }
+      return null;
+    };
+    const autoNote = `Auto-approved on creation (raised by ${raiserDisplayName ?? 'sender'} at this level)`;
+
+    if (raiserRoleId === 3) {
+      // HOD raising → skip the HOD step.
+      initialStatus = 'HOD_APPROVED';
+      autoApproval.approvedByHoD        = firstNonEmpty(approvedByHoD, raiserDisplayName, raisedBy);
+      autoApproval.hodSign              = firstNonEmpty(hodSign, raisedBySign);
+      autoApproval.approvedByHoDDate    = approvedByHoDDate    ? new Date(approvedByHoDDate) : now;
+      autoApproval.approvedByHoDComments = firstNonEmpty(approvedByHoDComments, autoNote);
+      autoApproval.approvedByHoDEmpId   = raiser?.id ?? null;
+    } else if (raiserRoleId === 4) {
+      // Management raising → skip both HOD AND COO steps.
+      initialStatus = 'COO_APPROVED';
+      autoApproval.approvedByHoD        = firstNonEmpty(approvedByHoD, raiserDisplayName, raisedBy);
+      autoApproval.hodSign              = firstNonEmpty(hodSign, raisedBySign);
+      autoApproval.approvedByHoDDate    = approvedByHoDDate    ? new Date(approvedByHoDDate) : now;
+      autoApproval.approvedByHoDComments = firstNonEmpty(approvedByHoDComments, autoNote);
+      autoApproval.approvedByHoDEmpId   = raiser?.id ?? null;
+      autoApproval.approvedBySMO        = firstNonEmpty(approvedBySMO, raiserDisplayName, raisedBy);
+      autoApproval.smoSign              = firstNonEmpty(smoSign, raisedBySign);
+      autoApproval.approvedBySMODate    = approvedBySMODate    ? new Date(approvedBySMODate) : now;
+      autoApproval.approvedBySMOComments = firstNonEmpty(approvedBySMOComments, autoNote);
+      autoApproval.approvedBySMOEmpId   = raiser?.id ?? null;
+    }
 
     // Step 2: Create Requisition
     const requisition = await prisma.manpowerRequisition.create({
@@ -78,8 +137,20 @@ export const createRequisition = async (req: Request, res: Response) => {
         eduSSCDetail,
 
         raisedBy, raisedBySign, raisedByDate: raisedByDate ? new Date(raisedByDate) : null, raisedByComments,
-        approvedByHoD, hodSign, approvedByHoDDate: approvedByHoDDate ? new Date(approvedByHoDDate) : null, approvedByHoDComments,
-        approvedBySMO, smoSign, approvedBySMODate: approvedBySMODate ? new Date(approvedBySMODate) : null, approvedBySMOComments,
+        // Strong FK to the raising employee — see schema comment.
+        raisedByEmployeeId:    raiser?.id ?? null,
+        // HOD/COO/HR fields — sent values win, otherwise auto-filled when
+        // the raiser is senior enough to skip those steps.
+        approvedByHoD:         autoApproval.approvedByHoD         ?? approvedByHoD,
+        hodSign:               autoApproval.hodSign               ?? hodSign,
+        approvedByHoDDate:     autoApproval.approvedByHoDDate     ?? (approvedByHoDDate ? new Date(approvedByHoDDate) : null),
+        approvedByHoDComments: autoApproval.approvedByHoDComments ?? approvedByHoDComments,
+        approvedByHoDEmpId:    autoApproval.approvedByHoDEmpId    ?? null,
+        approvedBySMO:         autoApproval.approvedBySMO         ?? approvedBySMO,
+        smoSign:               autoApproval.smoSign               ?? smoSign,
+        approvedBySMODate:     autoApproval.approvedBySMODate     ?? (approvedBySMODate ? new Date(approvedBySMODate) : null),
+        approvedBySMOComments: autoApproval.approvedBySMOComments ?? approvedBySMOComments,
+        approvedBySMOEmpId:    autoApproval.approvedBySMOEmpId    ?? null,
         receivedByHR, hrSign, receivedByHRDate: receivedByHRDate ? new Date(receivedByHRDate) : null, receivedByHRComments,
 
         hrReferenceNo,
@@ -88,23 +159,65 @@ export const createRequisition = async (req: Request, res: Response) => {
         actionTaken,
         closedOn: closedOn ? new Date(closedOn) : null,
 
-        // start status as "PENDING"
-        status: "RAISED"
+        // Initial status reflects the auto-approvals above
+        status: initialStatus,
       },
       include: { job: true },
     });
-    const deptManager = await prisma.employee.findFirst({
-      where: {
-        departmentId: departmentId,
-        role: { id: 3 } // adjust role name if needed
-      },
-      select: { id: true }
-    });
+    console.log(
+      `[manpower] requisition #${requisition.id} created by role=${raiserRoleId ?? '?'} → status=${initialStatus}`,
+    );
+    // ── Notify the NEXT approver ─────────────────────────────────
+    // Approval ladder (low → high):
+    //   Incharge (role 5) → HOD (role 3) → Management/COO (role 4) → HR (role 1)
+    // Reuse the `raiser` lookup performed above. Decision matrix matches
+    // the auto-approval block — whichever steps were pre-stamped, the
+    // notification jumps to the FIRST step that still needs human action.
+    try {
+      const reqLabel = title || designation || 'a position';
+      const raiserName = raiser ? `${raiser.firstName} ${raiser.lastName}`.trim() : 'an employee';
 
-    if (deptManager?.id && deptManager.id !== raisedBy) {
-      await createNotification(deptManager.id, `New manpower requisition created for ${title || designation || 'a position'}. Kindly review and take appropriate action.`);
+      let nextLevelEmployees: { id: number }[] = [];
+
+      if (raiserRoleId === 3) {
+        // HOD raised → HOD step auto-approved → next is Management.
+        nextLevelEmployees = await prisma.employee.findMany({
+          where: { roleId: 4, employmentStatus: 'ACTIVE' },
+          select: { id: true },
+        });
+      } else if (raiserRoleId === 4) {
+        // Management raised → HOD + COO auto-approved → next is HR.
+        nextLevelEmployees = await prisma.employee.findMany({
+          where: { roleId: 1, employmentStatus: 'ACTIVE' },
+          select: { id: true },
+        });
+      } else {
+        // Default — Incharge or any other role: ping the department's HOD.
+        const deptHod = await prisma.employee.findFirst({
+          where: {
+            departmentId: departmentId,
+            roleId: 3,
+            employmentStatus: 'ACTIVE',
+          },
+          select: { id: true },
+        });
+        if (deptHod) nextLevelEmployees = [deptHod];
+      }
+
+      // De-dup — never notify the raiser themselves.
+      const targets = nextLevelEmployees.filter((e) => e.id !== raiser?.id);
+      const message = `New manpower requisition raised by ${raiserName} for ${reqLabel}. Kindly review and take appropriate action.`;
+      for (const t of targets) {
+        await createNotification(t.id, message);
+      }
+
+      console.log(
+        `[manpower] requisition #${requisition.id} → notified ${targets.length} next-level approver(s)`,
+      );
+    } catch (notifyErr) {
+      // Notification failures must NEVER block requisition creation.
+      console.error('[manpower] notification on create failed:', notifyErr);
     }
-
 
     return res.status(201).json(requisition);
   } catch (error) {
@@ -144,7 +257,17 @@ function buildJobTitle(item: any, fallbackTitle?: string) {
 export const updateRequisitionStatus = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { step, approverName, signature, comments, reject, departmentId, createdBy, location, title } = req.body;
+    const {
+      step, approverName, signature, comments, reject,
+      createdBy, location, title,
+      // approverEmpId is the employee ID of whoever clicked the approve button.
+      // Frontend should send `auth.user.id` here. Optional for backward compat
+      // (legacy clients that don't send it just skip the FK stamp).
+      approverEmpId,
+    } = req.body;
+
+    const approverIdNum = Number(approverEmpId);
+    const approverEmpIdSafe = Number.isFinite(approverIdNum) && approverIdNum > 0 ? approverIdNum : null;
 
     const now = new Date();
     let updateData: any = {};
@@ -157,6 +280,7 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
           raisedByDate: now,
           raisedByComments: comments,
           status: "RAISED",
+          ...(approverEmpIdSafe ? { raisedByEmployeeId: approverEmpIdSafe } : {}),
         };
         break;
 
@@ -174,6 +298,7 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
             approvedByHoDDate: now,
             approvedByHoDComments: comments,
             status: "HOD_APPROVED",
+            ...(approverEmpIdSafe ? { approvedByHoDEmpId: approverEmpIdSafe } : {}),
           };
         break;
 
@@ -191,6 +316,7 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
             approvedBySMODate: now,
             approvedBySMOComments: comments,
             status: "COO_APPROVED",
+            ...(approverEmpIdSafe ? { approvedBySMOEmpId: approverEmpIdSafe } : {}),
           };
         break;
 
@@ -293,6 +419,7 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
             receivedByHRDate: now,
             receivedByHRComments: comments,
             status: "HR_RECEIVED",
+            ...(approverEmpIdSafe ? { receivedByHREmpId: approverEmpIdSafe } : {}),
           };
         }
         break;
@@ -378,9 +505,21 @@ export const listRequisitions = async (req: Request, res: Response) => {
     let whereCondition: any = {};
 
     // Role 5 → Incharge → only their own requisitions
+    // Filter on the strong FK column. Old rows that haven't been backfilled
+    // yet fall back to a name match — the backfill script (prisma/
+    // backfillRequisitionRaisers.ts) populates the FK retroactively.
     if (roleId === 5) {
+      const me = await prisma.employee.findUnique({
+        where: { id: empId },
+        select: { firstName: true, lastName: true },
+      });
+      const myName = me ? `${me.firstName} ${me.lastName}`.trim() : '';
       whereCondition = {
-        raisedBy: String(empId) // assuming raisedBy stores employee id as string
+        OR: [
+          { raisedByEmployeeId: empId },
+          // Fallback for legacy rows where raisedByEmployeeId is still null.
+          ...(myName ? [{ AND: [{ raisedByEmployeeId: null }, { raisedBy: myName }] }] : []),
+        ],
       };
     }
 

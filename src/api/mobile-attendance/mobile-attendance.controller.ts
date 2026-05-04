@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
+import { generateCompOffIfEligible } from "../../services/comOff.service";
+import { autoCancelLeaveIfPresent, runOtAndLateLoginForDate } from "../biometric/biometric.controller";
 
 /**
  * POST /api/mobile-attendance/punch
@@ -56,6 +58,20 @@ export const recordPunch = async (req: Request, res: Response) => {
           },
         });
       }
+
+      // Mirror biometric: cancel any approved/pending leave for today
+      try {
+        await autoCancelLeaveIfPresent(Number(employeeId), todayStart);
+      } catch (e) {
+        console.error("[mobile-punch] autoCancelLeaveIfPresent failed", e);
+      }
+
+      // Compute late-login now (OT skipped here because checkOut isn't set yet)
+      try {
+        await runOtAndLateLoginForDate(todayStart);
+      } catch (e) {
+        console.error("[mobile-punch] runOtAndLateLoginForDate (CHECK_IN) failed", e);
+      }
     }
 
     // If this is a CHECK_OUT, update the daily Attendance record's checkOut
@@ -64,6 +80,23 @@ export const recordPunch = async (req: Request, res: Response) => {
         where: { employeeId: Number(employeeId), date: todayStart },
         data: { checkOut: now },
       });
+
+      // Mirror biometric downstream: comp-off + late/OT (TEMP_DEPT_SHIFT path)
+      const updated = await prisma.attendance.findUnique({
+        where: { employeeId_date: { employeeId: Number(employeeId), date: todayStart } },
+      });
+      if (updated) {
+        try {
+          await generateCompOffIfEligible(updated);
+        } catch (e) {
+          console.error("[mobile-punch] generateCompOffIfEligible failed", e);
+        }
+      }
+      try {
+        await runOtAndLateLoginForDate(todayStart);
+      } catch (e) {
+        console.error("[mobile-punch] runOtAndLateLoginForDate failed", e);
+      }
     }
 
     return res.status(201).json({ message: "Punch recorded successfully", punch });

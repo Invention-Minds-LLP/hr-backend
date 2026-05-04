@@ -15,6 +15,7 @@ const prisma = new PrismaClient();
 import cron from 'node-cron';
 import { sendHealthCheckReminders } from '../employee/employee.controller';
 import { createNotification } from '../notifications/notifications.controller';
+import { revokeEmployeeAccess } from '../../lib/employeeAccess';
 import { Prisma } from '@prisma/client';
 
 type ClearanceItemRow = {
@@ -1652,12 +1653,20 @@ export const initNoticePeriodSchedular = () => {
 
       console.log(`📋 Found ${dueResignations.length} employees with ended notice period.`);
 
-      // 2️⃣ Update each employee to 'RESIGNED'
+      // 2️⃣ Update each employee to 'RESIGNED' AND revoke their access
+      //    (delete device tokens, mobile sessions, stamp accessRevokedAt
+      //    so existing JWTs can no longer authenticate).
       for (const resignation of dueResignations) {
         await prisma.employee.update({
           where: { id: resignation.employeeId },
           data: { employmentStatus: 'RESIGNED' },
         });
+
+        try {
+          await revokeEmployeeAccess(resignation.employeeId, 'Notice period ended (cron)');
+        } catch (e) {
+          console.error(`[resignation cron] revoke failed for emp ${resignation.employeeId}:`, e);
+        }
 
         console.log(`✅ Employee ID ${resignation.employeeId} marked as RESIGNED.`);
 
