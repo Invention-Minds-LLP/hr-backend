@@ -3966,10 +3966,19 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
 
 /* ── Helpers used by getAttendanceByShift ─────────────────────────────── */
 
+// function toHHMM(d: Date | null | undefined): string | null {
+//     if (!d) return null;
+//     const dt = new Date(d);
+//     return `${String(dt.getUTCHours()).padStart(2, '0')}:${String(dt.getUTCMinutes()).padStart(2, '0')}`;
+// }
 function toHHMM(d: Date | null | undefined): string | null {
     if (!d) return null;
     const dt = new Date(d);
-    return `${String(dt.getUTCHours()).padStart(2, '0')}:${String(dt.getUTCMinutes()).padStart(2, '0')}`;
+    // Shift times are stored in DB as UTC but represent IST wall-clock hours.
+    // Add the IST offset (+5:30) before formatting so the user sees the
+    // correct shift time (e.g. "07:30" instead of "02:00").
+    const ist = new Date(dt.getTime() + 5.5 * 3600 * 1000);
+    return `${String(ist.getUTCHours()).padStart(2, '0')}:${String(ist.getUTCMinutes()).padStart(2, '0')}`;
 }
 
 function combineDateAndTimeUTC(baseDate: Date, time: Date): Date {
