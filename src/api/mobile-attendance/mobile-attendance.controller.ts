@@ -53,7 +53,7 @@ export const recordPunch = async (req: Request, res: Response) => {
           data: {
             employeeId: Number(employeeId),
             date: todayStart,
-            status: "PRESENT",
+            status: "Present",
             checkIn: now,
           },
         });

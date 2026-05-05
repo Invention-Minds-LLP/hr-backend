@@ -13,6 +13,7 @@ import {
     reassignReviewer,
     escalateClearances,
     assignDelegate,
+    getAttendanceByShift,
 } from './dashboard.controller';
 import { authenticateToken } from '../../middleware/authMiddleware';
 
@@ -21,6 +22,8 @@ const ctrl = new DashboardController();
 
 router.get('', authenticateToken,ctrl.getDashboard);
 router.get('/list', authenticateToken,ctrl.getList);
+// Shift-wise attendance breakdown (stacked bar card on the management dashboard)
+router.get('/attendance/by-shift', authenticateToken, getAttendanceByShift);
 router.get('/missing-docs', ctrl.downloadMissingDocs);
 router.get('/recruiting', authenticateToken,ctrl.getRecruiting);
 router.post('/ot/approve-reject', authenticateToken,ctrl.approveOrRejectOT);

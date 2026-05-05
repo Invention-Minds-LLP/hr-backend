@@ -1511,7 +1511,27 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
         //   Level2: HR_MANAGER
         // ================================================================
         else if (roleId === 2 || roleId === 5) {
-          if (role === "REPORTING_MANAGER") {
+          // Level 1: the employee's assigned reportingManager approves —
+          // regardless of whether that manager's own role is 3 (Reporting
+          // Manager) or 4 (Management). Frontend may send either label, so
+          // we authorize by identity (userId === emp.reportingManager), not
+          // by the role string.
+          if (role === "REPORTING_MANAGER" || role === "MANAGEMENT") {
+            if (!emp.reportingManager) {
+              return {
+                kind: "ERR" as const,
+                status: 400,
+                body: { error: "No reporting manager assigned for this employee" },
+              };
+            }
+            if (!userId || userId !== emp.reportingManager) {
+              return {
+                kind: "ERR" as const,
+                status: 403,
+                body: { error: "Only the assigned reporting manager can approve this leave" },
+              };
+            }
+
             data.hodDecision = approved ? "APPROVED" : "REJECTED";
             data.hodDecidedAt = new Date();
 

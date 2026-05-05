@@ -3710,3 +3710,343 @@ export const assignDelegate = async (req: Request, res: Response) => {
     }
 };
 
+/* ════════════════════════════════════════════════════════════════════
+   ATTENDANCE BY SHIFT — for the management-dashboard stacked bar card
+   ────────────────────────────────────────────────────────────────────
+   Buckets ALL active employees by today's shift, then for each shift
+   counts: present, late (>15 min after start), earlyCheckout (left
+   before shift end), onLeave (approved leave/WFH/permission), absent
+   (no check-in, no excuse), unassigned (employee has no resolvable
+   shift today — HR data quality bucket).
+
+   Query params:
+     date              YYYY-MM-DD (defaults to today, IST)
+     compareDays=7     return prior N days summary per shift for trend
+     drilldown=1       include employee-level lists (names, deptId,
+                       check-in / check-out times, empId)
+   ════════════════════════════════════════════════════════════════════ */
+export const getAttendanceByShift = async (req: Request, res: Response) => {
+    try {
+        const dateParam = String((req.query as any).date ?? '').trim();
+        const compareDays = Math.min(30, Math.max(0, Number((req.query as any).compareDays ?? 7) || 0));
+        const drilldown   = String((req.query as any).drilldown ?? '') === '1';
+
+        // Anchor "today" in IST so this matches what the user sees on screen
+        const istNow = new Date(Date.now() + 5.5 * 3600 * 1000);
+        const baseDate = dateParam
+            ? new Date(`${dateParam}T00:00:00.000Z`)
+            : new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate()));
+        const dayStart = new Date(baseDate);
+        const dayEnd   = new Date(baseDate); dayEnd.setUTCHours(23, 59, 59, 999);
+        const isToday  = Math.abs(dayStart.getTime() - new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate())).getTime()) < 1000;
+
+        // ── 1. All active employees + their resolved shift for the day ─────
+        const [employees, assignments, shiftSettings, shiftTemplates] = await Promise.all([
+            prisma.employee.findMany({
+                where: { employmentStatus: 'ACTIVE' },
+                select: {
+                    id: true, employeeCode: true, firstName: true, lastName: true,
+                    departmentId: true, shiftId: true,
+                    Department: { select: { id: true, name: true } },
+                },
+            }),
+            prisma.shiftAssignment.findMany({
+                where: { date: { gte: dayStart, lte: dayEnd } },
+                select: { employeeId: true, shiftId: true },
+            }),
+            (prisma as any).employeeShiftSetting.findMany({
+                select: { employeeId: true, mode: true, fixedShiftId: true, rotationPatternId: true },
+            }).catch(() => []),
+            prisma.shiftTemplate.findMany({
+                select: { id: true, name: true, shiftType: true, startTime: true, endTime: true },
+            }),
+        ]);
+
+        const empIds = employees.map((e) => e.id);
+
+        // Resolution: ShiftAssignment → EmployeeShiftSetting.fixedShiftId → Employee.shiftId
+        // (Rotation resolution skipped — falls through to Employee.shiftId.)
+        const assignMap = new Map<number, number>();
+        for (const a of assignments) assignMap.set(a.employeeId, a.shiftId);
+        const settingMap = new Map<number, any>();
+        for (const s of shiftSettings as any[]) settingMap.set(s.employeeId, s);
+
+        const employeeShift = new Map<number, number | null>();
+        for (const e of employees) {
+            let sid: number | null = assignMap.get(e.id) ?? null;
+            if (!sid) {
+                const setting = settingMap.get(e.id);
+                if (setting?.mode === 'FIXED' && setting.fixedShiftId) sid = setting.fixedShiftId;
+            }
+            if (!sid) sid = e.shiftId ?? null;
+            employeeShift.set(e.id, sid);
+        }
+
+        // ── 2. Attendance + leave/wfh/permission for the day ───────────────
+        const [attendance, approvedLeave, approvedWFH, approvedPerm] = await Promise.all([
+            prisma.attendance.findMany({
+                where: { employeeId: { in: empIds }, date: { gte: dayStart, lte: dayEnd } },
+                select: { employeeId: true, checkIn: true, checkOut: true, status: true },
+            }),
+            prisma.leaveRequest.findMany({
+                where: {
+                    employeeId: { in: empIds },
+                    status: { in: ['APPROVED'] },
+                    startDate: { lte: dayEnd },
+                    endDate:   { gte: dayStart },
+                },
+                select: { employeeId: true },
+            }),
+            prisma.wFHRequest.findMany({
+                where: {
+                    employeeId: { in: empIds },
+                    status: { in: ['APPROVED'] },
+                    startDate: { lte: dayEnd },
+                    endDate:   { gte: dayStart },
+                },
+                select: { employeeId: true },
+            }),
+            prisma.permissionRequest.findMany({
+                where: {
+                    employeeId: { in: empIds },
+                    status: { in: ['APPROVED'] },
+                    OR: [
+                        { day: { gte: dayStart, lte: dayEnd } },
+                        { startTime: { lte: dayEnd }, endTime: { gte: dayStart } },
+                    ],
+                },
+                select: { employeeId: true },
+            }),
+        ]);
+
+        const excused = new Set<number>([
+            ...approvedLeave.map((x) => x.employeeId),
+            ...approvedWFH.map((x) => x.employeeId),
+            ...approvedPerm.map((x) => x.employeeId),
+        ]);
+        const attMap = new Map<number, { checkIn: Date | null; checkOut: Date | null }>();
+        for (const a of attendance) {
+            attMap.set(a.employeeId, {
+                checkIn:  a.checkIn  ? new Date(a.checkIn)  : null,
+                checkOut: a.checkOut ? new Date(a.checkOut) : null,
+            });
+        }
+
+        // ── 3. Bucket each employee under their shift ──────────────────────
+        const shiftMeta = new Map(shiftTemplates.map((s) => [s.id, s]));
+
+        // Per-shift bucket: counts + drill-down lists
+        type Bucket = {
+            shiftId: number | null;
+            name: string;
+            startTime: string | null;
+            endTime: string | null;
+            assigned: number;
+            present: number;
+            late: number;
+            earlyCheckout: number;
+            onLeave: number;
+            absent: number;
+            attendancePct: number;
+            employees: any[];   // populated only when drilldown=1
+        };
+        const buckets = new Map<number | string, Bucket>();
+        const ensure = (shiftId: number | null): Bucket => {
+            const key = shiftId ?? 'UNASSIGNED';
+            if (!buckets.has(key)) {
+                const meta = shiftId ? shiftMeta.get(shiftId) : null;
+                buckets.set(key, {
+                    shiftId,
+                    name: meta?.name ?? 'Unassigned',
+                    startTime: meta ? toHHMM(meta.startTime) : null,
+                    endTime:   meta ? toHHMM(meta.endTime)   : null,
+                    assigned: 0, present: 0, late: 0, earlyCheckout: 0,
+                    onLeave: 0, absent: 0, attendancePct: 0,
+                    employees: [],
+                });
+            }
+            return buckets.get(key)!;
+        };
+
+        for (const e of employees) {
+            const sid = employeeShift.get(e.id) ?? null;
+            const bucket = ensure(sid);
+            bucket.assigned++;
+
+            const meta = sid ? shiftMeta.get(sid) : null;
+            const att  = attMap.get(e.id);
+
+            // Status precedence: leave > absent > present (with late/early flags)
+            let category: 'present' | 'late' | 'earlyCheckout' | 'onLeave' | 'absent' = 'absent';
+            let lateBy: number | null = null;
+            let leftEarlyBy: number | null = null;
+
+            if (excused.has(e.id)) {
+                category = 'onLeave';
+                bucket.onLeave++;
+            } else if (att?.checkIn) {
+                category = 'present';
+                bucket.present++;
+                if (meta) {
+                    const shiftStart = combineDateAndTimeUTC(dayStart, meta.startTime);
+                    const lateMs = att.checkIn.getTime() - shiftStart.getTime();
+                    const lateMinutes = Math.round(lateMs / 60000);
+                    if (lateMinutes > 15) {
+                        category = 'late';
+                        lateBy = lateMinutes;
+                        bucket.late++;
+                    }
+                    if (att.checkOut) {
+                        const shiftEnd = combineDateAndTimeUTC(dayStart, meta.endTime);
+                        const earlyMs  = shiftEnd.getTime() - att.checkOut.getTime();
+                        const earlyMin = Math.round(earlyMs / 60000);
+                        if (earlyMin > 0) {
+                            // Track separately — also stays in present/late count
+                            leftEarlyBy = earlyMin;
+                            bucket.earlyCheckout++;
+                        }
+                    }
+                }
+            } else {
+                bucket.absent++;
+            }
+
+            if (drilldown) {
+                bucket.employees.push({
+                    employeeId:  e.id,
+                    employeeCode: e.employeeCode,
+                    name: `${e.firstName ?? ''} ${e.lastName ?? ''}`.trim(),
+                    departmentId: e.departmentId,
+                    departmentName: e.Department?.name ?? null,
+                    shiftId: sid,
+                    shiftName: meta?.name ?? null,
+                    shiftStartTime: meta ? toHHMM(meta.startTime) : null,
+                    shiftEndTime:   meta ? toHHMM(meta.endTime)   : null,
+                    checkIn:  att?.checkIn  ?? null,
+                    checkOut: att?.checkOut ?? null,
+                    category,
+                    lateByMinutes:    lateBy,
+                    leftEarlyMinutes: leftEarlyBy,
+                });
+            }
+        }
+
+        // Compute attendance % per bucket (present + late) / assigned
+        for (const b of buckets.values()) {
+            b.attendancePct = b.assigned > 0
+                ? Math.round(((b.present) / b.assigned) * 100)
+                : 0;
+        }
+
+        const sortedShifts = Array.from(buckets.values()).sort((a, b) => {
+            // Real shifts first (by startTime), then Unassigned at the bottom
+            if (a.shiftId === null) return 1;
+            if (b.shiftId === null) return -1;
+            return (a.startTime ?? '').localeCompare(b.startTime ?? '');
+        });
+
+        // ── 4. Optional comparison: per-shift attendance % over last N days ──
+        let comparison: any[] = [];
+        if (compareDays > 0) {
+            comparison = await buildShiftComparison(dayStart, compareDays, shiftTemplates);
+        }
+
+        return res.json({
+            date: dayStart.toISOString().slice(0, 10),
+            isToday,
+            totalActive: employees.length,
+            shifts: sortedShifts,
+            comparison,
+        });
+    } catch (err) {
+        console.error("getAttendanceByShift error:", err);
+        return res.status(500).json({ error: "Failed to load shift-wise attendance" });
+    }
+};
+
+/* ── Helpers used by getAttendanceByShift ─────────────────────────────── */
+
+function toHHMM(d: Date | null | undefined): string | null {
+    if (!d) return null;
+    const dt = new Date(d);
+    return `${String(dt.getUTCHours()).padStart(2, '0')}:${String(dt.getUTCMinutes()).padStart(2, '0')}`;
+}
+
+function combineDateAndTimeUTC(baseDate: Date, time: Date): Date {
+    const t = new Date(time);
+    const d = new Date(baseDate);
+    d.setUTCHours(t.getUTCHours(), t.getUTCMinutes(), 0, 0);
+    return d;
+}
+
+/** For each prior day in the window, recompute the per-shift attendance %.
+ *  Lighter version of the main aggregation — counts only, no drill-down. */
+async function buildShiftComparison(anchorDay: Date, days: number, templates: any[]) {
+    const series: any[] = [];
+    const shiftIds = templates.map((s) => s.id);
+
+    for (let i = days; i >= 1; i--) {
+        const d = new Date(anchorDay); d.setUTCDate(d.getUTCDate() - i);
+        const dEnd = new Date(d); dEnd.setUTCHours(23, 59, 59, 999);
+
+        const [activeEmps, atts, leaves, wfhs, perms, assignments, settings] = await Promise.all([
+            prisma.employee.findMany({
+                where: { employmentStatus: 'ACTIVE' },
+                select: { id: true, shiftId: true },
+            }),
+            prisma.attendance.findMany({
+                where: { date: { gte: d, lte: dEnd }, checkIn: { not: null } },
+                select: { employeeId: true },
+            }),
+            prisma.leaveRequest.findMany({
+                where: { status: 'APPROVED', startDate: { lte: dEnd }, endDate: { gte: d } },
+                select: { employeeId: true },
+            }),
+            prisma.wFHRequest.findMany({
+                where: { status: 'APPROVED', startDate: { lte: dEnd }, endDate: { gte: d } },
+                select: { employeeId: true },
+            }),
+            prisma.permissionRequest.findMany({
+                where: { status: 'APPROVED', day: { gte: d, lte: dEnd } },
+                select: { employeeId: true },
+            }),
+            prisma.shiftAssignment.findMany({
+                where: { date: { gte: d, lte: dEnd } },
+                select: { employeeId: true, shiftId: true },
+            }),
+            (prisma as any).employeeShiftSetting.findMany({
+                select: { employeeId: true, mode: true, fixedShiftId: true },
+            }).catch(() => []),
+        ]);
+
+        const present = new Set(atts.map((a) => a.employeeId));
+        const excused = new Set([
+            ...leaves.map((x) => x.employeeId),
+            ...wfhs.map((x) => x.employeeId),
+            ...perms.map((x) => x.employeeId),
+        ]);
+        const aMap = new Map<number, number>(assignments.map((a) => [a.employeeId, a.shiftId]));
+        const sMap = new Map<number, any>((settings as any[]).map((s) => [s.employeeId, s]));
+
+        const dayBucket: Record<string, { assigned: number; present: number }> = {};
+        for (const sid of shiftIds) dayBucket[sid] = { assigned: 0, present: 0 };
+
+        for (const e of activeEmps) {
+            const sid = aMap.get(e.id) ?? (sMap.get(e.id)?.fixedShiftId ?? e.shiftId ?? null);
+            if (!sid) continue;
+            const slot = dayBucket[sid] ?? (dayBucket[sid] = { assigned: 0, present: 0 });
+            slot.assigned++;
+            if (present.has(e.id) || excused.has(e.id)) slot.present++;
+        }
+
+        const perShift: Record<string, number> = {};
+        for (const sid of shiftIds) {
+            const b = dayBucket[sid];
+            perShift[sid] = b.assigned > 0 ? Math.round((b.present / b.assigned) * 100) : 0;
+        }
+        series.push({ date: d.toISOString().slice(0, 10), perShift });
+    }
+
+    return series;
+}
+
