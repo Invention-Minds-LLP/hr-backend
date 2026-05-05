@@ -3731,14 +3731,14 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
         const compareDays = Math.min(30, Math.max(0, Number((req.query as any).compareDays ?? 7) || 0));
         const drilldown   = String((req.query as any).drilldown ?? '') === '1';
 
-        // Anchor "today" in IST so this matches what the user sees on screen
-        const istNow = new Date(Date.now() + 5.5 * 3600 * 1000);
-        const baseDate = dateParam
-            ? new Date(`${dateParam}T00:00:00.000Z`)
-            : new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate()));
-        const dayStart = new Date(baseDate);
-        const dayEnd   = new Date(baseDate); dayEnd.setUTCHours(23, 59, 59, 999);
-        const isToday  = Math.abs(dayStart.getTime() - new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate())).getTime()) < 1000;
+        // Use the same IST day-window helpers the rest of this controller uses,
+        // so attendance / leave / shiftAssignment rows align with how they were
+        // saved (server-local IST, not UTC).
+        const anchor   = dateParam ? new Date(`${dateParam}T00:00:00`) : new Date();
+        const dayStart = startOfDayIST(anchor);
+        const dayEnd   = endOfDayIST(anchor);
+        const today    = startOfDayIST();
+        const isToday  = sameYMD(dayStart, today);
 
         // ── 1. All active employees + their resolved shift for the day ─────
         const [employees, assignments, shiftSettings, shiftTemplates] = await Promise.all([
@@ -3995,8 +3995,9 @@ async function buildShiftComparison(anchorDay: Date, days: number, templates: an
     const shiftIds = templates.map((s) => s.id);
 
     for (let i = days; i >= 1; i--) {
-        const d = new Date(anchorDay); d.setUTCDate(d.getUTCDate() - i);
-        const dEnd = new Date(d); dEnd.setUTCHours(23, 59, 59, 999);
+        const target = addDays(anchorDay, -i);
+        const d    = startOfDayIST(target);
+        const dEnd = endOfDayIST(target);
 
         const [activeEmps, atts, leaves, wfhs, perms, assignments, settings] = await Promise.all([
             prisma.employee.findMany({
