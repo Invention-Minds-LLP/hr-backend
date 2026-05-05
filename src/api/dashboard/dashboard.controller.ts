@@ -3888,7 +3888,7 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
                 category = 'present';
                 bucket.present++;
                 if (meta) {
-                    const shiftStart = combineDateAndTimeUTC(dayStart, meta.startTime);
+                    const shiftStart = combineDateAndTime(dayStart, meta.startTime);
                     const lateMs = att.checkIn.getTime() - shiftStart.getTime();
                     const lateMinutes = Math.round(lateMs / 60000);
                     if (lateMinutes > 15) {
@@ -3897,7 +3897,7 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
                         bucket.late++;
                     }
                     if (att.checkOut) {
-                        const shiftEnd = combineDateAndTimeUTC(dayStart, meta.endTime);
+                        const shiftEnd = combineDateAndTime(dayStart, meta.endTime);
                         const earlyMs  = shiftEnd.getTime() - att.checkOut.getTime();
                         const earlyMin = Math.round(earlyMs / 60000);
                         if (earlyMin > 0) {
@@ -3952,7 +3952,9 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
         }
 
         return res.json({
-            date: dayStart.toISOString().slice(0, 10),
+            // Format using local-date methods — NOT toISOString — so an IST
+            // midnight (which is yesterday in UTC) reports as today's IST date.
+            date: localYMD(dayStart),
             isToday,
             totalActive: employees.length,
             shifts: sortedShifts,
@@ -3971,21 +3973,25 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
 //     const dt = new Date(d);
 //     return `${String(dt.getUTCHours()).padStart(2, '0')}:${String(dt.getUTCMinutes()).padStart(2, '0')}`;
 // }
+/** Format a Date as IST HH:MM regardless of the server's local TZ.
+ *  Uses Intl.DateTimeFormat so it works whether the host is UTC or IST. */
 function toHHMM(d: Date | null | undefined): string | null {
     if (!d) return null;
     const dt = new Date(d);
-    // Shift times are stored in DB as UTC but represent IST wall-clock hours.
-    // Add the IST offset (+5:30) before formatting so the user sees the
-    // correct shift time (e.g. "07:30" instead of "02:00").
-    const ist = new Date(dt.getTime() + 5.5 * 3600 * 1000);
-    return `${String(ist.getUTCHours()).padStart(2, '0')}:${String(ist.getUTCMinutes()).padStart(2, '0')}`;
+    return new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit', minute: '2-digit', hour12: false,
+        timeZone: 'Asia/Kolkata',
+    }).format(dt);
 }
 
-function combineDateAndTimeUTC(baseDate: Date, time: Date): Date {
-    const t = new Date(time);
-    const d = new Date(baseDate);
-    d.setUTCHours(t.getUTCHours(), t.getUTCMinutes(), 0, 0);
-    return d;
+/** YYYY-MM-DD using local-date components (NOT toISOString). Necessary because
+ *  toISOString flips back to UTC, which on an IST server reports yesterday's
+ *  date for a JS Date that semantically represents today's IST midnight. */
+function localYMD(d: Date): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
 }
 
 /** For each prior day in the window, recompute the per-shift attendance %.
@@ -4054,7 +4060,7 @@ async function buildShiftComparison(anchorDay: Date, days: number, templates: an
             const b = dayBucket[sid];
             perShift[sid] = b.assigned > 0 ? Math.round((b.present / b.assigned) * 100) : 0;
         }
-        series.push({ date: d.toISOString().slice(0, 10), perShift });
+        series.push({ date: localYMD(d), perShift });
     }
 
     return series;
