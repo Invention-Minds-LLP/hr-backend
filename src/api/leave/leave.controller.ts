@@ -2213,6 +2213,15 @@ export async function getWhoIsOnLeaveBuckets(req: Request, res: Response) {
   try {
     const base = req.query.date ? new Date(String(req.query.date)) : new Date();
 
+    // Optional scope: when a leave-detail view passes the applicant's
+    // departmentId, restrict buckets to that department only. Without it,
+    // behavior is unchanged (org-wide buckets).
+    const deptIdRaw = req.query.departmentId;
+    const departmentId =
+      deptIdRaw !== undefined && deptIdRaw !== '' && !Number.isNaN(Number(deptIdRaw))
+        ? Number(deptIdRaw)
+        : null;
+
     // Ranges
     const todayStart = atStartOfDay(base);
     const todayEnd = atEndOfDay(base);
@@ -2233,7 +2242,10 @@ export async function getWhoIsOnLeaveBuckets(req: Request, res: Response) {
         AND: [
           { endDate: { gte: minStart } },  // overlaps window
           { startDate: { lte: maxEnd } }
-        ]
+        ],
+        ...(departmentId !== null
+          ? { employee: { is: { departmentId } } }
+          : {}),
       },
       select: {
         startDate: true,

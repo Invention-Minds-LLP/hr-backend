@@ -581,3 +581,148 @@ export const listRequisitions = async (req: Request, res: Response) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
+
+/* ════════════════════════════════════════════════════════════════════
+   WITHDRAW — raiser pulls back their own requisition.
+   ────────────────────────────────────────────────────────────────────
+   Distinct from REJECTED (an approver said no). Withdrawn means "the
+   raiser changed their mind / no longer needs the role." Critical for
+   accurate HR analytics — a withdrawn req should NOT be counted against
+   HOD/SMO rejection rates.
+
+   Permission rules:
+     • Raiser themselves                 → status must be RAISED
+     • HOD / Mgmt who auto-approved      → status can be HOD_APPROVED
+       (their own auto-approval, before SMO/HR has acted)
+     • HR / Admin (force-withdraw)       → any status before COO_APPROVED
+                                            (used to clean up orphans)
+
+   After COO_APPROVED or RECEIVED_BY_HR, withdraw is no longer allowed
+   — only an approver can REJECT from there.
+   ════════════════════════════════════════════════════════════════════ */
+export const withdrawRequisition = async (req: any, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const me = Number(req.user?.empId ?? req.user?.userId);
+    const { reason } = req.body || {};
+
+    if (!me) return res.status(401).json({ message: "Authentication required" });
+    if (!id) return res.status(400).json({ message: "Invalid id" });
+
+    const existing = await prisma.manpowerRequisition.findUnique({
+      where: { id },
+      select: {
+        id: true, status: true,
+        raisedByEmployeeId: true, raisedBy: true,
+        title: true, designation: true,
+        departmentId: true,
+      },
+    });
+    if (!existing) return res.status(404).json({ message: "Requisition not found" });
+
+    // Already terminal — nothing to do
+    const TERMINAL = ['REJECTED', 'WITHDRAWN'];
+    if (TERMINAL.includes(existing.status)) {
+      return res.status(400).json({ message: `Already ${existing.status}` });
+    }
+
+    // After COO has approved, raiser can no longer pull back
+    const NON_WITHDRAWABLE = ['COO_APPROVED', 'RECEIVED_BY_HR', 'CLOSED'];
+    if (NON_WITHDRAWABLE.includes(existing.status)) {
+      return res.status(400).json({
+        message: `Cannot withdraw at status "${existing.status}" — request the appropriate approver to reject if it should not proceed.`,
+      });
+    }
+
+    // ── Permission check ────────────────────────────────────────────
+    const role = String(req.user?.role ?? '').toUpperCase();
+    const roleId = Number(req.user?.roleId);
+    const isHR    = ['HR', 'HR_MANAGER', 'ADMIN'].includes(role) || roleId === 1;
+    const isMgmt  = ['MANAGEMENT', 'ADMIN'].includes(role)       || roleId === 4;
+    const isOwner = existing.raisedByEmployeeId === me;
+
+    let allowed = false;
+    if (isHR || isMgmt) {
+      allowed = true;                             // HR / Mgmt force-withdraw
+    } else if (isOwner) {
+      // Raiser can withdraw at RAISED, or at HOD_APPROVED if it's their own
+      // auto-approval (HODs/managers who raised about themselves).
+      if (existing.status === 'RAISED') allowed = true;
+      if (existing.status === 'HOD_APPROVED' && roleId === 3) allowed = true;
+      if (existing.status === 'HOD_APPROVED' && roleId === 4) allowed = true;
+    }
+
+    if (!allowed) {
+      return res.status(403).json({
+        message: "You don't have permission to withdraw this requisition.",
+      });
+    }
+
+    // ── Fetch the raiser's display name (for stamping) ──────────────
+    let withdrawerName: string | null = null;
+    try {
+      const me_emp = await prisma.employee.findUnique({
+        where: { id: me },
+        select: { firstName: true, lastName: true },
+      });
+      if (me_emp) withdrawerName = `${me_emp.firstName} ${me_emp.lastName}`.trim();
+    } catch { /* non-fatal */ }
+
+    // ── Apply ───────────────────────────────────────────────────────
+    const updated = await prisma.manpowerRequisition.update({
+      where: { id },
+      data: {
+        status: 'WITHDRAWN',
+        withdrawnBy: withdrawerName ?? `Employee #${me}`,
+        withdrawnByEmpId: me,
+        withdrawnDate: new Date(),
+        withdrawnReason: reason?.trim() || null,
+      },
+    });
+
+    // ── Notifications ──────────────────────────────────────────────
+    // Tell whoever currently has the request in their queue so they can clear it.
+    try {
+      const subject = existing.title || existing.designation || `requisition #${id}`;
+      const note = reason?.trim() ? ` (Reason: ${reason.trim()})` : '';
+
+      // Who would have seen it next?
+      let toNotify: number[] = [];
+      if (existing.status === 'RAISED' || existing.status === 'HOD_APPROVED') {
+        // Was sitting with HOD or SMO. Notify all HODs of that dept + SMO + HR.
+        const next = await prisma.employee.findMany({
+          where: {
+            employmentStatus: 'ACTIVE',
+            OR: [
+              { roleId: 3, departmentId: existing.departmentId ?? undefined },  // HODs
+              { roleId: 4 },                                                    // SMO/Mgmt
+              { roleId: 1 },                                                    // HR
+            ],
+          },
+          select: { id: true },
+        });
+        toNotify = next.map((e) => e.id);
+      }
+      // Always notify the raiser too, if it wasn't them
+      if (existing.raisedByEmployeeId && existing.raisedByEmployeeId !== me) {
+        toNotify.push(existing.raisedByEmployeeId);
+      }
+      const seen = new Set<number>();
+      for (const empId of toNotify) {
+        if (seen.has(empId) || empId === me) continue;
+        seen.add(empId);
+        await createNotification(
+          empId,
+          `🔻 The manpower requisition for "${subject}" was withdrawn by ${withdrawerName ?? 'the raiser'}${note}.`,
+        );
+      }
+    } catch (notifyErr) {
+      console.error("[requisition withdraw notify] failed:", notifyErr);
+    }
+
+    return res.status(200).json({ message: "Requisition withdrawn", data: updated });
+  } catch (err: any) {
+    console.error("withdrawRequisition error:", err);
+    return res.status(500).json({ message: err?.message || "Failed to withdraw" });
+  }
+};

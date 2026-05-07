@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import { revokeEmployeeAccess } from "../../lib/employeeAccess";
+import { buildEmployeeDiff, auditCtxFromReq } from "../../lib/employeeAudit";
 import type { Prisma } from "@prisma/client";
 const prisma = new PrismaClient();
 import formidable from "formidable";
@@ -765,14 +766,17 @@ export const updateEmployee = async (req: Request, res: Response) => {
     employeeFields.probationEndDate = toDate(probationEndDate);
     employeeFields.probationConfirmedOn = toDate(probationConfirmedOn);
 
-    // ── Capture the BEFORE state of employmentStatus so we can detect a
-    // transition to a non-active state and revoke access accordingly. The
-    // dedicated terminate / sabbatical endpoints already do this, but a
-    // generic PUT /employees/:id can also flip the field — this catch-all
-    // closes that hole.
+    // ── Capture the BEFORE state. We need the full row (scalars +
+    // user-editable relations) so the audit log can record every field
+    // that changed, including address / emergency contact / qualification
+    // edits which live in separate tables.
     const beforeRow = await prisma.employee.findUnique({
       where: { id: Number(id) },
-      select: { employmentStatus: true },
+      include: {
+        Address: true,
+        emergencyContacts: true,
+        qualifications: true,
+      },
     });
     const beforeStatus = beforeRow?.employmentStatus;
 
@@ -879,6 +883,80 @@ export const updateEmployee = async (req: Request, res: Response) => {
         designation: true
       }
     });
+
+    // ── Audit log: record the diff between before and after.
+    // Two layers of comparison:
+    //   (1) Scalar fields on the Employee row (designation, dept, role,
+    //       personal info, etc.) via the shared buildEmployeeDiff helper.
+    //   (2) User-editable relations (Address, emergencyContacts,
+    //       qualifications) — compared as normalised JSON arrays so we
+    //       can capture "Added 1 address" or "Removed an emergency contact"
+    //       even though the underlying rows are deleted-and-recreated.
+    try {
+      const afterRow = await prisma.employee.findUnique({
+        where: { id: Number(id) },
+        include: {
+          Address: true,
+          emergencyContacts: true,
+          qualifications: true,
+        },
+      });
+      if (beforeRow && afterRow) {
+        // (1) Scalar diff — strip the relation arrays first so they don't
+        //     pollute the scalar comparison.
+        const stripRelations = (r: any) => {
+          const { Address, emergencyContacts, qualifications, ...rest } = r;
+          return rest;
+        };
+        const diff = buildEmployeeDiff(stripRelations(beforeRow), stripRelations(afterRow)) ?? {
+          changes: {} as Record<string, { from: any; to: any }>,
+          changedFields: [] as string[],
+        };
+
+        // (2) Relation diffs — normalise (drop ids/timestamps) and JSON-compare.
+        const normaliseRel = (rows: any[] | undefined, fields: string[]) =>
+          (rows ?? [])
+            .map((r) => {
+              const out: Record<string, any> = {};
+              for (const f of fields) out[f] = r[f] ?? null;
+              return out;
+            })
+            // Sort so the comparison is order-independent
+            .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+
+        const compareRel = (key: string, fields: string[]) => {
+          const before = normaliseRel((beforeRow as any)[key], fields);
+          const after  = normaliseRel((afterRow as any)[key], fields);
+          if (JSON.stringify(before) !== JSON.stringify(after)) {
+            (diff.changes as any)[key] = { from: before, to: after };
+            diff.changedFields.push(key);
+          }
+        };
+        compareRel('Address',           ['type', 'line1', 'line2', 'city', 'state', 'zipCode', 'country']);
+        compareRel('emergencyContacts', ['name', 'phone', 'relationship']);
+        compareRel('qualifications',    ['degree', 'institution', 'year']);
+
+        if (diff.changedFields.length > 0) {
+          const ctx = auditCtxFromReq(req, { source: 'WEB' });
+          await (prisma as any).employeeAuditLog.create({
+            data: {
+              employeeId: Number(id),
+              action: 'UPDATE',
+              changes: diff.changes,
+              changedFields: diff.changedFields,
+              changedBy: ctx.changedBy ?? null,
+              source: ctx.source ?? 'WEB',
+              ipAddress: ctx.ip ?? null,
+              userAgent: ctx.userAgent ?? null,
+            },
+          });
+        }
+      }
+    } catch (auditErr) {
+      // Audit failures must NEVER break the user flow. Log and move on.
+      console.error("[updateEmployee audit] failed:", auditErr);
+    }
+
     // 2) upsert EmployeeShiftSetting (simple & type-safe)
     // map 'FIXED' | 'ROTATIONAL' -> Prisma enum
     const mode: $Enums.ShiftAssignMode | undefined =
@@ -4112,5 +4190,98 @@ export const getProbationHistory = async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error(err);
     res.status(400).json({ error: err.message });
+  }
+};
+
+/* ════════════════════════════════════════════════════════════════════
+   EMPLOYEE AUDIT LOG
+   GET /api/employees/:id/audit-log
+   Filters: field, source, changedBy, from, to, page, pageSize
+   ════════════════════════════════════════════════════════════════════ */
+export const getEmployeeAuditLog = async (req: Request, res: Response) => {
+  try {
+    const employeeId = Number(req.params.id);
+    if (!employeeId) return res.status(400).json({ error: "employeeId required" });
+
+    const { field, source, changedBy, from, to, page = '1', pageSize = '50' } = req.query as any;
+
+    const where: any = { employeeId };
+    if (source)    where.source = String(source);
+    if (changedBy) where.changedBy = Number(changedBy);
+    if (from || to) {
+      where.changedAt = {};
+      if (from) where.changedAt.gte = new Date(String(from));
+      if (to)   where.changedAt.lte = new Date(String(to));
+    }
+
+    const take = Math.min(200, Number(pageSize) || 50);
+    const skip = (Math.max(1, Number(page) || 1) - 1) * take;
+
+    const [rows, total] = await Promise.all([
+      (prisma as any).employeeAuditLog.findMany({
+        where,
+        orderBy: { changedAt: 'desc' },
+        take, skip,
+        include: {
+          changedByEmployee: { select: { id: true, employeeCode: true, firstName: true, lastName: true } },
+        },
+      }),
+      (prisma as any).employeeAuditLog.count({ where }),
+    ]);
+
+    let filtered = rows;
+    if (field) {
+      const f = String(field);
+      // changedFields is JSON; client-side filter is safer than brittle JSON path queries.
+      filtered = rows.filter((r: any) => Array.isArray(r.changedFields) && r.changedFields.includes(f));
+    }
+
+    return res.json({ total: field ? filtered.length : total, rows: filtered });
+  } catch (err: any) {
+    console.error("getEmployeeAuditLog error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to load audit log" });
+  }
+};
+
+/** Bulk audit-log query — for HR's "everyone whose salary changed last month" view. */
+export const queryAuditLog = async (req: Request, res: Response) => {
+  try {
+    const { field, source, changedBy, from, to, page = '1', pageSize = '50' } = req.query as any;
+
+    const where: any = {};
+    if (source)    where.source = String(source);
+    if (changedBy) where.changedBy = Number(changedBy);
+    if (from || to) {
+      where.changedAt = {};
+      if (from) where.changedAt.gte = new Date(String(from));
+      if (to)   where.changedAt.lte = new Date(String(to));
+    }
+
+    const take = Math.min(200, Number(pageSize) || 50);
+    const skip = (Math.max(1, Number(page) || 1) - 1) * take;
+
+    const [rows, total] = await Promise.all([
+      (prisma as any).employeeAuditLog.findMany({
+        where,
+        orderBy: { changedAt: 'desc' },
+        take, skip,
+        include: {
+          employee: { select: { id: true, employeeCode: true, firstName: true, lastName: true } },
+          changedByEmployee: { select: { id: true, employeeCode: true, firstName: true, lastName: true } },
+        },
+      }),
+      (prisma as any).employeeAuditLog.count({ where }),
+    ]);
+
+    let filtered = rows;
+    if (field) {
+      const f = String(field);
+      filtered = rows.filter((r: any) => Array.isArray(r.changedFields) && r.changedFields.includes(f));
+    }
+
+    return res.json({ total: field ? filtered.length : total, rows: filtered });
+  } catch (err: any) {
+    console.error("queryAuditLog error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to load audit log" });
   }
 };

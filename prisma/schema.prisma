@@ -173,6 +173,10 @@ model Employee {
   manpowerRequisitionsSMO      ManpowerRequisition[]   @relation("ManpowerApprovedSMO")
   manpowerRequisitionsHR       ManpowerRequisition[]   @relation("ManpowerReceivedHR")
 
+  // Audit log — every change to this employee's row, plus changes this person made to others.
+  auditLogTargets              EmployeeAuditLog[]      @relation("EmployeeAuditTarget")
+  auditLogAuthored             EmployeeAuditLog[]      @relation("EmployeeAuditAuthor")
+
   @@index([employmentStatus])
   @@index([departmentId])
   @@index([branchId])
@@ -1759,6 +1763,15 @@ model ManpowerRequisition {
   smoRejectedBy         String?
   smoRejectedComments   String?
   smoRejectedDate       DateTime?
+
+  // ── Withdrawn (by the raiser, or HR force-cancel for orphans) ──
+  // Distinct from REJECTED — withdrawn means no judgment was made,
+  // the raiser pulled it back. Important for analytics so "rejected by
+  // HOD" doesn't get inflated by raiser changes-of-mind.
+  withdrawnBy           String?
+  withdrawnByEmpId      Int?
+  withdrawnDate         DateTime?
+  withdrawnReason       String?
 
   // ── Strong FKs back to the Employee table ───────────────────
   // Existing String columns (raisedBy, approvedByHoD, etc.) keep the
@@ -3492,3 +3505,36 @@ model PIPEmployeeResponse {
   @@index([pipId])
   @@index([employeeId])
 }
+
+/// ──────────────────────────────────────────────────────────────────────
+///  EMPLOYEE AUDIT TRAIL
+///  One row per write to the Employee table. `changes` is a JSON of
+///  { field: { from: ..., to: ... } } for updates, the full new row for
+///  creates, the full prior row for deletes. `source` distinguishes
+///  manual edits from system-driven ones (cron / promotion / resignation).
+/// ──────────────────────────────────────────────────────────────────────
+model EmployeeAuditLog {
+  id                    Int       @id @default(autoincrement())
+  employeeId            Int                                            // who got changed
+  action                String                                         // CREATE / UPDATE / DELETE
+  changes               Json?                                          // {field: {from, to}, ...}
+  changedFields         Json?                                          // ['designation','salary'] — denorm for fast filters
+  changedBy             Int?                                           // who made the change (null = system / cron)
+  changedAt             DateTime  @default(now())
+  reason                String?                                        // free text — "Annual cycle", "Typo", etc.
+  source                String?                                        // WEB / IMPORT / MIGRATION / SYSTEM / PROMOTION / RESIGNATION / ONBOARDING
+  causedByPromotionId   Int?                                           // backlink to a promotion record if this change came from one
+  causedByResignationId Int?                                           // backlink to a resignation record
+  causedByOnboardingId  Int?                                           // backlink to an onboarding record
+  ipAddress             String?
+  userAgent             String?
+
+  employee          Employee  @relation("EmployeeAuditTarget", fields: [employeeId], references: [id])
+  changedByEmployee Employee? @relation("EmployeeAuditAuthor", fields: [changedBy], references: [id])
+
+  @@index([employeeId, changedAt])
+  @@index([changedBy])
+  @@index([source])
+  @@index([causedByPromotionId])
+}
+

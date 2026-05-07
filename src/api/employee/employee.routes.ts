@@ -34,7 +34,9 @@ import {
   extendProbation,
   confirmProbation,
   terminateProbation,
-  getProbationHistory
+  getProbationHistory,
+  getEmployeeAuditLog,
+  queryAuditLog,
 } from "./employee.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 import { bulkUploadLeaveBalancesExcel } from "../leave/leave.controller";
@@ -72,6 +74,11 @@ router.put("/sabbaticals/:id/end", endSabbatical);
 router.put("/sabbaticals/:id/terminate", terminateFromSabbatical);
 
 router.get("/:id/probation/history", authenticateToken, getProbationHistory);
+
+// Employee audit log — per-employee history of every change made to their record.
+router.get("/:id/audit-log", authenticateToken, getEmployeeAuditLog);
+// Org-wide audit query (e.g. all salary changes last month).
+router.get("/audit/query", authenticateToken, queryAuditLog);
 router.post("/:id/probation/extend", authenticateToken, extendProbation);
 router.post("/:id/probation/confirm", authenticateToken, confirmProbation);
 router.post("/:id/probation/terminate", authenticateToken, terminateProbation);
