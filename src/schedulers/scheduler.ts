@@ -122,7 +122,7 @@ const schedules = [
 
 
   //22
-  '* 22 * * *',
+  '0 22 * * *',
 
 
 
@@ -132,7 +132,7 @@ const schedules = [
 export function startAttendanceScheduler() {
   for (const schedule of schedules) {
     cron.schedule(schedule, async () => {
-      const isFinalRun = schedule === '* 22 * * *';
+      const isFinalRun = schedule === '0 22 * * *';
 
       console.log(
         `[CRON] Attendance sync triggered | ${schedule} | Final: ${isFinalRun}`

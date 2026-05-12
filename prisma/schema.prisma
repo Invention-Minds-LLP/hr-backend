@@ -470,6 +470,10 @@ model LeaveRequest {
   cancelledAt         DateTime?
   cancelledBy         Int?
   cancellationReason  String?
+  // True when HR raised this leave on the employee's behalf via the HR
+  // Corrections module (auto-approved + balance deducted immediately).
+  appliedByHr         Boolean?             @default(false)
+  appliedByHrId       Int?
   forcePresentActions ForcePresentAction[]
   employee            Employee             @relation(fields: [employeeId], references: [id])
   leaveType           LeaveType            @relation(fields: [leaveTypeId], references: [id])

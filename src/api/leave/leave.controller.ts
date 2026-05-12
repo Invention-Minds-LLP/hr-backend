@@ -53,6 +53,21 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Half-day not allowed for CO" });
     }
 
+    // ── Rule A: one leave TYPE per ISO week ──────────────────────────
+    // If the employee already has a PENDING/APPROVED leave of a DIFFERENT
+    // type touching any week of this request, block it. (RH / CO exempt.)
+    const weeklyClash = await findWeeklyTypeConflict(
+      Number(employeeId), Number(leaveTypeId), lt.name, start, end,
+    );
+    if (weeklyClash) {
+      const wkLabel = startOfISOWeek(new Date(weeklyClash.startDate))
+        .toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+      return res.status(400).json({
+        error: `You already have a ${weeklyClash.leaveType.name} leave in the week of ${wkLabel}. `
+             + `Only one leave type is allowed per week — please use ${weeklyClash.leaveType.name} for these dates `
+             + `or pick dates in a different week.`,
+      });
+    }
 
     // Fetch balance for that year & leave type
     const balance = await prisma.employeeLeaveBalance.findFirst({
@@ -76,7 +91,11 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     }
 
     // const year = start.getFullYear();
-    const requestedUnits = isHalfDay ? 0.5 : await countWorkingDays(employeeId, start, end);
+    // EL counts week-offs that fall inside the range (sandwich rule).
+    const isEarnedLeave = lt.name === "EL";
+    const requestedUnits = isHalfDay
+      ? 0.5
+      : await countWorkingDays(employeeId, start, end, { includeWeekOffs: isEarnedLeave });
     if (isHalfDay && !isSameDate(new Date(startDate), new Date(endDate))) {
       return res.status(400).json({ error: "Half-day must be a single date" });
     }
@@ -1592,8 +1611,32 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
         const startDate = new Date(updatedLeave.startDate);
         const endDate = new Date(updatedLeave.endDate);
 
+        // ── Rule A re-check at approval (catches legacy / race conflicts).
+        // If a different-type leave now occupies the same ISO week, refuse.
+        const weeklyClashOnApprove = await findWeeklyTypeConflict(
+          updatedLeave.employeeId,
+          updatedLeave.leaveTypeId,
+          updatedLeave.leaveType.name,
+          startDate, endDate,
+          updatedLeave.id,                 // exclude this request itself
+        );
+        if (weeklyClashOnApprove) {
+          return {
+            kind: "ERR" as const,
+            status: 400,
+            body: {
+              error: `Cannot approve — employee already has a ${weeklyClashOnApprove.leaveType.name} `
+                   + `leave in the same week. Only one leave type is allowed per week.`,
+            },
+          };
+        }
+
         const year = getFinancialYear(startDate);
-        const requestedUnits = updatedLeave.isHalfDay ? 0.5 : await countWorkingDays(updatedLeave.employeeId, startDate, endDate);
+        // EL counts week-offs inside the range (sandwich rule); other types don't.
+        const isEarnedLeave = updatedLeave.leaveType.name === "EL";
+        const requestedUnits = updatedLeave.isHalfDay
+          ? 0.5
+          : await countWorkingDays(updatedLeave.employeeId, startDate, endDate, { includeWeekOffs: isEarnedLeave });
 
         // ---- CO: consume credits only (leave balance untouched)
         if (updatedLeave.leaveType.name === "CO") {
@@ -1688,7 +1731,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
           const monthEnd = new Date(calYear, m.month, 0);
           const from = startDate > monthStart ? startDate : monthStart;
           const to = endDate < monthEnd ? endDate : monthEnd;
-          const days = await countWorkingDays(updatedLeave.employeeId, from, to);
+          const days = await countWorkingDays(updatedLeave.employeeId, from, to, { includeWeekOffs: isEarnedLeave });
           if (days <= 0) continue;
 
           runningBalance -= days;
@@ -2034,12 +2077,24 @@ export function daysInclusive(s: Date, e: Date) {
   return Math.floor((ee.getTime() - ss.getTime()) / MS_PER_DAY) + 1;
 }
 
-// Counts working days between start and end (inclusive), excluding:
+// Counts leave days between start and end (inclusive).
+// By default, excludes:
 //   - week-offs (per employee shift config, fallback Sunday)
 //   - mandatory national holidays (isOptional = false)
-// Optional holidays (RH) are still counted as working days.
-export async function countWorkingDays(employeeId: number, start: Date, end: Date): Promise<number> {
+// Optional holidays (RH) are always counted as working days.
+//
+// When opts.includeWeekOffs is true, week-offs that fall inside the range ARE
+// counted as leave days. This implements the "Earned Leave sandwich rule" —
+// if an employee takes EL spanning a weekend, the weekend is deducted too.
+// Mandatory national holidays are still excluded even in that mode.
+export async function countWorkingDays(
+  employeeId: number,
+  start: Date,
+  end: Date,
+  opts?: { includeWeekOffs?: boolean },
+): Promise<number> {
   if (start > end) return 0;
+  const includeWeekOffs = !!opts?.includeWeekOffs;
 
   // Fetch all mandatory holidays in the date range once
   const mandatoryHolidays = await prisma.holiday.findMany({
@@ -2066,8 +2121,12 @@ export async function countWorkingDays(employeeId: number, start: Date, end: Dat
     current.setHours(0, 0, 0, 0);
     const dateKey = current.toISOString().slice(0, 10);
 
-    // Skip mandatory national holidays
+    // Skip mandatory national holidays — always, even for EL.
     if (holidaySet.has(dateKey)) continue;
+
+    // For EL (includeWeekOffs), don't even bother resolving the week-off
+    // config — every non-holiday day counts.
+    if (includeWeekOffs) { total++; continue; }
 
     const month = current.getMonth() + 1;
     const year = current.getFullYear();
@@ -2196,6 +2255,63 @@ function endOfISOWeek(d: Date) {
   const e = new Date(s);
   e.setDate(s.getDate() + 6);
   return atEndOfDay(e);
+}
+
+/** Every ISO week (Mon..Sun) that the date range [start, end] overlaps. */
+function isoWeeksTouched(start: Date, end: Date): { weekStart: Date; weekEnd: Date }[] {
+  const out: { weekStart: Date; weekEnd: Date }[] = [];
+  let cur = startOfISOWeek(start);
+  const lastWeekStart = startOfISOWeek(end);
+  // Walk Monday → Monday until we've covered the week containing `end`.
+  while (cur.getTime() <= lastWeekStart.getTime()) {
+    const ws = new Date(cur);
+    const we = endOfISOWeek(cur);
+    out.push({ weekStart: ws, weekEnd: we });
+    cur = new Date(cur);
+    cur.setDate(cur.getDate() + 7);
+  }
+  return out;
+}
+
+/**
+ * Rule A — one leave TYPE per ISO week.
+ * Checks whether the employee already has a PENDING/APPROVED leave of a
+ * DIFFERENT type in any ISO week the new request touches. RH and CO are
+ * exempt (special-case leaves: tied to a fixed holiday / earned by working).
+ * Returns the conflicting record (with leaveType) or null if clear.
+ *
+ * Pass `excludeRequestId` when re-checking on approval so the request being
+ * approved doesn't conflict with itself.
+ */
+async function findWeeklyTypeConflict(
+  employeeId: number,
+  leaveTypeId: number,
+  leaveTypeName: string,
+  start: Date,
+  end: Date,
+  excludeRequestId?: number,
+): Promise<{ leaveType: { name: string }; startDate: Date; endDate: Date } | null> {
+  const WEEKLY_RULE_EXEMPT = ['RH', 'CO'];
+  // The leave being applied for is itself exempt → no restriction.
+  if (WEEKLY_RULE_EXEMPT.includes(leaveTypeName)) return null;
+
+  for (const w of isoWeeksTouched(start, end)) {
+    const clash = await prisma.leaveRequest.findFirst({
+      where: {
+        employeeId,
+        status: { in: ['PENDING', 'APPROVED'] },
+        startDate: { lte: w.weekEnd },
+        endDate:   { gte: w.weekStart },
+        leaveTypeId: { not: leaveTypeId },                 // different type only
+        leaveType: { name: { notIn: WEEKLY_RULE_EXEMPT } }, // an existing RH/CO doesn't block
+        ...(excludeRequestId ? { id: { not: excludeRequestId } } : {}),
+      },
+      include: { leaveType: { select: { name: true } } },
+      orderBy: { startDate: 'asc' },
+    });
+    if (clash) return clash as any;
+  }
+  return null;
 }
 
 function startOfNextMonth(d: Date) {
@@ -2732,7 +2848,7 @@ async function insertLedgerRow(params: {
     }
   });
 }
-function computeTotalUsed(balance: { used: number; halfDayUsed: number | null }) {
+export function computeTotalUsed(balance: { used: number; halfDayUsed: number | null }) {
   const usedFull = balance.used ?? 0;
   const halfCount = balance.halfDayUsed ?? 0; // count of half-days
   return usedFull + halfCount * 0.5;
@@ -2866,7 +2982,7 @@ async function rebuildYearlySummaryTx(
 /**
  * If a leave spans multiple months, you should rebuild all touched months.
  */
-function getTouchedMonths(startDate: Date, endDate: Date) {
+export function getTouchedMonths(startDate: Date, endDate: Date) {
   const s = atStartOfDay(startDate);
   const e = atStartOfDay(endDate);
 
@@ -2889,7 +3005,7 @@ function getTouchedMonths(startDate: Date, endDate: Date) {
   });
 }
 
-async function insertLedgerTx(
+export async function insertLedgerTx(
   tx: Tx,
   params: {
     employeeId: number;
@@ -3155,7 +3271,7 @@ export const initELAccrualCron = () => {
     }
   });
 };
-async function getLastLedgerBalanceTx(
+export async function getLastLedgerBalanceTx(
   tx: Tx,
   employeeId: number,
   leaveTypeId: number,
@@ -3408,7 +3524,7 @@ async function allocateLeave(
   await rebuildMonthlySummaryTx(tx, employeeId, lt.id, year, date.getMonth() + 1);
   await rebuildYearlySummaryTx(tx, employeeId, lt.id, year);
 }
-function getFinancialYear(date: Date) {
+export function getFinancialYear(date: Date) {
   const year = date.getFullYear();
   const month = date.getMonth() + 1;
 
@@ -3421,7 +3537,7 @@ function getPrevMonthFY(year: number, month: number) {
   }
   return { year, month: month - 1 };
 }
-function getCalendarYear(fyYear: number, month: number) {
+export function getCalendarYear(fyYear: number, month: number) {
   return month >= 4 ? fyYear : fyYear + 1;
 }
 

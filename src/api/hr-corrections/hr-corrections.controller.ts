@@ -1,5 +1,10 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
+import {
+  countWorkingDays, getTouchedMonths, insertLedgerTx, getLastLedgerBalanceTx,
+  getCalendarYear, computeTotalUsed,
+} from "../leave/leave.controller";
+// NOTE: hr-corrections has its own local getFinancialYear() — reuse that.
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -1080,5 +1085,211 @@ export const getLeaveTypes = async (_req: Request, res: Response) => {
   } catch (err) {
     console.error("getLeaveTypes error:", err);
     return res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+/* ════════════════════════════════════════════════════════════════════
+   APPLY LEAVE ON BEHALF OF AN EMPLOYEE (HR override)
+   POST /api/hr-corrections/leave-apply
+   Body: { employeeId, leaveTypeId, startDate, endDate, reason,
+           isHalfDay?, halfDaySession?, force? }
+   ────────────────────────────────────────────────────────────────────
+   HR raises a leave request for an employee and it goes straight to
+   APPROVED with the balance deducted + ledger debit written — same end
+   state as a normally-approved leave, but bypassing the per-application
+   caps / weekly-one-type / sandwich-block rules (it's an override tool).
+   Insufficient balance is blocked unless `force: true` (then it goes
+   negative and is recorded).
+   ════════════════════════════════════════════════════════════════════ */
+export const applyLeaveOnBehalf = async (req: any, res: Response) => {
+  try {
+    const hrUserId = Number(req.user?.empId ?? req.user?.userId);
+    // HR / HR-Manager / Admin only
+    const role = String(req.user?.role ?? '').toUpperCase();
+    const roleId = Number(req.user?.roleId);
+    const isHR = ['HR', 'HR_MANAGER', 'ADMIN'].includes(role) || roleId === 1;
+    if (!isHR) {
+      return res.status(403).json({ error: "Only HR can apply leave on behalf of an employee." });
+    }
+
+    const {
+      employeeId, leaveTypeId, startDate, endDate, reason,
+      isHalfDay, halfDaySession, force,
+    } = req.body || {};
+
+    if (!employeeId || !leaveTypeId || !startDate || !endDate || !reason?.trim()) {
+      return res.status(400).json({
+        error: "employeeId, leaveTypeId, startDate, endDate and reason are required",
+      });
+    }
+
+    const start = new Date(startDate);
+    const end   = new Date(endDate);
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      return res.status(400).json({ error: "Invalid startDate / endDate" });
+    }
+    if (end < start) return res.status(400).json({ error: "endDate cannot be before startDate" });
+    if (isHalfDay && start.toDateString() !== end.toDateString()) {
+      return res.status(400).json({ error: "Half-day must be a single date" });
+    }
+    if (isHalfDay && !halfDaySession) {
+      return res.status(400).json({ error: "halfDaySession is required for a half-day" });
+    }
+
+    const [employee, lt] = await Promise.all([
+      prisma.employee.findUnique({ where: { id: Number(employeeId) }, select: { id: true, firstName: true, lastName: true, employeeCode: true } }),
+      prisma.leaveType.findUnique({ where: { id: Number(leaveTypeId) } }),
+    ]);
+    if (!employee) return res.status(404).json({ error: "Employee not found" });
+    if (!lt)       return res.status(400).json({ error: "Invalid leave type" });
+
+    const year = getFinancialYear(start);
+    // EL counts week-offs inside the range (sandwich rule); other types don't.
+    const requestedUnits = isHalfDay
+      ? 0.5
+      : await countWorkingDays(Number(employeeId), start, end, { includeWeekOffs: lt.name === 'EL' });
+
+    if (requestedUnits <= 0) {
+      return res.status(400).json({ error: "Selected range contains no leave days (only holidays / week-offs)." });
+    }
+
+    // RH / CO don't have a normal balance row — keep it simple: allow without
+    // a balance check (the corrections module is an override; CO/RH balances
+    // are managed elsewhere). For all other types, enforce balance unless force.
+    const SKIP_BALANCE_TYPES = ['RH', 'CO'];
+    const balance = SKIP_BALANCE_TYPES.includes(lt.name)
+      ? null
+      : await prisma.employeeLeaveBalance.findFirst({
+          where: { employeeId: Number(employeeId), leaveTypeId: Number(leaveTypeId), year, category: "LEAVE" },
+        });
+
+    if (!SKIP_BALANCE_TYPES.includes(lt.name)) {
+      if (!balance) {
+        return res.status(400).json({ error: `Leave balance not configured for ${employee.firstName} ${employee.lastName} (${lt.name}, ${year}).` });
+      }
+      const usedBefore = computeTotalUsed(balance);
+      const remaining  = (balance.totalAllowed ?? 0) - usedBefore;
+      if (requestedUnits > remaining && !force) {
+        return res.status(400).json({
+          error: `Insufficient ${lt.name} balance — available ${remaining}, requested ${requestedUnits}. `
+               + `Re-submit with "allow negative balance" if this is intentional.`,
+          available: remaining, requested: requestedUnits,
+        });
+      }
+    }
+
+    const now = new Date();
+    const created = await prisma.$transaction(async (tx) => {
+      // 1) Create the leave request, already APPROVED, all levels stamped.
+      const leave = await tx.leaveRequest.create({
+        data: {
+          employeeId: Number(employeeId),
+          leaveTypeId: Number(leaveTypeId),
+          startDate: start,
+          endDate: end,
+          reason: reason.trim(),
+          status: 'APPROVED',
+          isHalfDay: !!isHalfDay,
+          halfDaySession: isHalfDay ? halfDaySession : null,
+          approvedBy: hrUserId,
+          approvedDate: now,
+          hodDecision: 'APPROVED', hodDecidedAt: now, hodNote: 'Auto-approved (HR applied on behalf)',
+          hrDecision:  'APPROVED', hrDecidedAt:  now, hrNote:  reason.trim(),
+          inChargeDecision: 'APPROVED', inChargeDecidedAt: now, inChargeNote: 'Auto-approved (HR applied on behalf)',
+          appliedByHr: true,
+          appliedByHrId: hrUserId,
+        },
+        include: { employee: { select: { firstName: true, lastName: true, employeeCode: true } }, leaveType: { select: { name: true } } },
+      });
+
+      // 2) Deduct balance (skip for RH / CO).
+      if (!SKIP_BALANCE_TYPES.includes(lt.name)) {
+        if (isHalfDay) {
+          await tx.employeeLeaveBalance.updateMany({
+            where: { employeeId: Number(employeeId), leaveTypeId: Number(leaveTypeId), year },
+            data: { halfDayUsed: { increment: 1 } },
+          });
+        } else {
+          await tx.employeeLeaveBalance.updateMany({
+            where: { employeeId: Number(employeeId), leaveTypeId: Number(leaveTypeId), year },
+            data: { used: { increment: requestedUnits } },
+          });
+        }
+
+        // 3) Ledger DEBIT entries per touched month — mirrors the normal approval path.
+        const touched = getTouchedMonths(start, end);
+        touched.sort((a, b) => a.year - b.year || a.month - b.month);
+        let runningBalance = await getLastLedgerBalanceTx(tx as any, Number(employeeId), Number(leaveTypeId), year);
+
+        for (const m of touched) {
+          const calYear = getCalendarYear(m.year, m.month);
+          const monthStart = new Date(calYear, m.month - 1, 1);
+          const monthEnd   = new Date(calYear, m.month, 0);
+          const from = start > monthStart ? start : monthStart;
+          const to   = end   < monthEnd   ? end   : monthEnd;
+          const days = isHalfDay ? 0.5 : await countWorkingDays(Number(employeeId), from, to, { includeWeekOffs: lt.name === 'EL' });
+          if (days <= 0) continue;
+          runningBalance -= days;
+          await insertLedgerTx(tx as any, {
+            employeeId: Number(employeeId),
+            leaveTypeId: Number(leaveTypeId),
+            year: m.year,
+            month: m.month,
+            debit: days,
+            credit: 0,
+            balanceAfter: runningBalance,
+            action: "DEBIT",
+            referenceType: "LEAVE_REQUEST",
+            referenceId: leave.id,
+            performedBy: hrUserId,
+            source: "ADMIN",
+            remarks: `HR-applied leave (${lt.name})${force ? ' [forced — negative balance]' : ''}: ${reason.trim().slice(0, 120)}`,
+          });
+          // half-day spans a single month, so break after the first
+          if (isHalfDay) break;
+        }
+      }
+
+      return leave;
+    }, { timeout: 15000 });
+
+    return res.status(201).json({
+      message: "Leave applied and approved on behalf of the employee.",
+      data: created,
+      requestedUnits,
+    });
+  } catch (err: any) {
+    console.error("applyLeaveOnBehalf error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to apply leave on behalf" });
+  }
+};
+
+/** GET /api/hr-corrections/leave-apply — list of HR-applied leaves (history). */
+export const getHrAppliedLeaveList = async (req: Request, res: Response) => {
+  try {
+    const { employeeId, page = "1", pageSize = "25" } = req.query as any;
+    const where: any = { appliedByHr: true };
+    if (employeeId) where.employeeId = Number(employeeId);
+
+    const take = Math.min(100, Number(pageSize) || 25);
+    const skip = (Math.max(1, Number(page) || 1) - 1) * take;
+
+    const [rows, total] = await Promise.all([
+      prisma.leaveRequest.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take, skip,
+        include: {
+          employee:  { select: { id: true, firstName: true, lastName: true, employeeCode: true } },
+          leaveType: { select: { id: true, name: true } },
+        },
+      }),
+      prisma.leaveRequest.count({ where }),
+    ]);
+
+    return res.json({ total, rows });
+  } catch (err: any) {
+    console.error("getHrAppliedLeaveList error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to load HR-applied leaves" });
   }
 };

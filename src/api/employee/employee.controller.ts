@@ -534,6 +534,18 @@ export const getEmployees = async (req: Request, res: Response) => {
     const filter = req.query.filter as string;
     const search = req.query.search as string;
 
+    // Generic search — when `search` is given WITHOUT a specific `filter`,
+    // match across name, employee code and email. (Used by the autocomplete
+    // pickers in HR Corrections, leave-apply, etc. — which only send `search`.)
+    if (search && !filter) {
+      where.OR = [
+        { firstName:    { contains: search } },
+        { lastName:     { contains: search } },
+        { employeeCode: { contains: search } },
+        { email:        { contains: search } },
+      ];
+    }
+
     if (search && filter) {
       switch (filter) {
         case "name":

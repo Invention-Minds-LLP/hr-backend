@@ -19,6 +19,8 @@ import {
   appraisalOverride,
   getAppraisalOverrideList,
   getLeaveTypes,
+  applyLeaveOnBehalf,
+  getHrAppliedLeaveList,
 } from "./hr-corrections.controller";
 
 const router = Router();
@@ -30,6 +32,10 @@ router.get("/punch", authenticateToken, getPunchCorrectionList);
 // Leave Balance Adjustment
 router.post("/leave-balance", authenticateToken, adjustLeaveBalance);
 router.get("/leave-balance", authenticateToken, getLeaveBalanceAdjustmentList);
+
+// Apply Leave on behalf of an employee (HR override — auto-approved + deducted)
+router.post("/leave-apply", authenticateToken, applyLeaveOnBehalf);
+router.get("/leave-apply", authenticateToken, getHrAppliedLeaveList);
 
 // Attendance Override
 router.post("/attendance-override", authenticateToken, overrideAttendanceStatus);
