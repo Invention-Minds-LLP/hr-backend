@@ -4,6 +4,7 @@ import {
   countWorkingDays, getTouchedMonths, insertLedgerTx, getLastLedgerBalanceTx,
   getCalendarYear, computeTotalUsed,
 } from "../leave/leave.controller";
+import { createNotification } from "../notifications/notifications.controller";
 // NOTE: hr-corrections has its own local getFinancialYear() — reuse that.
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -30,6 +31,19 @@ async function getLastLedgerBalance(
     select: { balanceAfter: true },
   });
   return last?.balanceAfter ?? 0;
+}
+
+/**
+ * Notify the employee about an HR correction. Employee-only — supervisors are
+ * intentionally NOT notified for corrections. Non-fatal: a failed notification
+ * never breaks the correction.
+ */
+async function notifyCorrection(employeeId: number, employeeMessage: string): Promise<void> {
+  try {
+    await createNotification(employeeId, employeeMessage);
+  } catch (err) {
+    console.error("[notifyCorrection] failed:", err);
+  }
 }
 
 // ─── PUNCH CORRECTION ──────────────────────────────────────────────────────
@@ -129,6 +143,12 @@ export const correctPunch = async (req: Request, res: Response) => {
       where: { id: attendance.id },
       data: { punchCorrectionId: log.id },
     });
+
+    // Notify the employee (their punch record changed).
+    await notifyCorrection(
+      Number(employeeId),
+      `🕒 Your punch record for ${targetDate.toLocaleDateString('en-IN')} was corrected by HR. Reason: ${reason}`,
+    );
 
     return res.json(log);
   } catch (err) {
@@ -298,6 +318,14 @@ export const adjustLeaveBalance = async (req: Request, res: Response) => {
       },
     });
 
+    // Notify the employee — their leave balance changed.
+    const ltName = (await prisma.leaveType.findUnique({ where: { id: Number(leaveTypeId) }, select: { name: true } }))?.name ?? 'leave';
+    const verb = adjustType === 'CREDIT' ? 'credited' : 'debited';
+    await notifyCorrection(
+      Number(employeeId),
+      `📊 Your ${ltName} balance was ${verb} by ${days} day(s) by HR (FY ${year}). Reason: ${reason}`,
+    );
+
     return res.json(result);
   } catch (err) {
     console.error("adjustLeaveBalance error:", err);
@@ -420,6 +448,13 @@ export const overrideAttendanceStatus = async (req: Request, res: Response) => {
       where: { id: attendance.id },
       data: { overrideId: overrideLog.id },
     });
+
+    // Notify the employee — attendance status changed.
+    const dLabel = targetDate.toLocaleDateString('en-IN');
+    await notifyCorrection(
+      Number(employeeId),
+      `✏️ Your attendance for ${dLabel} was changed to ${newStatus} by HR${originalStatus ? ` (was ${originalStatus})` : ''}. Reason: ${reason}`,
+    );
 
     return res.json(overrideLog);
   } catch (err) {
@@ -545,6 +580,13 @@ export const grantPermissionOverride = async (req: Request, res: Response) => {
       }
     }
 
+    // Notify the employee — a permission was granted.
+    const dLabel = dayDate.toLocaleDateString('en-IN');
+    await notifyCorrection(
+      Number(employeeId),
+      `🟢 HR granted you a ${permissionType} permission for ${dLabel}${startTime && endTime ? ` (${new Date(startTime).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}–${new Date(endTime).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })})` : ''}. Reason: ${reason}`,
+    );
+
     return res.json(permission);
   } catch (err) {
     console.error("grantPermissionOverride error:", err);
@@ -637,6 +679,12 @@ export const manualCompOffGrant = async (req: Request, res: Response) => {
         grantReason: reason,
       },
     });
+
+    // Notify the employee — they gained a comp-off credit (with an expiry).
+    await notifyCorrection(
+      Number(employeeId),
+      `🎁 HR granted you a comp-off credit for working on ${work.toLocaleDateString('en-IN')}. Use it before ${expiry.toLocaleDateString('en-IN')}. Reason: ${reason}`,
+    );
 
     return res.json(credit);
   } catch (err) {
@@ -745,6 +793,13 @@ export const manualOTEntry = async (req: Request, res: Response) => {
         manualEntryReason: reason,
       },
     });
+
+    // Notify the employee — OT was recorded (affects pay).
+    const dLabel = targetDate.toLocaleDateString('en-IN');
+    await notifyCorrection(
+      Number(employeeId),
+      `⏱️ HR recorded ${hours} hour(s) of overtime for you on ${dLabel}. Reason: ${reason}`,
+    );
 
     return res.json(ot);
   } catch (err) {
@@ -880,6 +935,16 @@ export const weekOffHolidayOverride = async (req: Request, res: Response) => {
         },
       });
     }
+
+    // Notify the employee — their day's classification changed.
+    const dLabel = targetDate.toLocaleDateString('en-IN');
+    const human: Record<string, string> = {
+      GRANT_WEEK_OFF: 'a week-off', GRANT_HOLIDAY: 'a holiday', MARK_WORKING: 'a working day',
+    };
+    await notifyCorrection(
+      Number(employeeId),
+      `📆 HR marked ${dLabel} as ${human[overrideType]} for you${overrideType === 'MARK_WORKING' && autoCompOff ? ' (a comp-off credit was added)' : ''}. Reason: ${reason}`,
+    );
 
     return res.json(weekOffLog);
   } catch (err) {
@@ -1252,6 +1317,21 @@ export const applyLeaveOnBehalf = async (req: any, res: Response) => {
 
       return leave;
     }, { timeout: 15000 });
+
+    // ── Notification (employee only — supervisors are not notified for
+    //    HR corrections / HR-applied leave; failures don't roll back). ──
+    try {
+      const typeName = lt.name;
+      const range = isHalfDay
+        ? `${start.toLocaleDateString('en-IN')} (${halfDaySession === 'FIRST_HALF' ? '1st half' : '2nd half'})`
+        : `${start.toLocaleDateString('en-IN')} – ${end.toLocaleDateString('en-IN')}`;
+      await createNotification(
+        Number(employeeId),
+        `📝 HR has applied ${requestedUnits} day(s) of ${typeName} leave on your behalf for ${range}. Reason: ${reason.trim()}`,
+      );
+    } catch (notifyErr) {
+      console.error("[applyLeaveOnBehalf notify] failed:", notifyErr);
+    }
 
     return res.status(201).json({
       message: "Leave applied and approved on behalf of the employee.",
