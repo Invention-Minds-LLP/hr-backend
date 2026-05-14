@@ -106,3 +106,43 @@ export const requireRole = (allowed: (string | number)[]) => {
     return res.status(403).json({ message: "Forbidden: insufficient role" });
   };
 };
+
+/**
+ * Same as `requireRole`, but also lets through users whose `deptId` is in
+ * the given department allowlist. Used for "any role in the list, OR anyone
+ * in this department" gates — e.g. recruiting endpoints where any HR-dept
+ * employee should have access regardless of their role tier.
+ *
+ * Example:
+ *   router.get('/recruiter-dashboard', authenticateToken,
+ *     requireRoleOrDept(['HR_MANAGER', 'ADMIN', 1, 4], [1]), handler);
+ */
+export const requireRoleOrDept = (
+  allowedRoles: (string | number)[],
+  allowedDepts: number[],
+) => {
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    const user = req.user;
+    if (!user) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const userRoleName = String(user.role ?? user.roleName ?? '').toUpperCase();
+    const userRoleId   = Number(user.roleId);
+    const userDeptId   = Number(user.deptId ?? user.departmentId ?? 0);
+
+    const allowedNames = allowedRoles
+      .filter((a) => typeof a === 'string')
+      .map((a) => String(a).toUpperCase());
+    const allowedIds = allowedRoles.filter((a) => typeof a === 'number');
+
+    if (
+      allowedNames.includes(userRoleName) ||
+      allowedIds.includes(userRoleId) ||
+      (Number.isFinite(userDeptId) && allowedDepts.includes(userDeptId))
+    ) {
+      return next();
+    }
+    return res.status(403).json({ message: "Forbidden: insufficient role / department" });
+  };
+};

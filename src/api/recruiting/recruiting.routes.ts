@@ -9,7 +9,7 @@ import {
   addBgvDocument, listBgvDocuments, deleteBgvDocument,
   updateReferralBonus,
 } from './recruiting.controller';
-import { authenticateToken, requireRole } from '../../middleware/authMiddleware';
+import { authenticateToken, requireRoleOrDept } from '../../middleware/authMiddleware';
 
 const rc = new RecruitingController();
 export const recruitingRouter = Router();
@@ -21,6 +21,8 @@ export const recruitingRouter = Router();
  * as "recruiter-capable":
  *   • role name: HR_MANAGER, ADMIN, RECRUITER, MANAGEMENT
  *   • roleId:    1 (HR Manager), 4 (Management) — adjust to your role table
+ * PLUS anyone whose `deptId` is in HR (deptId = 1) — every HR-dept employee
+ * is treated as recruiter-capable regardless of their role tier.
  *
  * Candidate-facing endpoints (their own tests + status) use `authenticateToken`
  * only — they're authenticated as candidates, not employees.
@@ -29,7 +31,8 @@ export const recruitingRouter = Router();
  */
 const RECRUITER_ROLES: (string | number)[] =
   ['HR_MANAGER', 'ADMIN', 'RECRUITER', 'MANAGEMENT', 1, 4];
-const recruiter = [authenticateToken, requireRole(RECRUITER_ROLES)];
+const RECRUITER_DEPTS: number[] = [1];          // HR department
+const recruiter = [authenticateToken, requireRoleOrDept(RECRUITER_ROLES, RECRUITER_DEPTS)];
 
 // Jobs (recruiter only for create/update; list is public so candidates can browse)
 recruitingRouter.post('/jobs', ...recruiter, rc.createJob);
