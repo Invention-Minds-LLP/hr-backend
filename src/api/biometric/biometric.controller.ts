@@ -1106,6 +1106,74 @@ async function notifyHRShiftSummary() {
   }
 }
 
+/**
+ * For a SINGLE-DAY half-day leave, decide whether the employee's actual punch
+ * overlaps the half they took off. The day's shift is split at its midpoint
+ * (an 8-hour shift → 4 h + 4 h), giving a FIRST_HALF and a SECOND_HALF window.
+ *
+ *   true  → punch overlaps the leave half  → they worked when they should've
+ *           been on leave → the half-day leave should be auto-cancelled.
+ *   false → punch falls only in the OTHER half (e.g. applied SECOND_HALF but
+ *           logged in for the first half) → the half-day leave is legitimate
+ *           and must be kept.
+ *
+ * Times are compared as "minutes since the shift's calendar midnight" so the
+ * result doesn't depend on the server timezone: punch Dates are built from
+ * local components (getHours() == IST wall clock) while shift times are stored
+ * as UTC where UTC-hours == IST-hours (getUTCHours()).
+ *
+ * Falls back to `true` (the previous "cancel on present" behaviour) whenever
+ * the shift or punch data is missing, so we never silently keep a leave we
+ * can't reason about.
+ */
+async function presentDuringLeaveHalf(
+  employeeId: number,
+  dayStart: Date,
+  dayEnd: Date,
+  session: 'FIRST_HALF' | 'SECOND_HALF',
+): Promise<boolean> {
+  const assignment = await prisma.shiftAssignment.findFirst({
+    where: { employeeId, date: { gte: dayStart, lte: dayEnd } },
+    include: { shift: true },
+  });
+  const shift = assignment?.shift;
+
+  const attendance = await prisma.attendance.findFirst({
+    where: { employeeId, date: { gte: dayStart, lte: dayEnd } },
+    select: { checkIn: true, checkOut: true },
+  });
+
+  // Can't resolve shift bounds or there's no check-in → preserve old behaviour.
+  if (!shift || !attendance?.checkIn) return true;
+
+  const shiftStart = new Date(shift.startTime);
+  const shiftEnd = new Date(shift.endTime);
+
+  // Shift times are stored as UTC instants; convert to IST wall-clock minutes
+  // (+5:30) so they line up with punch times, which are already IST wall-clock.
+  const IST_OFFSET = 330;
+  const toIstMin = (d: Date) =>
+    (((d.getUTCHours() * 60 + d.getUTCMinutes() + IST_OFFSET) % 1440) + 1440) % 1440;
+
+  const startMin = toIstMin(shiftStart);
+  let endMin = toIstMin(shiftEnd);
+  if (endMin <= startMin) endMin += 1440; // overnight shift wraps past midnight
+  const midMin = (startMin + endMin) / 2;
+
+  const leaveStart = session === 'FIRST_HALF' ? startMin : midMin;
+  const leaveEnd = session === 'FIRST_HALF' ? midMin : endMin;
+
+  // Normalise punch minutes onto the same axis as the shift (handle wrap).
+  const norm = (m: number) => (m < startMin ? m + 1440 : m);
+  const workedStart = norm(attendance.checkIn.getHours() * 60 + attendance.checkIn.getMinutes());
+  const workedEnd = attendance.checkOut
+    ? norm(attendance.checkOut.getHours() * 60 + attendance.checkOut.getMinutes())
+    : workedStart;
+
+  // Half-open overlap between the worked window and the leave half.
+  return workedStart < leaveEnd && workedEnd > leaveStart;
+}
+
 /* ---------------------------------
    AUTO-CANCEL LEAVE IF PRESENT
 ---------------------------------- */
@@ -1136,6 +1204,19 @@ export async function autoCancelLeaveIfPresent(employeeId: number, date: Date) {
 
     if (pendingLeave) {
       const isSingle = isSameDay(pendingLeave.startDate, pendingLeave.endDate);
+
+      // Half-day leave: only cancel if the punch actually overlaps the half
+      // they took off. If they applied SECOND_HALF but logged in for the first
+      // half (or vice-versa), the leave is legitimate — leave it untouched.
+      if (isSingle && pendingLeave.isHalfDay && pendingLeave.halfDaySession) {
+        const present = await presentDuringLeaveHalf(
+          employeeId, targetDate, dayEnd, pendingLeave.halfDaySession as 'FIRST_HALF' | 'SECOND_HALF',
+        );
+        if (!present) {
+          console.log(`↩️  Kept PENDING half-day leave #${pendingLeave.id} — present only in the other half`);
+          return;
+        }
+      }
 
       if (isSingle) {
         await prisma.leaveRequest.update({
@@ -1209,6 +1290,20 @@ export async function autoCancelLeaveIfPresent(employeeId: number, date: Date) {
     const isRH = leave.leaveType.name === 'RH';
     const isFirstDay = isSameDay(targetDate, leave.startDate);
     const isLastDay = isSameDay(targetDate, leave.endDate);
+
+    // Half-day leave: only auto-cancel (and restore balance) if the punch
+    // overlaps the half they took off. If they were present only in the other
+    // half — e.g. applied SECOND_HALF and logged in for the first half — the
+    // half-day leave stays valid and the balance is left as-is.
+    if (isHalfDay && leave.halfDaySession) {
+      const present = await presentDuringLeaveHalf(
+        employeeId, targetDate, dayEnd, leave.halfDaySession as 'FIRST_HALF' | 'SECOND_HALF',
+      );
+      if (!present) {
+        console.log(`↩️  Kept APPROVED half-day leave #${leave.id} — present only in the other half`);
+        return;
+      }
+    }
 
     await prisma.$transaction(async (tx) => {
       // ── Cancel / shrink / split the leave ──────────────────────────
