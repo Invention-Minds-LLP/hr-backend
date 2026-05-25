@@ -31,6 +31,7 @@ import {
   getEmployeeDailyShiftsForRange,
   getApprovedWeekOffs,
   getEmployeeWeeklyShiftsForMonth,
+  generateFixedShiftsForMonthHandler,
 } from "./shift.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -87,6 +88,11 @@ router.get(
   '/daily-range',
   authenticateToken,
   getEmployeeDailyShiftsForRange
+);
+router.post(
+  '/generate-fixed-month',
+  authenticateToken,
+  generateFixedShiftsForMonthHandler
 );
 router.post('/approve/:id', authenticateToken, approveShiftChange);
 

@@ -643,7 +643,114 @@ export function startShiftCron() {
       });
     }
   });
+
+  /* =====================================================
+     MONTHLY — generate the WHOLE month for FIXED employees
+     Runs at 00:05 on the 1st so future dates in the month
+     already have ShiftAssignment rows (used by the leave
+     popup, calendars, etc.). Idempotent: existing rows
+     (manual overrides / today) are skipped.
+     ===================================================== */
+  cron.schedule('5 0 1 * *', async () => {
+    console.log('🗓️  Running monthly fixed-shift generation');
+    try {
+      const count = await generateFixedShiftsForMonth(new Date());
+      console.log(`🗓️  Monthly fixed-shift generation created ${count} assignments`);
+    } catch (e) {
+      console.error('Monthly fixed-shift generation failed:', e);
+    }
+  });
+
+  // Also fill the current month immediately on boot (idempotent), so we don't
+  // have to wait until the 1st for future-date rows to exist.
+  generateFixedShiftsForMonth(new Date())
+    .then((n) => n && console.log(`🗓️  Startup fixed-shift fill created ${n} assignments`))
+    .catch((e) => console.error('Startup fixed-shift fill failed:', e));
 }
+
+/**
+ * Generate ShiftAssignment rows for every day of `baseDate`'s month for all
+ * ACTIVE / NOTICE_PERIOD employees on a FIXED shift. Existing rows (manual
+ * overrides or already-generated days) are left untouched via skipDuplicates.
+ * Returns the number of rows created.
+ */
+export async function generateFixedShiftsForMonth(baseDate: Date): Promise<number> {
+  const year = baseDate.getFullYear();
+  const monthIdx = baseDate.getMonth(); // 0-based
+  const monthStart = new Date(year, monthIdx, 1);
+  monthStart.setHours(0, 0, 0, 0);
+  const nextMonthStart = new Date(year, monthIdx + 1, 1);
+  nextMonthStart.setHours(0, 0, 0, 0);
+  const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
+
+  const employees = await prisma.employee.findMany({
+    where: {
+      employmentStatus: { in: ['ACTIVE', 'NOTICE_PERIOD'] },
+      EmployeeShiftSetting: { is: { mode: 'FIXED' } },
+    },
+    include: { EmployeeShiftSetting: true },
+  });
+  if (!employees.length) return 0;
+
+  const empIds = employees.map((e) => e.id);
+
+  // There's no unique (employeeId, date) constraint, so skip existing rows
+  // manually to avoid duplicating today's row or any manual override.
+  const existing = await prisma.shiftAssignment.findMany({
+    where: { employeeId: { in: empIds }, date: { gte: monthStart, lt: nextMonthStart } },
+    select: { employeeId: true, date: true },
+  });
+  const seen = new Set(
+    existing.map((r) => `${r.employeeId}|${startOfDay(r.date).getTime()}`)
+  );
+
+  const rows: { employeeId: number; shiftId: number; date: Date }[] = [];
+  for (const emp of employees) {
+    const shiftId = emp.EmployeeShiftSetting?.fixedShiftId;
+    if (!shiftId) continue;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const date = new Date(year, monthIdx, d);
+      if (seen.has(`${emp.id}|${date.getTime()}`)) continue;
+      rows.push({ employeeId: emp.id, shiftId, date });
+    }
+  }
+
+  if (!rows.length) return 0;
+
+  const result = await prisma.shiftAssignment.createMany({ data: rows });
+  return result.count;
+}
+
+/**
+ * POST /shifts/generate-fixed-month  (optional body/query: month 1-12, year)
+ * Manually generate the whole month's fixed-shift assignments on demand —
+ * useful for filling the remaining days of the current month without waiting
+ * for the 1st-of-month cron or a server restart. Idempotent (skips existing).
+ */
+export const generateFixedShiftsForMonthHandler = async (req: Request, res: Response) => {
+  try {
+    const month = Number(req.body?.month ?? req.query?.month); // 1-12
+    const year = Number(req.body?.year ?? req.query?.year);
+
+    let base: Date;
+    if (month >= 1 && month <= 12 && year) {
+      base = new Date(year, month - 1, 1);
+    } else {
+      base = new Date(); // current month
+    }
+
+    const created = await generateFixedShiftsForMonth(base);
+    return res.json({
+      month: base.getMonth() + 1,
+      year: base.getFullYear(),
+      created,
+      message: `Generated ${created} fixed-shift assignment(s) for ${base.getMonth() + 1}/${base.getFullYear()}.`,
+    });
+  } catch (error) {
+    console.error('generateFixedShiftsForMonthHandler error:', error);
+    return res.status(500).json({ error: 'Failed to generate fixed-shift assignments' });
+  }
+};
 
 
 
@@ -1416,6 +1523,25 @@ async function applyApprovedShift(approval: any) {
       date: { gte: startOfDay(approval.startDate) }
     }
   });
+
+  // For FIXED changes, re-fill the rest of the start date's month so future
+  // dates keep their rows (the monthly cron will cover subsequent months).
+  if (approval.requestedMode === 'FIXED' && approval.fixedShiftId) {
+    const from = startOfDay(approval.startDate);
+    const daysInMonth = new Date(from.getFullYear(), from.getMonth() + 1, 0).getDate();
+    const rows: { employeeId: number; shiftId: number; date: Date }[] = [];
+    for (let d = from.getDate(); d <= daysInMonth; d++) {
+      rows.push({
+        employeeId: approval.employeeId,
+        shiftId: approval.fixedShiftId,
+        date: new Date(from.getFullYear(), from.getMonth(), d),
+      });
+    }
+    if (rows.length) {
+      // Rows in this range were just deleted above, so a plain insert is safe.
+      await prisma.shiftAssignment.createMany({ data: rows });
+    }
+  }
 }
 export const listApprovalsInbox = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -2467,6 +2593,7 @@ export const getEmployeeDailyShiftsForRange = async (
     });
   }
 };
+
 function parseWeekOffConfig(raw: unknown): WeekOffConfig | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as any;
