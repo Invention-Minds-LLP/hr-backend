@@ -1117,14 +1117,13 @@ async function notifyHRShiftSummary() {
  *           logged in for the first half) → the half-day leave is legitimate
  *           and must be kept.
  *
- * Times are compared as "minutes since the shift's calendar midnight" so the
- * result doesn't depend on the server timezone: punch Dates are built from
- * local components (getHours() == IST wall clock) while shift times are stored
- * as UTC where UTC-hours == IST-hours (getUTCHours()).
+ * Shift times are stored as UTC instants and converted to IST wall-clock
+ * minutes (+5:30) so they line up with punch times, which are already IST
+ * wall-clock — making the comparison independent of the server timezone.
  *
- * Falls back to `true` (the previous "cancel on present" behaviour) whenever
- * the shift or punch data is missing, so we never silently keep a leave we
- * can't reason about.
+ * If no shift is assigned for the day (or there's no check-in) we can't tell
+ * which half was worked, so we return `false` → DON'T cancel; the half-day
+ * leave is left untouched.
  */
 async function presentDuringLeaveHalf(
   employeeId: number,
@@ -1143,8 +1142,10 @@ async function presentDuringLeaveHalf(
     select: { checkIn: true, checkOut: true },
   });
 
-  // Can't resolve shift bounds or there's no check-in → preserve old behaviour.
-  if (!shift || !attendance?.checkIn) return true;
+  // No shift assigned for the day, or no check-in → we can't tell which half
+  // the employee actually worked, so DON'T cancel the half-day leave — ignore
+  // it and leave the leave untouched.
+  if (!shift || !attendance?.checkIn) return false;
 
   const shiftStart = new Date(shift.startTime);
   const shiftEnd = new Date(shift.endTime);
