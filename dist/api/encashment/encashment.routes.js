@@ -1,0 +1,10 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const encashment_controller_1 = require("./encashment.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const router = (0, express_1.Router)();
+router.get("/eligible", authMiddleware_1.authenticateToken, encashment_controller_1.getEncashmentEligible);
+router.post("/process", authMiddleware_1.authenticateToken, encashment_controller_1.processEncashment);
+router.get("/history/:employeeId", authMiddleware_1.authenticateToken, encashment_controller_1.getEncashmentHistory);
+exports.default = router;

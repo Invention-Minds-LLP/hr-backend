@@ -14,4 +14,6 @@ router.get("/acknowledge/:employeeId", grievance_controller_1.getAcknowledgement
 // Check if already acknowledged
 router.get("/acknowledge", grievance_controller_1.checkAcknowledgement);
 router.get("/get-unacknowledged/:employeeId", grievance_controller_1.getUnacknowledgedComplaints);
+// Committee-member acknowledgement progress for a case (Phase 6).
+router.get("/:id/committee-acks", authMiddleware_1.authenticateToken, grievance_controller_1.getGrievanceCommitteeAcks);
 exports.default = router;

@@ -9,10 +9,62 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.bulkMarkTrainingAttendance = exports.getTrainingAttendance = exports.markTrainingAttendance = exports.updateTraining = exports.getTrainingFeedbackSummary = exports.submitTrainingFeedback = exports.markTrainingCompleted = exports.getTrainings = exports.assignTraining = exports.createTraining = void 0;
+exports.updateTrainingStatus = exports.getAssignableEmployees = exports.bulkMarkTrainingAttendance = exports.getTrainingAttendance = exports.markTrainingAttendance = exports.updateTraining = exports.getTrainingFeedbackSummary = exports.submitTrainingFeedback = exports.markTrainingCompleted = exports.getTrainings = exports.assignTraining = exports.createTraining = void 0;
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+const notifications_controller_1 = require("../notifications/notifications.controller");
+const NURSING_DEPT_NAME = 'Nursing';
+// Accept the two common spellings — confirm with HR which one your DB uses.
+const NURSING_EDUCATOR_DESIGNATIONS = ['nurse educator', 'nursing educator'];
+/**
+ * Resolves what the logged-in user is allowed to do in the training module.
+ *  - HR Manager (roleId 1)                                     → manage everyone
+ *  - Reporting Manager (roleId 3)                              → only their direct reports
+ *  - Incharge (roleId 5) of the Nursing department             → all Nursing dept employees
+ *  - Executive whose designation is "Nursing Educator"         → all Nursing dept employees
+ *  - Anyone else                                               → not allowed
+ */
+function getTrainingScope(req) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b;
+        const user = req.user;
+        if (!user)
+            return { allowed: false, reason: 'Unauthorized' };
+        const roleId = Number(user.roleId);
+        const empId = Number(user.empId);
+        const deptId = Number(user.deptId);
+        // 1. HR Manager — full scope
+        if (roleId === 1)
+            return { allowed: true, mode: 'ALL' };
+        // 2. Reporting Manager — only their reports
+        if (roleId === 3)
+            return { allowed: true, mode: 'OWN_REPORTS', managerEmpId: empId };
+        // 3. Look up Nursing dept once (required for the next two checks)
+        const nursingDept = yield prisma_1.prisma.department.findFirst({
+            where: { name: NURSING_DEPT_NAME },
+            select: { id: true },
+        });
+        // 4. Nursing Incharge
+        if (nursingDept && roleId === 5 && deptId === nursingDept.id) {
+            return { allowed: true, mode: 'DEPT', departmentId: nursingDept.id };
+        }
+        // 5. Nursing Educator (designation-based) — fetch the employee's designation since it isn't in JWT
+        if (nursingDept && empId) {
+            const me = yield prisma_1.prisma.employee.findUnique({
+                where: { id: empId },
+                select: { departmentId: true, designation: { select: { name: true } } },
+            });
+            const designationName = (_b = (_a = me === null || me === void 0 ? void 0 : me.designation) === null || _a === void 0 ? void 0 : _a.name) === null || _b === void 0 ? void 0 : _b.trim().toLowerCase();
+            if ((me === null || me === void 0 ? void 0 : me.departmentId) === nursingDept.id &&
+                designationName &&
+                NURSING_EDUCATOR_DESIGNATIONS.includes(designationName)) {
+                return { allowed: true, mode: 'DEPT', departmentId: nursingDept.id };
+            }
+        }
+        return { allowed: false, reason: 'You do not have permission to manage trainings' };
+    });
+}
 /* ======================================================
    TRAINING CRUD + ASSIGNMENT
    ====================================================== */
@@ -22,7 +74,14 @@ const prisma_1 = require("../../lib/prisma");
 const createTraining = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a;
     try {
-        const userId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.userId;
+        const scope = yield getTrainingScope(req);
+        if (!scope.allowed) {
+            return res.status(400).json({ error: scope.reason });
+        }
+        // Use empId (Employee.id) so it lines up with how the rest of the module
+        // identifies "who created/owns this" — both the visibility filter in
+        // getTrainings and the status-change check use empId.
+        const empId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.userId;
         const { title, description, objectives, mode, location, startDate, endDate, departmentId, testIds, trainers, // 👈 array of trainers (internal/external)
         trainingTests, // 👈 array of { testId, isMandatory, orderNo
          } = req.body;
@@ -36,7 +95,7 @@ const createTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 startDate: startDate ? new Date(startDate) : null,
                 endDate: endDate ? new Date(endDate) : null,
                 departmentId,
-                createdBy: Number(userId),
+                createdBy: Number(empId),
                 status: "ACTIVE",
                 // 👇 store JSON trainers directly
                 trainers,
@@ -117,7 +176,44 @@ exports.createTraining = createTraining;
 // };
 const assignTraining = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
+        const scope = yield getTrainingScope(req);
+        if (!scope.allowed) {
+            return res.status(400).json({ error: scope.reason });
+        }
         const { trainingId, employeeIds, assignedBy } = req.body;
+        if (!Array.isArray(employeeIds) || employeeIds.length === 0) {
+            return res.status(400).json({ error: 'employeeIds is required' });
+        }
+        // Validate that every requested employee falls inside the caller's scope.
+        if (scope.mode === 'OWN_REPORTS') {
+            const allowed = yield prisma_1.prisma.employee.findMany({
+                where: { id: { in: employeeIds }, reportingManager: scope.managerEmpId },
+                select: { id: true },
+            });
+            const allowedIds = new Set(allowed.map((e) => e.id));
+            const outside = employeeIds.filter((id) => !allowedIds.has(Number(id)));
+            if (outside.length) {
+                return res.status(400).json({
+                    error: 'Some of the selected employees are not in your team. Please review your selection.',
+                    outsideScope: outside,
+                });
+            }
+        }
+        else if (scope.mode === 'DEPT') {
+            const allowed = yield prisma_1.prisma.employee.findMany({
+                where: { id: { in: employeeIds }, departmentId: scope.departmentId },
+                select: { id: true },
+            });
+            const allowedIds = new Set(allowed.map((e) => e.id));
+            const outside = employeeIds.filter((id) => !allowedIds.has(Number(id)));
+            if (outside.length) {
+                return res.status(400).json({
+                    error: 'Some of the selected employees are not in the Nursing department. Please review your selection.',
+                    outsideScope: outside,
+                });
+            }
+        }
+        // mode === 'ALL' (HR) → no extra check, all employees are in scope
         const training = yield prisma_1.prisma.training.findUnique({
             where: { id: trainingId },
             include: { trainingTests: true },
@@ -163,10 +259,7 @@ const assignTraining = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     },
                 });
             }
-            // await createNotification(
-            //   empId,
-            //   `You have been assigned to the training: ${training.title}`
-            // );
+            yield (0, notifications_controller_1.createNotification)(empId, `You have been assigned to the training: ${training.title}`);
             assignedEmployees.push(empId);
         }
         return res.status(201).json({
@@ -185,6 +278,7 @@ exports.assignTraining = assignTraining;
  * Get all trainings or filter by employeeId
  */
 const getTrainings = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     try {
         const { employeeId } = req.query;
         const whereClause = {};
@@ -193,6 +287,17 @@ const getTrainings = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             whereClause.assignedEmployees = {
                 some: { employeeId: Number(employeeId) },
             };
+        }
+        else {
+            // Option B visibility: HR Manager sees every training; everyone else
+            // (Reporting Manager / Nursing Incharge / Nursing Educator) sees only the
+            // trainings they themselves created. Note: a non-allowed user reaching
+            // here will simply get an empty list since they can't have created any.
+            const roleId = Number((_a = req.user) === null || _a === void 0 ? void 0 : _a.roleId);
+            const empId = Number((_b = req.user) === null || _b === void 0 ? void 0 : _b.userId);
+            if (roleId !== 1 && empId) {
+                whereClause.createdBy = empId;
+            }
         }
         const trainings = yield prisma_1.prisma.training.findMany({
             where: whereClause,
@@ -307,10 +412,7 @@ const submitTrainingFeedback = (req, res) => __awaiter(void 0, void 0, void 0, f
             select: { title: true }
         });
         const employeeName = `${(emp === null || emp === void 0 ? void 0 : emp.firstName) || ""} ${(emp === null || emp === void 0 ? void 0 : emp.lastName) || ""}`.trim();
-        // await createNotification(
-        //   assignment.assignedBy,
-        //   `📋 ${employeeName} has submitted feedback for the training: ${training?.title || "Training"}.`
-        // );
+        yield (0, notifications_controller_1.createNotification)(assignment.assignedBy, `${employeeName} has submitted feedback for the training: ${(training === null || training === void 0 ? void 0 : training.title) || 'Training'}.`);
         res.status(201).json(feedbackRecord);
     }
     catch (error) {
@@ -458,10 +560,7 @@ const markTrainingAttendance = (req, res) => __awaiter(void 0, void 0, void 0, f
             where: { id: Number(trainingId) },
             select: { title: true }
         });
-        // await createNotification(
-        //   employeeId,
-        //   `Your attendance for the training "${training?.title || 'Training'}" has been marked as: ${status}.`
-        // );
+        yield (0, notifications_controller_1.createNotification)(employeeId, `Your attendance for the training "${(training === null || training === void 0 ? void 0 : training.title) || 'Training'}" has been marked as: ${status}.`);
         res.json({
             message: "Attendance marked successfully",
             data: record,
@@ -523,10 +622,7 @@ const bulkMarkTrainingAttendance = (req, res) => __awaiter(void 0, void 0, void 
                 where: { id: Number(trainingId) },
                 select: { title: true }
             });
-            // await createNotification(
-            //   entry.employeeId,
-            //   `Your attendance for the training "${training?.title || 'Training'}" has been marked as: ${entry.status}.`
-            // );
+            yield (0, notifications_controller_1.createNotification)(entry.employeeId, `Your attendance for the training "${(training === null || training === void 0 ? void 0 : training.title) || 'Training'}" has been marked as: ${entry.status}.`);
         }
         res.json({ message: "Bulk attendance updated" });
     }
@@ -536,3 +632,91 @@ const bulkMarkTrainingAttendance = (req, res) => __awaiter(void 0, void 0, void 
     }
 });
 exports.bulkMarkTrainingAttendance = bulkMarkTrainingAttendance;
+/**
+ * Returns the list of employees the logged-in user is allowed to assign training to.
+ *  - HR Manager      → all active employees
+ *  - Reporting Mgr   → only their direct reports
+ *  - Nursing Incharge / Nursing Educator → all Nursing dept employees
+ *  - others          → 403
+ */
+const getAssignableEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const scope = yield getTrainingScope(req);
+        if (!scope.allowed) {
+            // Don't error out — just return an empty list. The UI guards prevent
+            // unauthorized users from reaching this endpoint normally; if they do,
+            // the assign dialog simply has no one to pick.
+            return res.json([]);
+        }
+        const where = { employmentStatus: 'ACTIVE' };
+        if (scope.mode === 'OWN_REPORTS') {
+            where.reportingManager = scope.managerEmpId;
+        }
+        else if (scope.mode === 'DEPT') {
+            where.departmentId = scope.departmentId;
+        }
+        // mode === 'ALL' → no extra filter
+        const employees = yield prisma_1.prisma.employee.findMany({
+            where,
+            select: {
+                id: true,
+                employeeCode: true,
+                firstName: true,
+                lastName: true,
+                departmentId: true,
+                Department: { select: { name: true } },
+                designation: { select: { name: true } },
+            },
+            orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+        });
+        res.json(employees);
+    }
+    catch (err) {
+        console.error('Failed to fetch assignable employees:', err);
+        res.status(500).json({ error: 'Failed to fetch assignable employees' });
+    }
+});
+exports.getAssignableEmployees = getAssignableEmployees;
+/**
+ * Manually change a training's status.
+ * Body: { status: 'DRAFT' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED' }
+ *
+ * Only HR Manager can change any training; other allowed roles (RM /
+ * Nursing Incharge / Nursing Educator) can only change trainings they created.
+ */
+const updateTrainingStatus = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
+    try {
+        const scope = yield getTrainingScope(req);
+        if (!scope.allowed) {
+            return res.status(400).json({ error: scope.reason });
+        }
+        const id = Number(req.params.id);
+        const { status } = req.body;
+        const allowed = ['DRAFT', 'ACTIVE', 'COMPLETED', 'CANCELLED'];
+        if (!allowed.includes(status)) {
+            return res.status(400).json({ error: `Status must be one of ${allowed.join(', ')}` });
+        }
+        const training = yield prisma_1.prisma.training.findUnique({ where: { id } });
+        if (!training)
+            return res.status(404).json({ error: 'Training not found' });
+        const empId = Number((_a = req.user) === null || _a === void 0 ? void 0 : _a.userId);
+        console.log(scope);
+        console.log(training.createdBy, empId);
+        if (scope.mode !== 'ALL' && training.createdBy !== empId) {
+            return res.status(400).json({
+                error: 'You can only change the status of trainings you created.',
+            });
+        }
+        const updated = yield prisma_1.prisma.training.update({
+            where: { id },
+            data: { status: status },
+        });
+        res.json(updated);
+    }
+    catch (err) {
+        console.error('Failed to update training status:', err);
+        res.status(500).json({ error: 'Failed to update training status' });
+    }
+});
+exports.updateTrainingStatus = updateTrainingStatus;

@@ -8,10 +8,10 @@ import { createNotification } from '../notifications/notifications.controller';
 const prisma = new PrismaClient();
 
 const FTP_CONFIG = {
-  host: "srv680.main-hosting.eu",
-  user: "u948610439.hrproindia.in",
-  password: "Bsrenuk@1993",
-  secure: false
+  host: process.env.FTP_HOST ?? "",
+  user: process.env.FTP_USER ?? "",
+  password: process.env.FTP_PASS ?? "",
+  secure: process.env.FTP_SECURE === "true"
 };
 
 const upload = multer({ dest: 'uploads/' }); // temp folder

@@ -8,6 +8,8 @@ const router = (0, express_1.Router)();
 router.post("/", authMiddleware_1.authenticateToken, training_controller_1.createTraining);
 // Assign employees to a training
 router.post("/assign", authMiddleware_1.authenticateToken, training_controller_1.assignTraining);
+// Returns the list of employees the logged-in user can assign training to
+router.get("/assignable-employees", authMiddleware_1.authenticateToken, training_controller_1.getAssignableEmployees);
 // Get all trainings or employee-specific
 router.get("/", authMiddleware_1.authenticateToken, training_controller_1.getTrainings);
 // Mark completion
@@ -17,6 +19,7 @@ router.post("/feedback", authMiddleware_1.authenticateToken, training_controller
 // View feedback summary (HR/Admin)
 router.get("/feedback/summary/:trainingId", authMiddleware_1.authenticateToken, training_controller_1.getTrainingFeedbackSummary);
 router.put("/:id", authMiddleware_1.authenticateToken, training_controller_1.updateTraining);
+router.patch("/:id/status", authMiddleware_1.authenticateToken, training_controller_1.updateTrainingStatus);
 // Mark single employee attendance
 router.post("/attendance/:trainingId", authMiddleware_1.authenticateToken, training_controller_1.markTrainingAttendance);
 // Get attendance list for a training

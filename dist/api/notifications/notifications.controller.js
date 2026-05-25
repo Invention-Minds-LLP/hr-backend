@@ -16,6 +16,7 @@ exports.sendPushNotification = exports.removeDeviceToken = exports.saveDeviceTok
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+const employeeAccess_1 = require("../../lib/employeeAccess");
 // --- SSE Client list (for live updates) ---
 let clients = [];
 /**
@@ -66,7 +67,16 @@ exports.broadcastNotification = broadcastNotification;
 // CRUD CONTROLLERS
 // -------------------------
 const createNotification = (employeeId, message) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     try {
+        // Don't write notifications for ex-employees / suspended / sabbatical.
+        // They can't see them (auth gate blocks login) and storing them just
+        // pollutes the DB + fires a wasted socket broadcast and push.
+        const access = yield (0, employeeAccess_1.getEmployeeAccess)(employeeId);
+        if (!access.active) {
+            console.log(`[notify] skipping notification for emp ${employeeId} — status=${(_a = access.status) !== null && _a !== void 0 ? _a : 'missing'}`);
+            return null;
+        }
         const notification = yield prisma_1.prisma.notification.create({
             data: {
                 employeeId,
@@ -161,6 +171,14 @@ const removeDeviceToken = (req, res) => __awaiter(void 0, void 0, void 0, functi
 exports.removeDeviceToken = removeDeviceToken;
 const firebase_1 = __importDefault(require("../../lib/firebase"));
 const sendPushNotification = (employeeId, message) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
+    // Belt-and-braces — if someone calls this directly (bypassing
+    // createNotification), still refuse to push to inactive accounts.
+    const access = yield (0, employeeAccess_1.getEmployeeAccess)(employeeId);
+    if (!access.active) {
+        console.log(`[push] skipping push for emp ${employeeId} — status=${(_a = access.status) !== null && _a !== void 0 ? _a : 'missing'}`);
+        return;
+    }
     const tokens = yield prisma_1.prisma.deviceToken.findMany({
         where: { employeeId }
     });

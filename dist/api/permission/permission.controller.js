@@ -9,10 +9,11 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getMonthlyPermissionUsage = exports.getPermissionBalance = exports.updatePermissionStatus = exports.getPermissionRequests = exports.createPermissionRequest = void 0;
+exports.getMonthlyPermissionUsage = exports.getPermissionBalance = exports.updatePermissionStatus = exports.getPermissionRequests = exports.cancelPermissionRequest = exports.updatePermissionRequest = exports.createPermissionRequest = void 0;
 // import { PrismaClient, PermissionStatus } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+const notifications_controller_1 = require("../notifications/notifications.controller");
 const PERMISSION_APPLY_TEMPLATE_ID = '888273';
 const PERMISSION_STATUS_TEMPLATE_ID = '909821';
 const TZ = "Asia/Kolkata";
@@ -128,7 +129,7 @@ const createPermissionRequest = (req, res) => __awaiter(void 0, void 0, void 0, 
                 select: { phone: true }
             });
             const message = `${employeeName} has requested ${permissionType} permission on ${dayLabel}${timeRange ? ` (${timeRange})` : ""}. Kindly review and take appropriate action.`;
-            // await createNotification(notifyTo, message);
+            yield (0, notifications_controller_1.createNotification)(notifyTo, message);
             // if (approver?.phone) {
             //   try {
             //     await sendWhatsAppTemplate({
@@ -156,6 +157,122 @@ const createPermissionRequest = (req, res) => __awaiter(void 0, void 0, void 0, 
     }
 });
 exports.createPermissionRequest = createPermissionRequest;
+// ─────────────────────────────────────────────────────────────────
+// EDIT a pending permission request
+// Allowed only when no approver has acted (incharge / RM/HOD / HR all PENDING).
+// ─────────────────────────────────────────────────────────────────
+const updatePermissionRequest = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const id = Number(req.params.id);
+        const { day, startTime, endTime, reason, permissionType, timing } = req.body;
+        const userId = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const existing = yield prisma_1.prisma.permissionRequest.findUnique({ where: { id } });
+        if (!existing)
+            return res.status(404).json({ error: "Permission request not found" });
+        if (userId && existing.employeeId !== Number(userId)) {
+            return res.status(403).json({ error: "You can only edit your own permission request" });
+        }
+        if (existing.status !== "PENDING") {
+            return res.status(400).json({ error: `Cannot edit a ${existing.status.toLowerCase()} permission request` });
+        }
+        if (existing.inChargeDecision !== "PENDING" ||
+            existing.hodDecision !== "PENDING" ||
+            existing.hrDecision !== "PENDING") {
+            return res.status(400).json({ error: "Cannot edit — at least one approver has already acted" });
+        }
+        const data = { updatedAt: new Date() };
+        if (day)
+            data.day = new Date(day);
+        if (startTime !== undefined)
+            data.startTime = startTime ? new Date(startTime) : null;
+        if (endTime !== undefined)
+            data.endTime = endTime ? new Date(endTime) : null;
+        if (reason !== undefined)
+            data.reason = reason;
+        if (permissionType !== undefined)
+            data.permissionType = permissionType;
+        if (timing !== undefined)
+            data.timing = timing;
+        const updated = yield prisma_1.prisma.permissionRequest.update({ where: { id }, data });
+        return res.json(updated);
+    }
+    catch (err) {
+        console.error("Error updating permission request:", err);
+        return res.status(500).json({ error: err.message || "Failed to update permission request" });
+    }
+});
+exports.updatePermissionRequest = updatePermissionRequest;
+// ─────────────────────────────────────────────────────────────────
+// CANCEL a pending permission request
+// ─────────────────────────────────────────────────────────────────
+const cancelPermissionRequest = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d;
+    try {
+        const id = Number(req.params.id);
+        const { reason } = (_a = req.body) !== null && _a !== void 0 ? _a : {};
+        const userId = (_c = (_b = req.user) === null || _b === void 0 ? void 0 : _b.empId) !== null && _c !== void 0 ? _c : null;
+        const existing = yield prisma_1.prisma.permissionRequest.findUnique({
+            where: { id },
+            include: {
+                employee: {
+                    select: {
+                        firstName: true, lastName: true,
+                        reportingManager: true, inchargeId: true,
+                    },
+                },
+            },
+        });
+        if (!existing)
+            return res.status(404).json({ error: "Permission request not found" });
+        if (userId && existing.employeeId !== Number(userId)) {
+            return res.status(403).json({ error: "You can only cancel your own permission request" });
+        }
+        if (existing.status === "CANCELLED") {
+            return res.status(400).json({ error: "Already cancelled" });
+        }
+        if (existing.status !== "PENDING" ||
+            existing.inChargeDecision !== "PENDING" ||
+            existing.hodDecision !== "PENDING" ||
+            existing.hrDecision !== "PENDING") {
+            return res.status(400).json({ error: "Cannot cancel — request has already been actioned" });
+        }
+        const updated = yield prisma_1.prisma.permissionRequest.update({
+            where: { id },
+            data: {
+                status: "CANCELLED",
+                cancelledAt: new Date(),
+                cancelledBy: userId ? Number(userId) : null,
+                cancellationReason: reason !== null && reason !== void 0 ? reason : "Cancelled by employee",
+            },
+        });
+        // ── Notify the approver who would have reviewed this request ─────
+        // Matches createPermissionRequest: notify incharge (preferred) or reporting manager.
+        const emp = existing.employee;
+        const notifyTo = (_d = emp === null || emp === void 0 ? void 0 : emp.inchargeId) !== null && _d !== void 0 ? _d : emp === null || emp === void 0 ? void 0 : emp.reportingManager;
+        if (notifyTo) {
+            const name = [emp === null || emp === void 0 ? void 0 : emp.firstName, emp === null || emp === void 0 ? void 0 : emp.lastName].filter(Boolean).join(" ");
+            const dayLabel = new Date(existing.day).toLocaleDateString("en-GB", {
+                day: "2-digit", month: "short", year: "numeric",
+            });
+            const message = `${name} has CANCELLED their permission request for ${dayLabel}. ` +
+                `Reason: ${reason !== null && reason !== void 0 ? reason : "Cancelled by employee"}.`;
+            try {
+                yield (0, notifications_controller_1.createNotification)(notifyTo, message);
+            }
+            catch (notifyErr) {
+                console.error(`Failed to notify ${notifyTo}:`, notifyErr);
+                // Don't fail the cancellation if notification delivery fails
+            }
+        }
+        return res.json(updated);
+    }
+    catch (err) {
+        console.error("Error cancelling permission request:", err);
+        return res.status(500).json({ error: err.message || "Failed to cancel permission request" });
+    }
+});
+exports.cancelPermissionRequest = cancelPermissionRequest;
 const getPermissionRequests = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const requests = yield prisma_1.prisma.permissionRequest.findMany({
@@ -555,10 +672,7 @@ const updatePermissionStatus = (req, res) => __awaiter(void 0, void 0, void 0, f
         const start = updated.startTime ? fmtTime(updated.startTime) : '';
         const end = updated.endTime ? fmtTime(updated.endTime) : '';
         const type = (_a = updated.permissionType) !== null && _a !== void 0 ? _a : '';
-        // await createNotification(
-        //   updated.employeeId,
-        //   `Your ${type} permission on ${day} (${start}-${end}) has been ${updated.status}.`
-        // );
+        yield (0, notifications_controller_1.createNotification)(updated.employeeId, `Your ${type} permission on ${day} (${start}-${end}) has been ${updated.status}.`);
         // try {
         //   await sendWhatsAppTemplate({
         //     to: phone,

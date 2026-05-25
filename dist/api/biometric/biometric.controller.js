@@ -12,7 +12,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.debugFetchCosec = debugFetchCosec;
 exports.runBiometricSync = runBiometricSync;
+exports.runOtAndLateLoginForDate = runOtAndLateLoginForDate;
+exports.backfillEmployeeAttendance = backfillEmployeeAttendance;
+exports.autoCancelLeaveIfPresent = autoCancelLeaveIfPresent;
 const axios_1 = __importDefault(require("axios"));
 const client_1 = require("@prisma/client");
 const notifications_controller_1 = require("../notifications/notifications.controller");
@@ -96,17 +100,25 @@ function isNightShift(employeeId, date) {
         return hrs >= 12;
     });
 }
+// Shift times are stored as UTC timestamps where UTC hours == IST hours
+// (e.g., "1970-01-01T11:30:00.000Z" represents 5 PM IST for General 2 shift).
+// Use UTC methods exclusively to avoid server-timezone dependency.
 function combineShiftStart(day, shiftStart) {
-    const d = new Date(day);
-    d.setHours(shiftStart.getHours(), shiftStart.getMinutes(), shiftStart.getSeconds(), 0);
-    return d;
+    // Get IST calendar date from 'day' (which may be UTC midnight of IST date)
+    const dayIst = new Date(day.getTime() + 5.5 * 3600000);
+    // Build result using IST date components + shift UTC time components
+    return new Date(Date.UTC(dayIst.getUTCFullYear(), dayIst.getUTCMonth(), dayIst.getUTCDate(), shiftStart.getUTCHours(), shiftStart.getUTCMinutes(), shiftStart.getUTCSeconds()));
 }
 function combineShiftEnd(day, start, end) {
-    const d = new Date(day);
-    d.setHours(end.getHours(), end.getMinutes(), end.getSeconds(), 0);
-    if (end < start)
-        d.setDate(d.getDate() + 1);
-    return d;
+    const dayIst = new Date(day.getTime() + 5.5 * 3600000);
+    const result = new Date(Date.UTC(dayIst.getUTCFullYear(), dayIst.getUTCMonth(), dayIst.getUTCDate(), end.getUTCHours(), end.getUTCMinutes(), end.getUTCSeconds()));
+    // Night shift: if end time-of-day is before start time-of-day, it rolls to next day
+    const endMins = end.getUTCHours() * 60 + end.getUTCMinutes();
+    const startMins = start.getUTCHours() * 60 + start.getUTCMinutes();
+    if (endMins < startMins) {
+        result.setUTCDate(result.getUTCDate() + 1);
+    }
+    return result;
 }
 function diffMinutes(a, b) {
     return Math.round((b.getTime() - a.getTime()) / 60000);
@@ -149,11 +161,66 @@ function fetchAttendanceDaily(date) {
         return res.data['attendance-daily'] || [];
     });
 }
+/**
+ * Debug helper — runs an arbitrary COSEC attendance-daily query and returns
+ * the FULL list of userids plus a presence check for the code you care about.
+ * Used by the /api/biometric/cosec-debug endpoint so we can answer: "does
+ * COSEC actually return JMRH463 when we hit it from here?" without grepping
+ * server logs.
+ *
+ * Pass `noFilter: true` to skip `range=organization;id=2;active=1` entirely
+ * (replicates your Postman test URL). Pass `active: 0` to test the toggle.
+ */
+function debugFetchCosec(opts) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        const range = getCosecRange(opts.date);
+        const fields = 'userid,processdate,punch1,punch2,punch3,punch4,punch5,punch6,punch7,punch8,punch9,punch10';
+        let filter = '';
+        if (!opts.noFilter) {
+            const orgId = (_a = opts.orgId) !== null && _a !== void 0 ? _a : 2;
+            const active = opts.active === undefined ? 1 : opts.active;
+            filter = `;range=organization;id=${orgId};active=${active}`;
+        }
+        const url = `${COSEC_BASE_URL}/attendance-daily` +
+            `?action=get;field-name=${fields};date-range=${range}${filter};format=json`;
+        const t0 = Date.now();
+        const res = yield axios_1.default.get(url, {
+            auth: { username: COSEC_USERNAME, password: COSEC_PASSWORD },
+            timeout: 300000,
+        });
+        const elapsedMs = Date.now() - t0;
+        const records = res.data['attendance-daily'] || [];
+        const allUserids = records.map((r) => { var _a; return String((_a = r.userid) !== null && _a !== void 0 ? _a : '').trim(); });
+        let presence = null;
+        if (opts.checkCode) {
+            const target = opts.checkCode.toUpperCase().trim();
+            const exact = allUserids.find((u) => u.toUpperCase() === target);
+            const containing = allUserids.filter((u) => u.toUpperCase().includes(target.slice(0, 4)));
+            presence = {
+                checkCode: opts.checkCode,
+                foundExact: !!exact,
+                exactValue: exact !== null && exact !== void 0 ? exact : null,
+                // First 10 userids whose first 4 chars match — useful to spot near misses
+                // (e.g. you searched JMRH463 but COSEC has JMRH0463).
+                similarUserids: containing.slice(0, 10),
+            };
+        }
+        return {
+            url,
+            elapsedMs,
+            totalRecords: records.length,
+            allUserids,
+            presence,
+        };
+    });
+}
 /* ---------------------------------
    MAIN BIOMETRIC SYNC
 ---------------------------------- */
 function runBiometricSync(isFinalRun) {
     return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b;
         const today = startOfDay(new Date());
         const yesterday = startOfDay(new Date(Date.now() - 86400000));
         // const today = startOfDay(date);
@@ -177,7 +244,9 @@ function runBiometricSync(isFinalRun) {
                 employeeCode: true,
             },
         });
-        const empMap = new Map(employees.map(e => [e.employeeCode, e.id]));
+        // Normalize employeeCode to uppercase so biometric userid matches regardless of case
+        // (e.g. DB "JMRH234" vs device sending "jmrh234")
+        const empMap = new Map(employees.map(e => [String(e.employeeCode).toUpperCase().trim(), e.id]));
         // console.log(empMap)
         /* ======================================================
            PART 1: PROCESS TODAY'S BIOMETRIC (CHECK-IN)
@@ -186,7 +255,7 @@ function runBiometricSync(isFinalRun) {
         console.log(`  Fetched ${todayRecords.length} biometric records for today`);
         for (const r of todayRecords) {
             // console.log(r.userId, 'userId')
-            const employeeId = empMap.get(r.userid);
+            const employeeId = empMap.get(String((_a = r.userid) !== null && _a !== void 0 ? _a : '').toUpperCase().trim());
             // console.log(employeeId)
             if (!employeeId)
                 continue;
@@ -256,12 +325,16 @@ function runBiometricSync(isFinalRun) {
             });
             // 🔑 Generate comp-off after attendance is finalized
             yield (0, comOff_service_1.generateCompOffIfEligible)(attendance);
+            // 🔑 Auto-cancel approved leave if employee is Present
+            if (finalStatus === 'Present') {
+                yield autoCancelLeaveIfPresent(employeeId, date);
+            }
         }
         /* ======================================================
            PART 2: CLOSE NIGHT SHIFT (YESTERDAY) USING TODAY PUNCH
         ====================================================== */
         for (const r of todayRecords) {
-            const employeeId = empMap.get(r.userid);
+            const employeeId = empMap.get(String((_b = r.userid) !== null && _b !== void 0 ? _b : '').toUpperCase().trim());
             if (!employeeId)
                 continue;
             const punches = extractPunches(r);
@@ -513,12 +586,16 @@ function runBiometricSync(isFinalRun) {
                         id: true,
                         departmentId: true,
                         roleId: true,
+                        overtimeEnabled: true,
                     },
                 },
             },
         });
         for (const rec of yAttendance) {
             if (!rec.checkOut)
+                continue;
+            // Skip employees who don't have overtime enabled
+            if (!rec.employee.overtimeEnabled)
                 continue;
             const shiftType = getShiftTypeByRoleAndDepartment(rec.employee.roleId, rec.employee.departmentId);
             const shifts = shiftsByType.get(shiftType);
@@ -530,7 +607,7 @@ function runBiometricSync(isFinalRun) {
             if (!schedEnd)
                 continue;
             const otMin = Math.round((rec.checkOut.getTime() - schedEnd.getTime()) / 60000);
-            if (otMin > 0 && otMin <= 720) {
+            if (otMin > 60 && otMin <= 720) {
                 yield prisma.overtimeApproval.upsert({
                     where: {
                         employeeId_date: {
@@ -555,6 +632,238 @@ function runBiometricSync(isFinalRun) {
             }
         }
         console.log('✅ Biometric sync completed');
+    });
+}
+// Standalone function that runs ONLY the Late Login + Overtime calculation
+// for a given attendance date. Does NOT hit the biometric device (COSEC).
+// Use this from debug endpoints or tests to verify shift-time logic.
+function runOtAndLateLoginForDate(targetDate) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const day = startOfDay(targetDate);
+        const allShifts = yield prisma.shiftTemplate.findMany({
+            select: { id: true, shiftType: true, startTime: true, endTime: true },
+        });
+        const shiftsByType = new Map();
+        for (const s of allShifts) {
+            if (!shiftsByType.has(s.shiftType))
+                shiftsByType.set(s.shiftType, []);
+            shiftsByType.get(s.shiftType).push(s);
+        }
+        const getShiftTypeByRoleAndDepartment = (roleId, departmentId) => {
+            if (roleId === 1 || roleId === 3)
+                return 'REPORTING_MANAGER';
+            if (departmentId === 3)
+                return 'NURSING';
+            if (departmentId === 4)
+                return 'MOD';
+            if (roleId === 2)
+                return 'EXECUTIVE';
+            return 'EXECUTIVE';
+        };
+        const findNearestShiftStart = (date, checkIn, shifts) => {
+            let nearest = null;
+            let minDiff = Infinity;
+            for (const s of shifts) {
+                const shiftStart = combineShiftStart(date, s.startTime);
+                const diff = Math.abs(checkIn.getTime() - shiftStart.getTime());
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    nearest = shiftStart;
+                }
+            }
+            return nearest;
+        };
+        const findNearestShiftEnd = (date, checkOut, shifts) => {
+            let nearest = null;
+            let minDiff = Infinity;
+            for (const s of shifts) {
+                const shiftEnd = combineShiftEnd(date, s.startTime, s.endTime);
+                const diff = Math.abs(checkOut.getTime() - shiftEnd.getTime());
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    nearest = shiftEnd;
+                }
+            }
+            return nearest;
+        };
+        const attendance = yield prisma.attendance.findMany({
+            where: { date: day },
+            include: { employee: { select: { id: true, departmentId: true, roleId: true, overtimeEnabled: true } } },
+        });
+        for (const rec of attendance) {
+            const shiftType = getShiftTypeByRoleAndDepartment(rec.employee.roleId, rec.employee.departmentId);
+            const shifts = shiftsByType.get(shiftType);
+            if (!shifts || shifts.length === 0)
+                continue;
+            // Late Login
+            if (rec.checkIn) {
+                const shiftStart = findNearestShiftStart(day, rec.checkIn, shifts);
+                if (shiftStart) {
+                    const lateMin = Math.round((rec.checkIn.getTime() - shiftStart.getTime()) / 60000);
+                    if (lateMin > 15) {
+                        yield prisma.lateLoginLog.upsert({
+                            where: { employeeId_date: { employeeId: rec.employeeId, date: day } },
+                            create: {
+                                employeeId: rec.employeeId, date: day, shiftStart,
+                                checkIn: rec.checkIn, lateMinutes: lateMin, source: 'TEMP_DEPT_SHIFT',
+                            },
+                            update: { shiftStart, checkIn: rec.checkIn, lateMinutes: lateMin },
+                        });
+                    }
+                }
+            }
+            // Overtime — only for employees with overtimeEnabled = true
+            if (rec.checkOut && rec.employee.overtimeEnabled) {
+                const schedEnd = findNearestShiftEnd(day, rec.checkOut, shifts);
+                if (schedEnd) {
+                    const otMin = Math.round((rec.checkOut.getTime() - schedEnd.getTime()) / 60000);
+                    if (otMin > 60 && otMin <= 720) {
+                        yield prisma.overtimeApproval.upsert({
+                            where: { employeeId_date: { employeeId: rec.employeeId, date: day } },
+                            create: {
+                                employeeId: rec.employeeId, date: day, minutes: otMin,
+                                scheduledEnd: schedEnd, checkOut: rec.checkOut, status: 'PENDING',
+                            },
+                            update: { minutes: otMin, scheduledEnd: schedEnd, checkOut: rec.checkOut },
+                        });
+                    }
+                }
+            }
+        }
+    });
+}
+// ════════════════════════════════════════════════════════════════════
+// BACKFILL: Re-process biometric attendance for ONE employee across a
+// date range. Fetches COSEC per-day and upserts Attendance rows.
+// ════════════════════════════════════════════════════════════════════
+function backfillEmployeeAttendance(employeeCode, fromDate, toDate) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c, _d;
+        const normalizedCode = String(employeeCode).toUpperCase().trim();
+        console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+        console.log(`🔄 [BACKFILL] Starting for code="${employeeCode}" (normalized="${normalizedCode}")`);
+        console.log(`   Range: ${fromDate.toDateString()} → ${toDate.toDateString()}`);
+        const employee = yield prisma.employee.findFirst({
+            where: { employeeCode: { equals: normalizedCode } },
+            select: { id: true, employeeCode: true, firstName: true, lastName: true },
+        });
+        if (!employee) {
+            console.log(`❌ [BACKFILL] Employee NOT FOUND for code: ${normalizedCode}`);
+            // Try case-insensitive search for debugging
+            const all = yield prisma.employee.findMany({
+                where: { employeeCode: { contains: normalizedCode.slice(0, 4) } },
+                select: { employeeCode: true },
+                take: 5,
+            });
+            console.log(`   Did you mean one of these? ${all.map(e => e.employeeCode).join(', ')}`);
+            throw new Error(`Employee not found for code: ${employeeCode}`);
+        }
+        console.log(`✅ [BACKFILL] Found employee: id=${employee.id}, code=${employee.employeeCode}, name="${employee.firstName} ${employee.lastName}"`);
+        const start = startOfDay(fromDate);
+        const end = startOfDay(toDate);
+        if (end < start)
+            throw new Error("toDate must be >= fromDate");
+        const results = [];
+        let dayIndex = 0;
+        const totalDays = Math.floor((end.getTime() - start.getTime()) / 86400000) + 1;
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+            dayIndex++;
+            const day = new Date(d);
+            day.setHours(0, 0, 0, 0);
+            const dayStr = day.toDateString();
+            console.log(`\n──────────────────────────────────────────────`);
+            console.log(`📅 [BACKFILL] Day ${dayIndex}/${totalDays}: ${dayStr}`);
+            try {
+                console.log(`   🌐 Fetching COSEC attendance-daily for ${day.toDateString()}...`);
+                const records = yield fetchAttendanceDaily(day);
+                console.log(`   📥 COSEC returned ${records.length} records`);
+                const r = records.find((rec) => { var _a; return String((_a = rec.userid) !== null && _a !== void 0 ? _a : '').toUpperCase().trim() === normalizedCode; });
+                if (!r) {
+                    const sampleUserids = records.slice(0, 5).map((x) => x.userid);
+                    console.log(`   ⚠️  No record for code=${normalizedCode} on this day. Sample userids in response:`, sampleUserids);
+                    // Surface diagnostics in the API response so the caller doesn't need
+                    // to grep server logs. cosecRecordCount=0 means COSEC returned nothing
+                    // (unreachable / wrong org id / wrong date format). >0 means the user
+                    // isn't in COSEC's response for that day (possibly inactive / wrong code).
+                    results.push({
+                        date: dayStr,
+                        status: 'NO_BIOMETRIC_DATA',
+                        cosecRecordCount: records.length,
+                        sampleUserids,
+                    });
+                    continue;
+                }
+                console.log(`   ✔️  Found user record. userid=${r.userid}, processdate=${r.processdate}`);
+                const punches = extractPunches(r);
+                console.log(`   🕒 Punches (${punches.length}): ${punches.map(p => p.toISOString()).join(', ')}`);
+                if (!punches.length) {
+                    console.log(`   ⚠️  No valid punches.`);
+                    results.push({ date: dayStr, status: 'NO_PUNCHES' });
+                    continue;
+                }
+                const prevDay = new Date(day);
+                prevDay.setDate(prevDay.getDate() - 1);
+                const night = yield isNightShift(employee.id, day);
+                const wasNightYesterday = yield isNightShift(employee.id, prevDay);
+                console.log(`   🌙 night shift today=${night}, was night yesterday=${wasNightYesterday}`);
+                let checkIn = null;
+                if (wasNightYesterday) {
+                    checkIn = punches.length > 1 ? punches[1] : null;
+                }
+                else {
+                    checkIn = punches[0];
+                }
+                const checkOut = night || punches.length === 1 ? null : punches[punches.length - 1];
+                console.log(`   ▶️  checkIn=${(_a = checkIn === null || checkIn === void 0 ? void 0 : checkIn.toISOString()) !== null && _a !== void 0 ? _a : 'null'}, checkOut=${(_b = checkOut === null || checkOut === void 0 ? void 0 : checkOut.toISOString()) !== null && _b !== void 0 ? _b : 'null'}`);
+                let finalStatus = checkIn ? 'Present' : 'Absent';
+                if (checkIn && checkOut && !night && !wasNightYesterday) {
+                    const workedMin = diffMinutes(checkIn, checkOut);
+                    console.log(`   ⏱️  Worked ${workedMin} min`);
+                    if (workedMin < 240) {
+                        const allowed = yield hasLeaveOrPermission(employee.id, day);
+                        finalStatus = allowed ? 'Present' : 'ON_HOLD';
+                        console.log(`   ⚠️  <240 min, leave/permission=${allowed} → status=${finalStatus}`);
+                    }
+                }
+                console.log(`   💾 Upserting attendance: status=${finalStatus}`);
+                const attendance = yield prisma.attendance.upsert({
+                    where: { employeeId_date: { employeeId: employee.id, date: day } },
+                    create: { employeeId: employee.id, date: day, checkIn, checkOut, status: finalStatus },
+                    update: { checkIn, checkOut, status: finalStatus },
+                });
+                console.log(`   ✅ Attendance upserted id=${attendance.id}`);
+                yield (0, comOff_service_1.generateCompOffIfEligible)(attendance);
+                if (finalStatus === 'Present') {
+                    yield autoCancelLeaveIfPresent(employee.id, day);
+                }
+                results.push({
+                    date: dayStr,
+                    status: finalStatus,
+                    checkIn: (_c = checkIn === null || checkIn === void 0 ? void 0 : checkIn.toISOString()) !== null && _c !== void 0 ? _c : null,
+                    checkOut: (_d = checkOut === null || checkOut === void 0 ? void 0 : checkOut.toISOString()) !== null && _d !== void 0 ? _d : null,
+                    punches: punches.length,
+                });
+            }
+            catch (err) {
+                console.log(`   ❌ ERROR on ${dayStr}:`, err.message);
+                results.push({ date: dayStr, status: 'ERROR', error: err.message });
+            }
+        }
+        console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+        console.log(`✅ [BACKFILL] Completed. Processed ${results.length} days`);
+        console.log(`   Status summary:`, results.reduce((acc, r) => {
+            var _a;
+            acc[r.status] = ((_a = acc[r.status]) !== null && _a !== void 0 ? _a : 0) + 1;
+            return acc;
+        }, {}));
+        console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+        return {
+            employeeId: employee.id,
+            employeeCode: employee.employeeCode,
+            employeeName: `${employee.firstName} ${employee.lastName}`,
+            totalDays: results.length,
+            days: results,
+        };
     });
 }
 function notifyHRShiftSummary() {
@@ -628,4 +937,273 @@ function notifyHRShiftSummary() {
             });
         }
     });
+}
+/* ---------------------------------
+   AUTO-CANCEL LEAVE IF PRESENT
+---------------------------------- */
+function autoCancelLeaveIfPresent(employeeId, date) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const targetDate = startOfDay(date);
+            const dayEnd = new Date(targetDate);
+            dayEnd.setHours(23, 59, 59, 999);
+            // ── 1. Cancel PENDING leave (no balance was deducted) ──────────
+            const pendingLeave = yield prisma.leaveRequest.findFirst({
+                where: {
+                    employeeId,
+                    status: 'PENDING',
+                    startDate: { lte: dayEnd },
+                    endDate: { gte: targetDate },
+                },
+                include: {
+                    employee: {
+                        select: {
+                            firstName: true, lastName: true, employeeCode: true,
+                            inchargeId: true, reportingManager: true, departmentId: true,
+                        },
+                    },
+                    leaveType: { select: { name: true } },
+                },
+            });
+            if (pendingLeave) {
+                const isSingle = isSameDay(pendingLeave.startDate, pendingLeave.endDate);
+                if (isSingle) {
+                    yield prisma.leaveRequest.update({
+                        where: { id: pendingLeave.id },
+                        data: {
+                            status: 'CANCELLED',
+                            cancelledAt: new Date(),
+                            cancellationReason: 'Auto-cancelled: Employee marked Present via biometric (pending leave)',
+                        },
+                    });
+                }
+                else {
+                    // For multi-day pending leave, just cancel — no split needed since not approved
+                    yield prisma.leaveRequest.update({
+                        where: { id: pendingLeave.id },
+                        data: {
+                            status: 'CANCELLED',
+                            cancelledAt: new Date(),
+                            cancellationReason: 'Auto-cancelled: Employee marked Present via biometric on one of the leave days',
+                        },
+                    });
+                }
+                const empName = `${pendingLeave.employee.firstName} ${pendingLeave.employee.lastName}`;
+                const leaveInfo = `${pendingLeave.leaveType.name} leave (${fmtDate(pendingLeave.startDate)} to ${fmtDate(pendingLeave.endDate)})`;
+                const message = `${empName}'s pending ${leaveInfo} has been auto-cancelled as they were marked Present on ${fmtDate(date)}.`;
+                yield (0, notifications_controller_1.createNotification)(employeeId, `Your pending ${leaveInfo} has been auto-cancelled as you were marked Present on ${fmtDate(date)}.`);
+                if (pendingLeave.employee.inchargeId)
+                    yield (0, notifications_controller_1.createNotification)(pendingLeave.employee.inchargeId, message);
+                if (pendingLeave.employee.reportingManager)
+                    yield (0, notifications_controller_1.createNotification)(pendingLeave.employee.reportingManager, message);
+                const hrEmployees = yield prisma.employee.findMany({
+                    where: { departmentId: 1, employmentStatus: 'ACTIVE' },
+                    select: { id: true },
+                });
+                for (const hr of hrEmployees) {
+                    if (hr.id !== employeeId && hr.id !== pendingLeave.employee.inchargeId && hr.id !== pendingLeave.employee.reportingManager) {
+                        yield (0, notifications_controller_1.createNotification)(hr.id, message);
+                    }
+                }
+                console.log(`✅ Auto-cancelled PENDING leave #${pendingLeave.id} for ${empName}`);
+                return; // Done — no need to check approved leave
+            }
+            // ── 2. Cancel APPROVED leave (balance restore needed) ────────
+            const leave = yield prisma.leaveRequest.findFirst({
+                where: {
+                    employeeId,
+                    status: 'APPROVED',
+                    startDate: { lte: dayEnd },
+                    endDate: { gte: targetDate },
+                },
+                include: {
+                    employee: {
+                        select: {
+                            firstName: true, lastName: true, employeeCode: true,
+                            inchargeId: true, reportingManager: true, departmentId: true,
+                        },
+                    },
+                    leaveType: { select: { name: true } },
+                },
+            });
+            if (!leave)
+                return;
+            const year = getFinancialYear(targetDate);
+            const month = targetDate.getMonth() + 1;
+            const isSingle = isSameDay(leave.startDate, leave.endDate);
+            const isHalfDay = leave.isHalfDay && isSingle;
+            const isCO = leave.leaveType.name === 'CO';
+            const isRH = leave.leaveType.name === 'RH';
+            const isFirstDay = isSameDay(targetDate, leave.startDate);
+            const isLastDay = isSameDay(targetDate, leave.endDate);
+            yield prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
+                var _a;
+                // ── Cancel / shrink / split the leave ──────────────────────────
+                if (isSingle) {
+                    yield tx.leaveRequest.update({
+                        where: { id: leave.id },
+                        data: {
+                            status: 'CANCELLED',
+                            cancelledAt: new Date(),
+                            cancellationReason: 'Auto-cancelled: Employee marked Present via biometric',
+                        },
+                    });
+                }
+                else if (isFirstDay) {
+                    yield tx.leaveRequest.update({
+                        where: { id: leave.id },
+                        data: { startDate: addDays(targetDate, 1) },
+                    });
+                }
+                else if (isLastDay) {
+                    yield tx.leaveRequest.update({
+                        where: { id: leave.id },
+                        data: { endDate: addDays(targetDate, -1) },
+                    });
+                }
+                else {
+                    // Split: original ends day before, new starts day after
+                    yield tx.leaveRequest.update({
+                        where: { id: leave.id },
+                        data: { endDate: addDays(targetDate, -1) },
+                    });
+                    yield tx.leaveRequest.create({
+                        data: {
+                            employeeId: leave.employeeId,
+                            leaveTypeId: leave.leaveTypeId,
+                            startDate: addDays(targetDate, 1),
+                            endDate: leave.endDate,
+                            reason: `${leave.reason} [split due to biometric present on ${fmtDate(date)}]`,
+                            status: 'APPROVED',
+                            approvedBy: leave.approvedBy,
+                            isHalfDay: false,
+                            hodDecision: leave.hodDecision,
+                            hodDecidedAt: leave.hodDecidedAt,
+                            hrDecision: leave.hrDecision,
+                            hrDecidedAt: leave.hrDecidedAt,
+                            inChargeDecision: leave.inChargeDecision,
+                            inChargeDecidedAt: leave.inChargeDecidedAt,
+                        },
+                    });
+                }
+                // ── Restore balance (non-CO, non-RH) ──────────────────────────
+                if (!isCO && !isRH) {
+                    let daysRestored = isHalfDay ? 0.5 : 1;
+                    // Check actual debit from ledger for single-day leaves
+                    if (isSingle) {
+                        const originalDebit = yield tx.leaveLedger.findFirst({
+                            where: {
+                                employeeId,
+                                leaveTypeId: leave.leaveTypeId,
+                                referenceId: leave.id,
+                                action: 'DEBIT',
+                            },
+                            orderBy: { id: 'asc' },
+                        });
+                        if (originalDebit)
+                            daysRestored = Number(originalDebit.debit);
+                    }
+                    const balance = yield tx.employeeLeaveBalance.findFirst({
+                        where: { employeeId, leaveTypeId: leave.leaveTypeId, year },
+                    });
+                    if (balance) {
+                        // Restore balance
+                        if (isHalfDay) {
+                            yield tx.employeeLeaveBalance.update({
+                                where: { id: balance.id },
+                                data: { halfDayUsed: { decrement: 1 } },
+                            });
+                        }
+                        else {
+                            yield tx.employeeLeaveBalance.update({
+                                where: { id: balance.id },
+                                data: { used: { decrement: 1 } },
+                            });
+                        }
+                        // Get current ledger balance and insert CANCELLATION entry
+                        const lastLedger = yield tx.leaveLedger.findFirst({
+                            where: { employeeId, leaveTypeId: leave.leaveTypeId, year },
+                            orderBy: { id: 'desc' },
+                            select: { balanceAfter: true },
+                        });
+                        const currentBalance = (_a = lastLedger === null || lastLedger === void 0 ? void 0 : lastLedger.balanceAfter) !== null && _a !== void 0 ? _a : 0;
+                        yield tx.leaveLedger.create({
+                            data: {
+                                employeeId,
+                                leaveTypeId: leave.leaveTypeId,
+                                year,
+                                month,
+                                credit: daysRestored,
+                                debit: 0,
+                                balanceAfter: currentBalance + daysRestored,
+                                action: 'CANCELLATION',
+                                referenceType: 'LEAVE_REQUEST',
+                                referenceId: leave.id,
+                                source: 'SYSTEM',
+                                remarks: `Auto-cancelled: Present via biometric on ${fmtDate(date)}`,
+                            },
+                        });
+                    }
+                }
+                // ── CO leave: restore comp-off credit ──────────────────────────
+                if (isCO) {
+                    const usedCredit = yield tx.compOffCredit.findFirst({
+                        where: { leaveId: leave.id, used: true },
+                    });
+                    if (usedCredit) {
+                        yield tx.compOffCredit.update({
+                            where: { id: usedCredit.id },
+                            data: { used: false, usedOn: null, leaveId: null },
+                        });
+                    }
+                }
+            }), { timeout: 15000 });
+            // ── Notifications ────────────────────────────────────────────────
+            const empName = `${leave.employee.firstName} ${leave.employee.lastName}`;
+            const leaveInfo = `${leave.leaveType.name} leave (${fmtDate(leave.startDate)} to ${fmtDate(leave.endDate)})`;
+            const action = isSingle ? 'auto-cancelled' : 'adjusted';
+            const message = `${empName}'s ${leaveInfo} has been ${action} as they were marked Present on ${fmtDate(date)}. Balance restored.`;
+            // Notify employee
+            yield (0, notifications_controller_1.createNotification)(employeeId, `Your ${leaveInfo} has been ${action} as you were marked Present on ${fmtDate(date)}. Your leave balance has been restored.`);
+            // Notify incharge
+            if (leave.employee.inchargeId) {
+                yield (0, notifications_controller_1.createNotification)(leave.employee.inchargeId, message);
+            }
+            // Notify reporting manager
+            if (leave.employee.reportingManager) {
+                yield (0, notifications_controller_1.createNotification)(leave.employee.reportingManager, message);
+            }
+            // Notify HR dept
+            const hrEmployees = yield prisma.employee.findMany({
+                where: { departmentId: 1, employmentStatus: 'ACTIVE' },
+                select: { id: true },
+            });
+            for (const hr of hrEmployees) {
+                if (hr.id !== employeeId && hr.id !== leave.employee.inchargeId && hr.id !== leave.employee.reportingManager) {
+                    yield (0, notifications_controller_1.createNotification)(hr.id, message);
+                }
+            }
+            console.log(`✅ Auto-cancelled leave #${leave.id} for ${empName} — balance restored`);
+        }
+        catch (err) {
+            console.error(`❌ Auto-cancel leave failed for emp ${employeeId}:`, err);
+        }
+    });
+}
+function isSameDay(a, b) {
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+function addDays(date, days) {
+    const d = startOfDay(new Date(date));
+    d.setDate(d.getDate() + days);
+    return d;
+}
+function getFinancialYear(date) {
+    const month = date.getMonth() + 1;
+    return month >= 4 ? date.getFullYear() : date.getFullYear() - 1;
+}
+function fmtDate(d) {
+    // Use IST offset (+5:30) to get correct Indian date
+    const ist = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
+    return ist.toISOString().split('T')[0];
 }

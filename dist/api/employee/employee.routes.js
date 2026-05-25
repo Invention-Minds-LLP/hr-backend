@@ -34,4 +34,12 @@ router.post("/employees/:employeeId/sabbatical", employee_controller_1.startSabb
 router.put("/sabbaticals/:id/extend", employee_controller_1.extendSabbatical);
 router.put("/sabbaticals/:id/end", employee_controller_1.endSabbatical);
 router.put("/sabbaticals/:id/terminate", employee_controller_1.terminateFromSabbatical);
+router.get("/:id/probation/history", authMiddleware_1.authenticateToken, employee_controller_1.getProbationHistory);
+// Employee audit log — per-employee history of every change made to their record.
+router.get("/:id/audit-log", authMiddleware_1.authenticateToken, employee_controller_1.getEmployeeAuditLog);
+// Org-wide audit query (e.g. all salary changes last month).
+router.get("/audit/query", authMiddleware_1.authenticateToken, employee_controller_1.queryAuditLog);
+router.post("/:id/probation/extend", authMiddleware_1.authenticateToken, employee_controller_1.extendProbation);
+router.post("/:id/probation/confirm", authMiddleware_1.authenticateToken, employee_controller_1.confirmProbation);
+router.post("/:id/probation/terminate", authMiddleware_1.authenticateToken, employee_controller_1.terminateProbation);
 exports.default = router;

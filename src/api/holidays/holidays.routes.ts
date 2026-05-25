@@ -6,8 +6,12 @@ import {
   updateHoliday,
   deleteHoliday
 } from "./holidays.controller";
+import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
+
+// All holiday endpoints require a valid login.
+router.use(authenticateToken);
 
 /** Holiday Calendar */
 router.post("/calendar", createHolidayCalendar);

@@ -1,0 +1,13 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const incentive_controller_1 = require("./incentive.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const router = (0, express_1.Router)();
+router.get("/", authMiddleware_1.authenticateToken, incentive_controller_1.getIncentives);
+router.get("/team", authMiddleware_1.authenticateToken, incentive_controller_1.getTeamIncentives);
+router.post("/", authMiddleware_1.authenticateToken, incentive_controller_1.createIncentive);
+router.post("/request", authMiddleware_1.authenticateToken, incentive_controller_1.requestIncentive);
+router.put("/:id", authMiddleware_1.authenticateToken, incentive_controller_1.updateIncentive);
+router.delete("/:id", authMiddleware_1.authenticateToken, incentive_controller_1.deleteIncentive);
+exports.default = router;

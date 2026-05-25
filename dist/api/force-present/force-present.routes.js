@@ -1,0 +1,10 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const force_present_controller_1 = require("./force-present.controller");
+const router = (0, express_1.Router)();
+router.post("/", authMiddleware_1.authenticateToken, force_present_controller_1.markForcePresent);
+router.get("/", authMiddleware_1.authenticateToken, force_present_controller_1.getForcePresentList);
+router.get("/preview", authMiddleware_1.authenticateToken, force_present_controller_1.getApprovedLeavesOnDate);
+exports.default = router;

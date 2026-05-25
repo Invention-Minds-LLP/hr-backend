@@ -81,7 +81,7 @@ const createUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
 exports.createUser = createUser;
 // LOGIN USER
 const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a;
+    var _a, _b, _c, _d;
     console.log("Login attempt:", req.body);
     const ipAddress = getClientIp(req);
     const userAgent = req.headers["user-agent"] || undefined;
@@ -99,11 +99,17 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
                 photoUrl: true,
                 designation: true,
                 roleId: true,
-                gender: true
+                gender: true,
+                employmentStatus: true,
+                role: { select: { name: true } },
+                Department: { select: { name: true } }
             }
         });
         if (!employee)
             return res.status(404).json({ error: "Employee not found" });
+        if (employee.employmentStatus !== "ACTIVE" && employee.employmentStatus !== "NOTICE_PERIOD") {
+            return res.status(403).json({ error: "Your account is inactive. Please contact HR." });
+        }
         if (!user)
             return res.status(404).json({ error: "User not found" });
         const validPassword = yield bcryptjs_1.default.compare(password, user.passwordHash);
@@ -112,10 +118,12 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
         }).catch(() => { });
         if (!validPassword)
             return res.status(401).json({ error: "Invalid password" });
+        // Use role from Employee table (source of truth), not User table
+        const roleName = (_b = (_a = employee.role) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : user.role;
         // Generate JWT
         const payload = {
             userId: user.id,
-            role: user.role,
+            role: roleName,
             empId: employee.id,
             deptId: employee.departmentId,
             employeeCode: user.employeeCode,
@@ -134,10 +142,11 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
             username: user.username,
             employeeCode: user.employeeCode,
             id: user.id,
-            role: user.role,
+            role: roleName,
             empId: employee.id,
             deptId: employee.departmentId,
-            designation: ((_a = employee === null || employee === void 0 ? void 0 : employee.designation) === null || _a === void 0 ? void 0 : _a.name) || '',
+            departmentName: ((_c = employee.Department) === null || _c === void 0 ? void 0 : _c.name) || '',
+            designation: ((_d = employee === null || employee === void 0 ? void 0 : employee.designation) === null || _d === void 0 ? void 0 : _d.name) || '',
             photoUrl: employee.photoUrl || null,
             roleId: employee.roleId,
             gender: employee.gender

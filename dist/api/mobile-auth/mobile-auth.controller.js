@@ -20,14 +20,18 @@ const crypto_1 = __importDefault(require("crypto"));
 const sms_controller_1 = require("../sms/sms.controller");
 const sendEmailOtp_1 = require("../../utils/sendEmailOtp");
 const mobilePhoneInit = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a;
+    var _a, _b, _c, _d, _e;
     const { phone } = req.body;
     // ✅ PLAY STORE REVIEW AUTO LOGIN
     if (process.env.PLAY_REVIEW_MODE === 'true' &&
         phone === process.env.PLAY_REVIEW_PHONE) {
         const employee = yield prisma_1.prisma.employee.findFirst({
             where: { phone },
-            include: { designation: true }
+            include: {
+                designation: true,
+                role: { select: { name: true } },
+                Branch: { select: { attendanceMode: true } }
+            }
         });
         if (!employee) {
             return res.status(404).json({ message: 'Review employee not found' });
@@ -39,10 +43,11 @@ const mobilePhoneInit = (req, res) => __awaiter(void 0, void 0, void 0, function
             return res.status(404).json({ message: 'Review user not found' });
         }
         // 🔐 Generate tokens directly
+        const empRoleName = (_b = (_a = employee.role) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : user.role;
         const accessToken = jsonwebtoken_1.default.sign({
             userId: user.id,
             empId: employee.id,
-            role: user.role,
+            role: empRoleName,
             reviewMode: true
         }, process.env.JWT_SECRET, { expiresIn: '1h' });
         const refreshToken = crypto_1.default.randomUUID();
@@ -63,13 +68,14 @@ const mobilePhoneInit = (req, res) => __awaiter(void 0, void 0, void 0, function
             username: user.username,
             employeeCode: user.employeeCode,
             id: user.id,
-            role: user.role,
+            role: empRoleName,
             // employee info
             empId: employee.id,
             deptId: employee.departmentId,
-            designation: ((_a = employee.designation) === null || _a === void 0 ? void 0 : _a.name) || '',
+            designation: ((_c = employee.designation) === null || _c === void 0 ? void 0 : _c.name) || '',
             photoUrl: employee.photoUrl || null,
-            roleId: employee.roleId
+            roleId: employee.roleId,
+            attendanceMode: (_e = (_d = employee.Branch) === null || _d === void 0 ? void 0 : _d.attendanceMode) !== null && _e !== void 0 ? _e : 'MOBILE'
         });
     }
     const employee = yield prisma_1.prisma.employee.findFirst({ where: { phone } });
@@ -173,6 +179,7 @@ const mobileEmailInit = (req, res) => __awaiter(void 0, void 0, void 0, function
     if (!session) {
         return res.status(401).json({ message: 'Session not found' });
     }
+    console.log('Email OTP init for session:', sessionId, 'Employee:', session.employee, 'Provided email:', email);
     if ((session === null || session === void 0 ? void 0 : session.employee.email) !== email) {
         return res.status(401).json({ message: 'Email mismatch' });
     }
@@ -204,14 +211,15 @@ const mobileEmailVerify = (req, res) => __awaiter(void 0, void 0, void 0, functi
 });
 exports.mobileEmailVerify = mobileEmailVerify;
 const mobileFinalizeLogin = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a;
+    var _a, _b, _c, _d;
     const { sessionId, employeeCode, bloodGroup } = req.body;
     const session = yield prisma_1.prisma.mobileAuthSession.findUnique({
         where: { id: sessionId },
         include: {
             employee: {
                 include: {
-                    designation: true
+                    designation: true,
+                    Branch: { select: { attendanceMode: true } }
                 }
             }
         }
@@ -226,10 +234,13 @@ const mobileFinalizeLogin = (req, res) => __awaiter(void 0, void 0, void 0, func
     const user = yield prisma_1.prisma.user.findUnique({
         where: { employeeCode }
     });
+    // Get role from Employee table
+    const empRole = yield prisma_1.prisma.role.findUnique({ where: { id: employee.roleId }, select: { name: true } });
+    const roleName = (_a = empRole === null || empRole === void 0 ? void 0 : empRole.name) !== null && _a !== void 0 ? _a : user.role;
     const accessToken = jsonwebtoken_1.default.sign({
         userId: user.id,
         empId: employee.id,
-        role: user.role
+        role: roleName
     }, process.env.JWT_SECRET, { expiresIn: '15m' });
     const refreshToken = crypto_1.default.randomUUID();
     yield prisma_1.prisma.refreshToken.create({
@@ -247,17 +258,20 @@ const mobileFinalizeLogin = (req, res) => __awaiter(void 0, void 0, void 0, func
         username: user.username,
         employeeCode: user.employeeCode,
         id: user.id,
-        role: user.role,
+        role: roleName,
         // employee details
         empId: employee.id,
         deptId: employee.departmentId,
-        designation: ((_a = employee.designation) === null || _a === void 0 ? void 0 : _a.name) || '',
+        designation: ((_b = employee.designation) === null || _b === void 0 ? void 0 : _b.name) || '',
         photoUrl: employee.photoUrl || null,
-        roleId: employee.roleId
+        roleId: employee.roleId,
+        gender: employee.gender || '',
+        attendanceMode: (_d = (_c = employee.Branch) === null || _c === void 0 ? void 0 : _c.attendanceMode) !== null && _d !== void 0 ? _d : 'MOBILE'
     });
 });
 exports.mobileFinalizeLogin = mobileFinalizeLogin;
 const refreshAccessToken = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     const { refreshToken } = req.body;
     const stored = yield prisma_1.prisma.refreshToken.findUnique({
         where: { token: refreshToken },
@@ -267,14 +281,15 @@ const refreshAccessToken = (req, res) => __awaiter(void 0, void 0, void 0, funct
         return res.status(401).json({ message: 'Invalid refresh token' });
     }
     const employee = yield prisma_1.prisma.employee.findFirst({
-        where: { employeeCode: stored.user.employeeCode }
+        where: { employeeCode: stored.user.employeeCode },
+        include: { role: { select: { name: true } } }
     });
     if (!employee) {
         return res.status(404).json({ message: 'Employee not found' });
     }
     const accessToken = jsonwebtoken_1.default.sign({
         userId: stored.user.id,
-        role: stored.user.role,
+        role: (_b = (_a = employee.role) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : stored.user.role,
         empId: employee.id,
     }, process.env.JWT_SECRET, { expiresIn: '12h' });
     res.json({ accessToken });

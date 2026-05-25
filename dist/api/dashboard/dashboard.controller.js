@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -9,11 +42,13 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.assignDelegate = exports.escalateClearances = exports.reassignReviewer = exports.nudgePanel = exports.createRenewalTickets = exports.notifyExpiringDocs = exports.extendProbation = exports.requestProbationFeedback = exports.bulkRejectApprovals = exports.bulkApproveApprovals = exports.markUnmarkedException = exports.messageUnmarked = exports.DashboardController = void 0;
+exports.getAttendanceByShift = exports.assignDelegate = exports.escalateClearances = exports.reassignReviewer = exports.nudgePanel = exports.createRenewalTickets = exports.notifyExpiringDocs = exports.extendProbation = exports.requestProbationFeedback = exports.bulkRejectApprovals = exports.bulkApproveApprovals = exports.markUnmarkedException = exports.messageUnmarked = exports.DashboardController = void 0;
 exports.listPendingClearances = listPendingClearances;
 const client_1 = require("@prisma/client");
 const date_fns_1 = require("date-fns");
 const date_fns_2 = require("date-fns");
+const notifications_controller_1 = require("../notifications/notifications.controller");
+const ExcelJS = __importStar(require("exceljs"));
 const prisma = new client_1.PrismaClient();
 const IST = 'Asia/Kolkata';
 function parseAud(audience) {
@@ -77,10 +112,51 @@ function combineDateAndTime(baseDate, timeTemplate) {
     return dt;
 }
 function fmtDate(d) {
-    return d ? d.toLocaleDateString('en-IN', { timeZone: IST, day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+    if (!d)
+        return '—';
+    return d.toLocaleDateString('en-IN', { timeZone: IST, day: '2-digit', month: '2-digit', year: 'numeric' }).replace(/\//g, '-');
 }
 function fmtTime(d) {
     return d ? d.toLocaleTimeString('en-IN', { timeZone: IST, hour: '2-digit', minute: '2-digit' }) : '—';
+}
+function getMandatoryDocsForEmployee(emp) {
+    const mandatoryDocs = [];
+    const employeeType = emp.employeeType;
+    const experienceType = (emp.experienceType || '').toUpperCase();
+    const isFresher = experienceType === 'FRESHER';
+    if (!isFresher) {
+        if (employeeType === 'CLINICAL') {
+            mandatoryDocs.push('REGISTRATION_CERT');
+        }
+        else if (employeeType === 'NONCLINICAL') {
+            mandatoryDocs.push('SALARY_CERT', 'VERIFICATION_CERT');
+        }
+    }
+    mandatoryDocs.push('AADHAAR', 'PAN', 'BANK');
+    (emp.qualifications || []).forEach((q) => {
+        switch ((q.degree || '').toUpperCase()) {
+            case 'SSLC':
+                mandatoryDocs.push('SSLC');
+                break;
+            case 'PU':
+                mandatoryDocs.push('PU');
+                break;
+            case 'DIPLOMA':
+                mandatoryDocs.push('DIPLOMA');
+                break;
+            case 'BACHELOR':
+            case 'MASTER':
+            case 'PHD':
+                mandatoryDocs.push('DEGREE');
+                break;
+        }
+    });
+    return [...new Set(mandatoryDocs)];
+}
+function getMissingMandatoryDocs(emp) {
+    const requiredDocs = getMandatoryDocsForEmployee(emp);
+    const uploadedDocTypes = (emp.documents || []).map((d) => (d.title || '').toUpperCase());
+    return requiredDocs.filter(doc => !uploadedDocTypes.includes(doc));
 }
 // type List = { title: string; cols: string[]; rows: ListRow[]; actions?: string[] };
 class DashboardController {
@@ -88,6 +164,7 @@ class DashboardController {
         // ========== PUBLIC HANDLERS ==========
         /** GET /api/dashboard?location=ALL&department=ALL */
         this.getDashboard = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
+            var _a, _b;
             const { location = 'ALL', department = 'ALL', branchId, departmentId } = (req.query || {});
             const todayStart = startOfDayIST();
             const todayEnd = endOfDayIST();
@@ -784,16 +861,22 @@ class DashboardController {
                         where: { id: { in: employeeIds } },
                         select: {
                             id: true,
+                            employeeType: true,
+                            experienceType: true,
                             documents: {
                                 select: { title: true }
+                            },
+                            qualifications: {
+                                select: { degree: true }
                             }
                         },
                     });
                     const mandatoryDocs = ['AADHAAR', 'PAN', 'BANK'];
-                    return allEmp.filter(emp => {
-                        const docTitles = emp.documents.map(d => { var _a; return (_a = d.title) === null || _a === void 0 ? void 0 : _a.toUpperCase(); });
-                        return mandatoryDocs.some(req => !docTitles.includes(req));
+                    const missingDocs = allEmp.filter(emp => {
+                        const missing = getMissingMandatoryDocs(emp);
+                        return missing.length > 0;
                     }).length;
+                    return missingDocs;
                 }))(),
             ]);
             // ---- Security & Access
@@ -821,9 +904,9 @@ class DashboardController {
                     modal: 'ahc',
                 }
             ];
-            // now add OT pending
+            // now add OT pending (HR sees only manager-approved records)
             const otPending = yield prisma.overtimeApproval.count({
-                where: { status: 'PENDING', date: yesterdayStart }
+                where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart, minutes: { gt: 60 } }
             });
             attention.push({
                 label: 'Overtime approvals pending (yesterday)',
@@ -831,6 +914,25 @@ class DashboardController {
                 severity: otPending ? 'warn' : 'good',
                 modal: 'otPending',
             });
+            // Manager sees OT pending their own approval
+            const userRoleId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.roleId;
+            const userEmpId = (_b = req.user) === null || _b === void 0 ? void 0 : _b.empId;
+            if (userRoleId === 3 && userEmpId) {
+                const managerOtPending = yield prisma.overtimeApproval.count({
+                    where: {
+                        managerStatus: 'PENDING',
+                        date: yesterdayStart,
+                        minutes: { gt: 60 },
+                        employee: { reportingManager: userEmpId },
+                    },
+                });
+                attention.push({
+                    label: 'OT pending your approval (yesterday)',
+                    count: managerOtPending,
+                    severity: managerOtPending ? 'warn' : 'good',
+                    modal: 'managerOtPending',
+                });
+            }
             res.json({
                 today: {
                     leaves: leavesToday,
@@ -886,9 +988,45 @@ class DashboardController {
                 lists,
             });
         }));
+        this.downloadMissingDocs = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
+            const employees = yield prisma.employee.findMany({
+                where: { employmentStatus: 'ACTIVE' },
+                include: {
+                    documents: true,
+                    qualifications: true,
+                },
+            });
+            const rows = employees
+                .map(emp => {
+                const missing = getMissingMandatoryDocs(emp);
+                return {
+                    employeeName: `${emp.firstName} ${emp.lastName}`,
+                    employeeCode: emp.employeeCode,
+                    employeeType: emp.employeeType,
+                    experienceType: emp.experienceType || '-',
+                    missingDocs: missing.join(', '),
+                };
+            })
+                .filter(row => row.missingDocs.length > 0);
+            // Create Excel
+            const workbook = new ExcelJS.Workbook();
+            const sheet = workbook.addWorksheet('Missing Documents');
+            sheet.columns = [
+                { header: 'Employee Name', key: 'employeeName', width: 25 },
+                { header: 'Employee Code', key: 'employeeCode', width: 20 },
+                { header: 'Employee Type', key: 'employeeType', width: 15 },
+                { header: 'Experience Type', key: 'experienceType', width: 20 },
+                { header: 'Missing Documents', key: 'missingDocs', width: 40 },
+            ];
+            sheet.addRows(rows);
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.setHeader('Content-Disposition', 'attachment; filename=missing_documents.xlsx');
+            yield workbook.xlsx.write(res);
+            res.end();
+        }));
         /** GET /api/dashboard/list?key=unmarked|approvals|probation|docs|feedback|clearances */
         this.getList = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
-            var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p;
+            var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q;
             const { key, id, departmentId } = (req.query || {});
             if (!key)
                 return res.status(400).json({ error: 'Missing query param: key' });
@@ -1569,7 +1707,7 @@ class DashboardController {
                         `${o.employee.firstName} ${o.employee.lastName}`,
                         o.employee.employeeCode || '—',
                         ((_a = o.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
-                        o.employee.employeeType === 'CLINICAL' ? 'Clinical' : 'Non-clinical',
+                        o.employee.employeeType,
                         fmtTime(o.scheduledEnd),
                         fmtTime(o.checkOut),
                         `${Math.floor(o.minutes / 60)}h ${o.minutes % 60}m`,
@@ -1676,7 +1814,7 @@ class DashboardController {
             }
             if (key === 'otPending') {
                 const items = yield prisma.overtimeApproval.findMany({
-                    where: { status: 'PENDING', date: yesterdayStart },
+                    where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart, minutes: { gt: 60 } },
                     include: {
                         employee: { select: { firstName: true, lastName: true, employeeCode: true, Department: { select: { name: true } } } }
                     }
@@ -1704,8 +1842,39 @@ class DashboardController {
                     selectable: true
                 });
             }
+            if (key === 'managerOtPending') {
+                const userEmpId = (_p = req.user) === null || _p === void 0 ? void 0 : _p.empId;
+                const items = yield prisma.overtimeApproval.findMany({
+                    where: Object.assign({ managerStatus: 'PENDING', date: yesterdayStart, minutes: { gt: 60 } }, (userEmpId ? { employee: { reportingManager: userEmpId } } : {})),
+                    include: {
+                        employee: { select: { firstName: true, lastName: true, employeeCode: true, Department: { select: { name: true } } } }
+                    }
+                });
+                const rows = items.map(o => {
+                    var _a;
+                    return ({
+                        id: o.id,
+                        data: [
+                            `${o.employee.firstName} ${o.employee.lastName}`,
+                            o.employee.employeeCode || '—',
+                            ((_a = o.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
+                            fmtTime(o.scheduledEnd),
+                            fmtTime(o.checkOut),
+                            `${Math.floor(o.minutes / 60)}h ${o.minutes % 60}m`,
+                            'PENDING',
+                        ]
+                    });
+                });
+                return res.json({
+                    title: 'OT Pending Your Approval (Yesterday)',
+                    cols: ['Employee', 'EMP ID', 'Dept', 'Sched End', 'Checked Out', 'OT Duration', 'Status'],
+                    rows,
+                    actions: ['Approve selected', 'Reject selected'],
+                    selectable: true
+                });
+            }
             // fallback to your existing attention lists
-            return res.json((_p = base[key]) !== null && _p !== void 0 ? _p : { title: 'Not found', cols: [], rows: [] });
+            return res.json((_q = base[key]) !== null && _q !== void 0 ? _q : { title: 'Not found', cols: [], rows: [] });
             // return res.json(all[key] ?? { title: 'Not found', cols: [], rows: [] });
         }));
         /** GET /api/dashboard/recruiting (salary rejects, yet-to-receive-offer, no-shows) */
@@ -1733,13 +1902,136 @@ class DashboardController {
                 return res.status(400).json({ error: 'No OT IDs provided' });
             }
             const updated = yield prisma.overtimeApproval.updateMany({
-                where: { id: { in: ids }, status: 'PENDING' },
+                where: { id: { in: ids }, status: 'PENDING', managerStatus: 'APPROVED' },
                 data: {
                     status: action,
                     approvedAt: new Date(),
                 },
             });
             res.json({ ok: true, updated: updated.count });
+        }));
+        this.getManagerOtPending = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            const userEmpId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId;
+            const items = yield prisma.overtimeApproval.findMany({
+                where: Object.assign({ managerStatus: 'PENDING', minutes: { gt: 60 } }, (userEmpId ? { employee: { reportingManager: userEmpId } } : {})),
+                include: {
+                    employee: {
+                        select: {
+                            firstName: true,
+                            lastName: true,
+                            employeeCode: true,
+                            Department: { select: { name: true } },
+                        }
+                    }
+                },
+                orderBy: { date: 'desc' },
+            });
+            const rows = items.map(o => {
+                var _a;
+                return ({
+                    id: o.id,
+                    employeeName: `${o.employee.firstName} ${o.employee.lastName}`,
+                    employeeCode: o.employee.employeeCode || '—',
+                    department: ((_a = o.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
+                    date: o.date,
+                    scheduledEnd: o.scheduledEnd,
+                    checkOut: o.checkOut,
+                    minutes: o.minutes,
+                    managerStatus: o.managerStatus,
+                });
+            });
+            res.json(rows);
+        }));
+        this.getHROtPending = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
+            const items = yield prisma.overtimeApproval.findMany({
+                where: {
+                    managerStatus: 'APPROVED',
+                    status: 'PENDING',
+                    minutes: { gt: 60 },
+                },
+                include: {
+                    employee: {
+                        select: {
+                            firstName: true,
+                            lastName: true,
+                            employeeCode: true,
+                            Department: { select: { name: true } },
+                        }
+                    }
+                },
+                orderBy: { date: 'desc' },
+            });
+            const rows = items.map(o => {
+                var _a;
+                return ({
+                    id: o.id,
+                    employeeName: `${o.employee.firstName} ${o.employee.lastName}`,
+                    employeeCode: o.employee.employeeCode || '—',
+                    department: ((_a = o.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
+                    date: o.date,
+                    scheduledEnd: o.scheduledEnd,
+                    checkOut: o.checkOut,
+                    minutes: o.minutes,
+                    managerStatus: o.managerStatus,
+                });
+            });
+            res.json(rows);
+        }));
+        this.getMyApprovedOT = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            const empId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId;
+            if (!empId)
+                return res.status(401).json({ error: 'Unauthorized' });
+            const items = yield prisma.overtimeApproval.findMany({
+                where: {
+                    employeeId: Number(empId),
+                    status: 'APPROVE',
+                },
+                orderBy: { date: 'desc' },
+            });
+            const rows = items.map((o) => ({
+                id: o.id,
+                date: o.date,
+                scheduledEnd: o.scheduledEnd,
+                checkOut: o.checkOut,
+                minutes: o.minutes,
+                approvedAt: o.approvedAt,
+            }));
+            res.json(rows);
+        }));
+        this.approveOrRejectOTManager = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            const { ids, action } = req.body;
+            const userEmpId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId;
+            if (!(ids === null || ids === void 0 ? void 0 : ids.length)) {
+                return res.status(400).json({ error: 'No OT IDs provided' });
+            }
+            if (action === 'APPROVE') {
+                // Manager approves → move to HR queue (status stays PENDING, managerStatus = APPROVED)
+                const updated = yield prisma.overtimeApproval.updateMany({
+                    where: { id: { in: ids }, managerStatus: 'PENDING' },
+                    data: {
+                        managerStatus: 'APPROVED',
+                        managerApprovedAt: new Date(),
+                        managerId: userEmpId !== null && userEmpId !== void 0 ? userEmpId : null,
+                    },
+                });
+                return res.json({ ok: true, updated: updated.count });
+            }
+            else {
+                // Manager rejects → both statuses set to REJECTED
+                const updated = yield prisma.overtimeApproval.updateMany({
+                    where: { id: { in: ids }, managerStatus: 'PENDING' },
+                    data: {
+                        managerStatus: 'REJECTED',
+                        managerApprovedAt: new Date(),
+                        managerId: userEmpId !== null && userEmpId !== void 0 ? userEmpId : null,
+                        status: 'REJECTED',
+                    },
+                });
+                return res.json({ ok: true, updated: updated.count });
+            }
         }));
         /** POST /api/recruiting/backfill-from-resignation  { resignationId:number } */
         this.createBackfillFromResignation = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
@@ -2424,7 +2716,8 @@ class DashboardController {
                     id: true,
                 },
             });
-            const probRows = probRowsRaw.map((e, idx) => {
+            const probMgrMap = yield buildManagerNameMap(probRowsRaw.map(e => e.reportingManager));
+            const probRows = probRowsRaw.map((e) => {
                 var _a;
                 return ({
                     id: e.id,
@@ -2432,10 +2725,8 @@ class DashboardController {
                         `${e.firstName} ${e.lastName}`,
                         e.employeeCode || '—',
                         ((_a = e.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
-                        e.reportingManager ? `Mgr #${e.reportingManager}` : '—',
-                        e.probationEndDate
-                            ? e.probationEndDate.toLocaleDateString('en-IN', { timeZone: IST, month: 'short', day: '2-digit', year: 'numeric' })
-                            : '—',
+                        e.reportingManager ? (probMgrMap.get(e.reportingManager) || '—') : '—',
+                        fmtDate(e.probationEndDate),
                     ]
                 });
             });
@@ -2448,9 +2739,7 @@ class DashboardController {
                         d.employee.employeeCode || '—',
                         ((_a = d.employee.Department) === null || _a === void 0 ? void 0 : _a.name) || '—',
                         d.type || d.category,
-                        d.expiryDate
-                            ? d.expiryDate.toLocaleDateString('en-IN', { timeZone: IST, month: 'short', day: '2-digit', year: 'numeric' })
-                            : '—',
+                        fmtDate(d.expiryDate),
                         'Expiring',
                     ]
                 });
@@ -2464,17 +2753,18 @@ class DashboardController {
                     m.startTime.toLocaleTimeString('en-IN', { timeZone: IST, hour: '2-digit', minute: '2-digit' }),
                 ]
             }));
+            const verifierMgrMap = yield buildManagerNameMap(overdue.map(o => o.verifierId));
             const overRows = overdue.map((o, idx) => ({
                 id: idx + 1,
-                resignationId: o.resignationId, // for unique key
+                resignationId: o.resignationId,
                 data: [
                     o.employeeName,
                     o.employeeCode || '—',
                     o.deptName || '—',
                     o.type,
                     `${o.sinceDays} days`,
-                    o.verifierId ? `User #${o.verifierId}` : 'Unassigned',
-                    o.note || '—' // 👈 show note column
+                    o.verifierId ? (verifierMgrMap.get(o.verifierId) || '—') : 'Unassigned',
+                    o.note || '—'
                 ]
             }));
             return {
@@ -2727,10 +3017,10 @@ const messageUnmarked = (req, res) => __awaiter(void 0, void 0, void 0, function
     try {
         const { employeeIds, message } = req.body;
         // TODO: integrate with notification/email service
-        // console.log("Message to unmarked employees:", employeeIds, message);
-        // for (const empId of employeeIds) {
-        //     createNotification(empId,message)
-        // }
+        console.log("Message to unmarked employees:", employeeIds, message);
+        for (const empId of employeeIds) {
+            (0, notifications_controller_1.createNotification)(empId, message);
+        }
         res.json({ success: true, notified: employeeIds.length });
         return;
     }
@@ -2913,14 +3203,11 @@ const notifyExpiringDocs = (req, res) => __awaiter(void 0, void 0, void 0, funct
         });
         // create notifications
         yield prisma.notification.createMany({
-            data: docs.map((doc) => {
-                var _a;
-                return ({
-                    employeeId: doc.employeeId,
-                    message: `Your document "${doc.title}" is expiring on ${(_a = doc.expiryDate) === null || _a === void 0 ? void 0 : _a.toLocaleDateString()}.`,
-                    channel: "EMAIL",
-                });
-            }),
+            data: docs.map((doc) => ({
+                employeeId: doc.employeeId,
+                message: `Your document "${doc.title}" is expiring on ${fmtDate(doc.expiryDate)}.`,
+                channel: "EMAIL",
+            })),
         });
         console.log("Notified employees for expiring docs:", documentIds);
         return res.json({ success: true, notified: docs.length });
@@ -3028,16 +3315,16 @@ const nudgePanel = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
             return res.json({ success: true, nudged: 0 });
         }
         // 3️⃣ Send notifications
-        // await prisma.notification.createMany({
-        //   data: ids.map(id => ({
-        //     employeeId: id,
-        //     message: "Please submit interview feedback.",
-        //     channel: "PUSH" // or EMAIL/SMS depending on your system
-        //   }))
-        // });
-        // for (const id of ids) {
-        //     await createNotification(id, "Please submit interview feedback.");
-        // }
+        yield prisma.notification.createMany({
+            data: ids.map(id => ({
+                employeeId: id,
+                message: "Please submit interview feedback.",
+                channel: "PUSH" // or EMAIL/SMS depending on your system
+            }))
+        });
+        for (const id of ids) {
+            yield (0, notifications_controller_1.createNotification)(id, "Please submit interview feedback.");
+        }
         return res.json({ success: true, nudged: ids.length });
     }
     catch (err) {
@@ -3133,3 +3420,334 @@ const assignDelegate = (req, res) => __awaiter(void 0, void 0, void 0, function*
     }
 });
 exports.assignDelegate = assignDelegate;
+/* ════════════════════════════════════════════════════════════════════
+   ATTENDANCE BY SHIFT — for the management-dashboard stacked bar card
+   ────────────────────────────────────────────────────────────────────
+   Buckets ALL active employees by today's shift, then for each shift
+   counts: present, late (>15 min after start), earlyCheckout (left
+   before shift end), onLeave (approved leave/WFH/permission), absent
+   (no check-in, no excuse), unassigned (employee has no resolvable
+   shift today — HR data quality bucket).
+
+   Query params:
+     date              YYYY-MM-DD (defaults to today, IST)
+     compareDays=7     return prior N days summary per shift for trend
+     drilldown=1       include employee-level lists (names, deptId,
+                       check-in / check-out times, empId)
+   ════════════════════════════════════════════════════════════════════ */
+const getAttendanceByShift = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
+    try {
+        const dateParam = String((_a = req.query.date) !== null && _a !== void 0 ? _a : '').trim();
+        const compareDays = Math.min(30, Math.max(0, Number((_b = req.query.compareDays) !== null && _b !== void 0 ? _b : 7) || 0));
+        const drilldown = String((_c = req.query.drilldown) !== null && _c !== void 0 ? _c : '') === '1';
+        // Use the same IST day-window helpers the rest of this controller uses,
+        // so attendance / leave / shiftAssignment rows align with how they were
+        // saved (server-local IST, not UTC).
+        const anchor = dateParam ? new Date(`${dateParam}T00:00:00`) : new Date();
+        const dayStart = startOfDayIST(anchor);
+        const dayEnd = endOfDayIST(anchor);
+        const today = startOfDayIST();
+        const isToday = sameYMD(dayStart, today);
+        // ── 1. All active employees + their resolved shift for the day ─────
+        const [employees, assignments, shiftSettings, shiftTemplates] = yield Promise.all([
+            prisma.employee.findMany({
+                where: { employmentStatus: 'ACTIVE' },
+                select: {
+                    id: true, employeeCode: true, firstName: true, lastName: true,
+                    departmentId: true, shiftId: true,
+                    Department: { select: { id: true, name: true } },
+                },
+            }),
+            prisma.shiftAssignment.findMany({
+                where: { date: { gte: dayStart, lte: dayEnd } },
+                select: { employeeId: true, shiftId: true },
+            }),
+            prisma.employeeShiftSetting.findMany({
+                select: { employeeId: true, mode: true, fixedShiftId: true, rotationPatternId: true },
+            }).catch(() => []),
+            prisma.shiftTemplate.findMany({
+                select: { id: true, name: true, shiftType: true, startTime: true, endTime: true },
+            }),
+        ]);
+        const empIds = employees.map((e) => e.id);
+        // Resolution: ShiftAssignment → EmployeeShiftSetting.fixedShiftId → Employee.shiftId
+        // (Rotation resolution skipped — falls through to Employee.shiftId.)
+        const assignMap = new Map();
+        for (const a of assignments)
+            assignMap.set(a.employeeId, a.shiftId);
+        const settingMap = new Map();
+        for (const s of shiftSettings)
+            settingMap.set(s.employeeId, s);
+        const employeeShift = new Map();
+        for (const e of employees) {
+            let sid = (_d = assignMap.get(e.id)) !== null && _d !== void 0 ? _d : null;
+            if (!sid) {
+                const setting = settingMap.get(e.id);
+                if ((setting === null || setting === void 0 ? void 0 : setting.mode) === 'FIXED' && setting.fixedShiftId)
+                    sid = setting.fixedShiftId;
+            }
+            if (!sid)
+                sid = (_e = e.shiftId) !== null && _e !== void 0 ? _e : null;
+            employeeShift.set(e.id, sid);
+        }
+        // ── 2. Attendance + leave/wfh/permission for the day ───────────────
+        const [attendance, approvedLeave, approvedWFH, approvedPerm] = yield Promise.all([
+            prisma.attendance.findMany({
+                where: { employeeId: { in: empIds }, date: { gte: dayStart, lte: dayEnd } },
+                select: { employeeId: true, checkIn: true, checkOut: true, status: true },
+            }),
+            prisma.leaveRequest.findMany({
+                where: {
+                    employeeId: { in: empIds },
+                    status: { in: ['APPROVED'] },
+                    startDate: { lte: dayEnd },
+                    endDate: { gte: dayStart },
+                },
+                select: { employeeId: true },
+            }),
+            prisma.wFHRequest.findMany({
+                where: {
+                    employeeId: { in: empIds },
+                    status: { in: ['APPROVED'] },
+                    startDate: { lte: dayEnd },
+                    endDate: { gte: dayStart },
+                },
+                select: { employeeId: true },
+            }),
+            prisma.permissionRequest.findMany({
+                where: {
+                    employeeId: { in: empIds },
+                    status: { in: ['APPROVED'] },
+                    OR: [
+                        { day: { gte: dayStart, lte: dayEnd } },
+                        { startTime: { lte: dayEnd }, endTime: { gte: dayStart } },
+                    ],
+                },
+                select: { employeeId: true },
+            }),
+        ]);
+        const excused = new Set([
+            ...approvedLeave.map((x) => x.employeeId),
+            ...approvedWFH.map((x) => x.employeeId),
+            ...approvedPerm.map((x) => x.employeeId),
+        ]);
+        const attMap = new Map();
+        for (const a of attendance) {
+            attMap.set(a.employeeId, {
+                checkIn: a.checkIn ? new Date(a.checkIn) : null,
+                checkOut: a.checkOut ? new Date(a.checkOut) : null,
+            });
+        }
+        // ── 3. Bucket each employee under their shift ──────────────────────
+        const shiftMeta = new Map(shiftTemplates.map((s) => [s.id, s]));
+        const buckets = new Map();
+        const ensure = (shiftId) => {
+            var _a;
+            const key = shiftId !== null && shiftId !== void 0 ? shiftId : 'UNASSIGNED';
+            if (!buckets.has(key)) {
+                const meta = shiftId ? shiftMeta.get(shiftId) : null;
+                buckets.set(key, {
+                    shiftId,
+                    name: (_a = meta === null || meta === void 0 ? void 0 : meta.name) !== null && _a !== void 0 ? _a : 'Unassigned',
+                    startTime: meta ? toHHMM(meta.startTime) : null,
+                    endTime: meta ? toHHMM(meta.endTime) : null,
+                    assigned: 0, present: 0, late: 0, earlyCheckout: 0,
+                    onLeave: 0, absent: 0, attendancePct: 0,
+                    employees: [],
+                });
+            }
+            return buckets.get(key);
+        };
+        for (const e of employees) {
+            const sid = (_f = employeeShift.get(e.id)) !== null && _f !== void 0 ? _f : null;
+            const bucket = ensure(sid);
+            bucket.assigned++;
+            const meta = sid ? shiftMeta.get(sid) : null;
+            const att = attMap.get(e.id);
+            // Status precedence: leave > absent > present (with late/early flags)
+            let category = 'absent';
+            let lateBy = null;
+            let leftEarlyBy = null;
+            if (excused.has(e.id)) {
+                category = 'onLeave';
+                bucket.onLeave++;
+            }
+            else if (att === null || att === void 0 ? void 0 : att.checkIn) {
+                category = 'present';
+                bucket.present++;
+                if (meta) {
+                    const shiftStart = combineDateAndTime(dayStart, meta.startTime);
+                    const lateMs = att.checkIn.getTime() - shiftStart.getTime();
+                    const lateMinutes = Math.round(lateMs / 60000);
+                    if (lateMinutes > 15) {
+                        category = 'late';
+                        lateBy = lateMinutes;
+                        bucket.late++;
+                    }
+                    if (att.checkOut) {
+                        const shiftEnd = combineDateAndTime(dayStart, meta.endTime);
+                        const earlyMs = shiftEnd.getTime() - att.checkOut.getTime();
+                        const earlyMin = Math.round(earlyMs / 60000);
+                        if (earlyMin > 0) {
+                            // Track separately — also stays in present/late count
+                            leftEarlyBy = earlyMin;
+                            bucket.earlyCheckout++;
+                        }
+                    }
+                }
+            }
+            else {
+                bucket.absent++;
+            }
+            if (drilldown) {
+                bucket.employees.push({
+                    employeeId: e.id,
+                    employeeCode: e.employeeCode,
+                    name: `${(_g = e.firstName) !== null && _g !== void 0 ? _g : ''} ${(_h = e.lastName) !== null && _h !== void 0 ? _h : ''}`.trim(),
+                    departmentId: e.departmentId,
+                    departmentName: (_k = (_j = e.Department) === null || _j === void 0 ? void 0 : _j.name) !== null && _k !== void 0 ? _k : null,
+                    shiftId: sid,
+                    shiftName: (_l = meta === null || meta === void 0 ? void 0 : meta.name) !== null && _l !== void 0 ? _l : null,
+                    shiftStartTime: meta ? toHHMM(meta.startTime) : null,
+                    shiftEndTime: meta ? toHHMM(meta.endTime) : null,
+                    checkIn: (_m = att === null || att === void 0 ? void 0 : att.checkIn) !== null && _m !== void 0 ? _m : null,
+                    checkOut: (_o = att === null || att === void 0 ? void 0 : att.checkOut) !== null && _o !== void 0 ? _o : null,
+                    category,
+                    lateByMinutes: lateBy,
+                    leftEarlyMinutes: leftEarlyBy,
+                });
+            }
+        }
+        // Compute attendance % per bucket (present + late) / assigned
+        for (const b of buckets.values()) {
+            b.attendancePct = b.assigned > 0
+                ? Math.round(((b.present) / b.assigned) * 100)
+                : 0;
+        }
+        const sortedShifts = Array.from(buckets.values()).sort((a, b) => {
+            var _a, _b;
+            // Real shifts first (by startTime), then Unassigned at the bottom
+            if (a.shiftId === null)
+                return 1;
+            if (b.shiftId === null)
+                return -1;
+            return ((_a = a.startTime) !== null && _a !== void 0 ? _a : '').localeCompare((_b = b.startTime) !== null && _b !== void 0 ? _b : '');
+        });
+        // ── 4. Optional comparison: per-shift attendance % over last N days ──
+        let comparison = [];
+        if (compareDays > 0) {
+            comparison = yield buildShiftComparison(dayStart, compareDays, shiftTemplates);
+        }
+        return res.json({
+            // Format using local-date methods — NOT toISOString — so an IST
+            // midnight (which is yesterday in UTC) reports as today's IST date.
+            date: localYMD(dayStart),
+            isToday,
+            totalActive: employees.length,
+            shifts: sortedShifts,
+            comparison,
+        });
+    }
+    catch (err) {
+        console.error("getAttendanceByShift error:", err);
+        return res.status(500).json({ error: "Failed to load shift-wise attendance" });
+    }
+});
+exports.getAttendanceByShift = getAttendanceByShift;
+/* ── Helpers used by getAttendanceByShift ─────────────────────────────── */
+// function toHHMM(d: Date | null | undefined): string | null {
+//     if (!d) return null;
+//     const dt = new Date(d);
+//     return `${String(dt.getUTCHours()).padStart(2, '0')}:${String(dt.getUTCMinutes()).padStart(2, '0')}`;
+// }
+/** Format a Date as IST HH:MM regardless of the server's local TZ.
+ *  Uses Intl.DateTimeFormat so it works whether the host is UTC or IST. */
+function toHHMM(d) {
+    if (!d)
+        return null;
+    const dt = new Date(d);
+    return new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit', minute: '2-digit', hour12: false,
+        timeZone: 'Asia/Kolkata',
+    }).format(dt);
+}
+/** YYYY-MM-DD using local-date components (NOT toISOString). Necessary because
+ *  toISOString flips back to UTC, which on an IST server reports yesterday's
+ *  date for a JS Date that semantically represents today's IST midnight. */
+function localYMD(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+/** For each prior day in the window, recompute the per-shift attendance %.
+ *  Lighter version of the main aggregation — counts only, no drill-down. */
+function buildShiftComparison(anchorDay, days, templates) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c, _d, _e;
+        const series = [];
+        const shiftIds = templates.map((s) => s.id);
+        for (let i = days; i >= 1; i--) {
+            const target = addDays(anchorDay, -i);
+            const d = startOfDayIST(target);
+            const dEnd = endOfDayIST(target);
+            const [activeEmps, atts, leaves, wfhs, perms, assignments, settings] = yield Promise.all([
+                prisma.employee.findMany({
+                    where: { employmentStatus: 'ACTIVE' },
+                    select: { id: true, shiftId: true },
+                }),
+                prisma.attendance.findMany({
+                    where: { date: { gte: d, lte: dEnd }, checkIn: { not: null } },
+                    select: { employeeId: true },
+                }),
+                prisma.leaveRequest.findMany({
+                    where: { status: 'APPROVED', startDate: { lte: dEnd }, endDate: { gte: d } },
+                    select: { employeeId: true },
+                }),
+                prisma.wFHRequest.findMany({
+                    where: { status: 'APPROVED', startDate: { lte: dEnd }, endDate: { gte: d } },
+                    select: { employeeId: true },
+                }),
+                prisma.permissionRequest.findMany({
+                    where: { status: 'APPROVED', day: { gte: d, lte: dEnd } },
+                    select: { employeeId: true },
+                }),
+                prisma.shiftAssignment.findMany({
+                    where: { date: { gte: d, lte: dEnd } },
+                    select: { employeeId: true, shiftId: true },
+                }),
+                prisma.employeeShiftSetting.findMany({
+                    select: { employeeId: true, mode: true, fixedShiftId: true },
+                }).catch(() => []),
+            ]);
+            const present = new Set(atts.map((a) => a.employeeId));
+            const excused = new Set([
+                ...leaves.map((x) => x.employeeId),
+                ...wfhs.map((x) => x.employeeId),
+                ...perms.map((x) => x.employeeId),
+            ]);
+            const aMap = new Map(assignments.map((a) => [a.employeeId, a.shiftId]));
+            const sMap = new Map(settings.map((s) => [s.employeeId, s]));
+            const dayBucket = {};
+            for (const sid of shiftIds)
+                dayBucket[sid] = { assigned: 0, present: 0 };
+            for (const e of activeEmps) {
+                const sid = (_a = aMap.get(e.id)) !== null && _a !== void 0 ? _a : ((_d = (_c = (_b = sMap.get(e.id)) === null || _b === void 0 ? void 0 : _b.fixedShiftId) !== null && _c !== void 0 ? _c : e.shiftId) !== null && _d !== void 0 ? _d : null);
+                if (!sid)
+                    continue;
+                const slot = (_e = dayBucket[sid]) !== null && _e !== void 0 ? _e : (dayBucket[sid] = { assigned: 0, present: 0 });
+                slot.assigned++;
+                if (present.has(e.id) || excused.has(e.id))
+                    slot.present++;
+            }
+            const perShift = {};
+            for (const sid of shiftIds) {
+                const b = dayBucket[sid];
+                perShift[sid] = b.assigned > 0 ? Math.round((b.present / b.assigned) * 100) : 0;
+            }
+            series.push({ date: localYMD(d), perShift });
+        }
+        return series;
+    });
+}

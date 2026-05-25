@@ -20,10 +20,10 @@ import { syncEmployeeToDirectory, deactivateEmployeeInDirectory } from "../../li
 
 
 const FTP_CONFIG = {
-  host: "srv680.main-hosting.eu",  // Your FTP hostname
-  user: "u948610439.hrproindia.in",       // Your FTP username
-  password: "Bsrenuk@1993",   // Your FTP password
-  secure: false                    // Set to true if using FTPS
+  host: process.env.FTP_HOST ?? "",
+  user: process.env.FTP_USER ?? "",
+  password: process.env.FTP_PASS ?? "",
+  secure: process.env.FTP_SECURE === "true"
 }
 const TEMP_FOLDER = path.join(__dirname, '../temp'); // absolute path
 
@@ -3317,7 +3317,7 @@ export async function deleteFromFTP(remotePath: string) {
       host: FTP_CONFIG.host!,
       user: FTP_CONFIG.user!,
       password: FTP_CONFIG.password!,
-      secure: false,
+      secure: FTP_CONFIG.secure,
     });
 
     await client.remove(remotePath);

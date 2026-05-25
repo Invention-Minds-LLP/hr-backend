@@ -8,4 +8,5 @@ const router = (0, express_1.Router)();
 router.post("/", authMiddleware_1.authenticateToken, requisition_controller_1.createRequisition);
 router.get("/", authMiddleware_1.authenticateToken, requisition_controller_1.listRequisitions);
 router.patch("/:id/status", authMiddleware_1.authenticateToken, requisition_controller_1.updateRequisitionStatus);
+router.patch("/:id/withdraw", authMiddleware_1.authenticateToken, requisition_controller_1.withdrawRequisition);
 exports.default = router;

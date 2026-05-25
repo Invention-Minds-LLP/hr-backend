@@ -8,8 +8,15 @@ const router = (0, express_1.Router)();
 const ctrl = new dashboard_controller_1.DashboardController();
 router.get('', authMiddleware_1.authenticateToken, ctrl.getDashboard);
 router.get('/list', authMiddleware_1.authenticateToken, ctrl.getList);
+// Shift-wise attendance breakdown (stacked bar card on the management dashboard)
+router.get('/attendance/by-shift', authMiddleware_1.authenticateToken, dashboard_controller_2.getAttendanceByShift);
+router.get('/missing-docs', ctrl.downloadMissingDocs);
 router.get('/recruiting', authMiddleware_1.authenticateToken, ctrl.getRecruiting);
 router.post('/ot/approve-reject', authMiddleware_1.authenticateToken, ctrl.approveOrRejectOT);
+router.get('/ot/manager-pending', authMiddleware_1.authenticateToken, ctrl.getManagerOtPending);
+router.get('/ot/hr-pending', authMiddleware_1.authenticateToken, ctrl.getHROtPending);
+router.post('/ot/manager-approve-reject', authMiddleware_1.authenticateToken, ctrl.approveOrRejectOTManager);
+router.get('/ot/my-approved', authMiddleware_1.authenticateToken, ctrl.getMyApprovedOT);
 // 1. Unmarked attendance
 router.post("/unmarked/message", authMiddleware_1.authenticateToken, dashboard_controller_2.messageUnmarked);
 router.post("/unmarked/exception", authMiddleware_1.authenticateToken, dashboard_controller_2.markUnmarkedException);

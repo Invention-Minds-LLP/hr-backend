@@ -2,7 +2,11 @@ import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { getEmployeeAccess } from "../lib/employeeAccess";
 
-const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret"; // make sure to store in .env
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  // Fail fast: a missing/known-default secret means anyone can forge tokens.
+  throw new Error("JWT_SECRET is not set. Refusing to start without a signing secret.");
+}
 
 export interface AuthenticatedRequest extends Request {
   user?: any; // you can type this properly if you like

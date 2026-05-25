@@ -11,10 +11,10 @@ const COMPANY_NAME = 'RASHTROTTHANA HOSPITAL'; // <- put your real company name
 const COMPANY_LOGO_URL = 'https://hrproindia.in/documents/Rashtrotthana-logo.jpeg'; // <- put your real logo URL
 const COMPANY_TAGLINE = 'People • Process • Performance'; 
 const FTP_CONFIG = {
-    host: "srv680.main-hosting.eu",  // Your FTP hostname
-    user: "u948610439.hrproindia.in",       // Your FTP username
-    password: "Bsrenuk@1993",   // Your FTP password
-    secure: false                    // Set to true if using FTPS
+    host: process.env.FTP_HOST ?? "",
+    user: process.env.FTP_USER ?? "",
+    password: process.env.FTP_PASS ?? "",
+    secure: process.env.FTP_SECURE === "true"
   }
 
 

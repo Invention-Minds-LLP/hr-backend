@@ -19,7 +19,7 @@ const prisma_1 = require("../lib/prisma");
 class UserAuthService {
     constructor() {
         this.finalizeLogin = (userId, ipAddress, userAgent) => __awaiter(this, void 0, void 0, function* () {
-            var _a;
+            var _a, _b, _c;
             const user = yield prisma_1.prisma.user.findUnique({
                 where: { id: userId },
                 include: {
@@ -29,7 +29,11 @@ class UserAuthService {
                             departmentId: true,
                             photoUrl: true,
                             roleId: true,
+                            gender: true,
                             designation: {
+                                select: { name: true }
+                            },
+                            role: {
                                 select: { name: true }
                             }
                         }
@@ -39,10 +43,12 @@ class UserAuthService {
             if (!user || !user.employee) {
                 throw new Error('User or Employee not found');
             }
+            // Use role from Employee table (source of truth)
+            const roleName = (_b = (_a = user.employee.role) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : user.role;
             // JWT payload (same as loginUser)
             const payload = {
                 userId: user.id,
-                role: user.role,
+                role: roleName,
                 empId: user.employee.id,
                 deptId: user.employee.departmentId,
                 employeeCode: user.employeeCode,
@@ -59,12 +65,13 @@ class UserAuthService {
                 username: user.username,
                 employeeCode: user.employeeCode,
                 id: user.id,
-                role: user.role,
+                role: roleName,
                 empId: user.employee.id,
                 deptId: user.employee.departmentId,
-                designation: ((_a = user.employee.designation) === null || _a === void 0 ? void 0 : _a.name) || '',
+                designation: ((_c = user.employee.designation) === null || _c === void 0 ? void 0 : _c.name) || '',
                 photoUrl: user.employee.photoUrl || null,
                 roleId: user.employee.roleId,
+                gender: user.employee.gender,
             };
         });
     }

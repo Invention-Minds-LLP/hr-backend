@@ -23,7 +23,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.bulkUploadLeaveBalance = exports.bulkUpdateEmployeeExtras = exports.getEmployeesByManager = exports.initSabbaticalReminderScheduler = exports.terminateFromSabbatical = exports.endSabbatical = exports.extendSabbatical = exports.startSabbatical = exports.getEmployeeProfile = exports.updateEmployeeProfile = exports.deleteEmployeeDocument = exports.getInchargeEmployees = exports.bulkUpdateReportingManager = exports.getBulkUploadProgress = exports.bulkUploadEmployees = exports.downloadEmployeeTemplate = exports.getUnreportedAbsentees = exports.sendHealthCheckReminders = exports.getEmployeesByDepartments = exports.uploadVaccineProof = exports.getEmployeeRequests = exports.getActiveEmployees = exports.getEmployeesByRole = exports.getSpecificRoles = exports.uploadEmployeeDisabilityProof = exports.uploadEmployeePhoto = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
+exports.queryAuditLog = exports.getEmployeeAuditLog = exports.getProbationHistory = exports.terminateProbation = exports.confirmProbation = exports.extendProbation = exports.bulkUploadLeaveBalance = exports.bulkUpdateEmployeeExtras = exports.getEmployeesByManager = exports.initSabbaticalReminderScheduler = exports.terminateFromSabbatical = exports.endSabbatical = exports.extendSabbatical = exports.startSabbatical = exports.getEmployeeProfile = exports.updateEmployeeProfile = exports.deleteEmployeeDocument = exports.getInchargeEmployees = exports.bulkUpdateReportingManager = exports.getBulkUploadProgress = exports.bulkUploadEmployees = exports.downloadEmployeeTemplate = exports.getUnreportedAbsentees = exports.sendHealthCheckReminders = exports.getEmployeesByDepartments = exports.uploadVaccineProof = exports.getEmployeeRequests = exports.getActiveEmployees = exports.getEmployeesByRole = exports.getSpecificRoles = exports.uploadEmployeeDisabilityProof = exports.uploadEmployeePhoto = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
 exports.getAccruals = getAccruals;
 exports.getEmployeeAccrualsController = getEmployeeAccrualsController;
 exports.getTodayCelebrants = getTodayCelebrants;
@@ -31,6 +31,8 @@ exports.listMentors = listMentors;
 exports.mapExcelRowToEmployee = mapExcelRowToEmployee;
 exports.deleteFromFTP = deleteFromFTP;
 const client_1 = require("@prisma/client");
+const employeeAccess_1 = require("../../lib/employeeAccess");
+const employeeAudit_1 = require("../../lib/employeeAudit");
 const prisma = new client_1.PrismaClient();
 const formidable_1 = __importDefault(require("formidable"));
 const fs_1 = __importDefault(require("fs"));
@@ -40,6 +42,7 @@ const client_2 = require("@prisma/client");
 const notifications_controller_1 = require("../notifications/notifications.controller");
 const xlsx_1 = __importDefault(require("xlsx"));
 const node_cron_1 = __importDefault(require("node-cron"));
+const directory_1 = require("../../lib/directory");
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu", // Your FTP hostname
     user: "u948610439.hrproindia.in", // Your FTP username
@@ -135,12 +138,18 @@ function generateEmployeeCode(employmentType) {
 const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a, _b;
     try {
-        const { employeeCode, referenceCode, firstName, lastName, gender, dob, photoUrl, phone, email, designation, designationId, departmentId, branchId, dateOfJoining, employmentType, probationEndDate, employmentStatus, emergencyContacts, qualifications, addresses, roleId, bloodGroup, reportingManager, age, shiftMode, // 'FIXED' | 'ROTATIONAL' (optional)
+        const { employeeCode, referenceCode, firstName, lastName, gender, dob, photoUrl, phone, email, designation, designationId, departmentId, branchId, dateOfJoining, employmentType, probationStartDate, probationEndDate, probationStatus, probationConfirmedOn, probationConfirmedBy, probationRemarks, employmentStatus, emergencyContacts, qualifications, addresses, roleId, bloodGroup, reportingManager, age, shiftMode, // 'FIXED' | 'ROTATIONAL' (optional)
         fixedShiftId, // optional
         rotationPatternId, // optional
         rotationStartDate, // optional
-        employeeType, sameAsPermanent, inchargeId, fatherName, marital, totalYearsOfExperience, experience, licenseRegDate, licenseExpiryDate, motherName, alternatePhone, uanNumber, panNumber, aadharNumber, licenseNumber, geoTrackingEnabled, experienceType } = req.body;
+        employeeType, sameAsPermanent, inchargeId, fatherName, marital, totalYearsOfExperience, experience, licenseRegDate, licenseExpiryDate, motherName, alternatePhone, uanNumber, panNumber, aadharNumber, licenseNumber, geoTrackingEnabled, overtimeEnabled, experienceType } = req.body;
         const data = req.body;
+        if (reportingManager && inchargeId &&
+            Number(reportingManager) === Number(inchargeId)) {
+            return res.status(400).json({
+                error: "Reporting Manager and Incharge cannot be the same person",
+            });
+        }
         let finalCode = employeeCode;
         console.log(finalCode);
         if (!finalCode) {
@@ -164,7 +173,12 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     // designationId: designationId ?? null, // ✅ THIS IS THE FIX
                     dateOfJoining: new Date(dateOfJoining),
                     employmentType,
+                    probationStartDate: probationStartDate ? new Date(probationStartDate) : null,
                     probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
+                    probationStatus: probationStatus !== null && probationStatus !== void 0 ? probationStatus : null,
+                    probationConfirmedOn: probationConfirmedOn ? new Date(probationConfirmedOn) : null,
+                    probationConfirmedBy: probationConfirmedBy !== null && probationConfirmedBy !== void 0 ? probationConfirmedBy : null,
+                    probationRemarks: probationRemarks !== null && probationRemarks !== void 0 ? probationRemarks : null,
                     employmentStatus,
                     bloodGroup,
                     age,
@@ -177,6 +191,7 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     sameAsPermanent,
                     experienceType,
                     geoTrackingEnabled: geoTrackingEnabled !== null && geoTrackingEnabled !== void 0 ? geoTrackingEnabled : false,
+                    overtimeEnabled: overtimeEnabled !== null && overtimeEnabled !== void 0 ? overtimeEnabled : false,
                     // Health & Wellness fields
                     preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
                     height: data.height ? parseFloat(data.height) : null,
@@ -283,7 +298,12 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                         // designationId: designationId ?? null, // ✅ THIS IS THE FIX
                         dateOfJoining: new Date(dateOfJoining),
                         employmentType,
+                        probationStartDate: probationStartDate ? new Date(probationStartDate) : null,
                         probationEndDate: probationEndDate ? new Date(probationEndDate) : null,
+                        probationStatus: probationStatus !== null && probationStatus !== void 0 ? probationStatus : null,
+                        probationConfirmedOn: probationConfirmedOn ? new Date(probationConfirmedOn) : null,
+                        probationConfirmedBy: probationConfirmedBy !== null && probationConfirmedBy !== void 0 ? probationConfirmedBy : null,
+                        probationRemarks: probationRemarks !== null && probationRemarks !== void 0 ? probationRemarks : null,
                         employmentStatus,
                         bloodGroup,
                         age,
@@ -295,6 +315,7 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                         totalYearsOfExperience,
                         experience,
                         geoTrackingEnabled,
+                        overtimeEnabled,
                         motherName,
                         alternatePhone,
                         uanNumber,
@@ -374,6 +395,28 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
             });
             // (Optional) generate daily ShiftAssignment rows for the next N days here.
         }
+        // Seed first probation record when starting on probation with start+end dates
+        if (employmentType === 'PROBATION' &&
+            newEmployee.probationStartDate &&
+            newEmployee.probationEndDate) {
+            yield prisma.probationRecord.create({
+                data: {
+                    employeeId: newEmployee.id,
+                    startDate: newEmployee.probationStartDate,
+                    endDate: newEmployee.probationEndDate,
+                    status: probationStatus !== null && probationStatus !== void 0 ? probationStatus : 'IN_PROGRESS',
+                    remarks: probationRemarks !== null && probationRemarks !== void 0 ? probationRemarks : null,
+                },
+            });
+            if (!probationStatus) {
+                yield prisma.employee.update({
+                    where: { id: newEmployee.id },
+                    data: { probationStatus: 'IN_PROGRESS' },
+                });
+            }
+        }
+        // Push to central directory so the unified mobile app can resolve this phone
+        (0, directory_1.syncEmployeeToDirectory)(newEmployee).catch(() => { });
         return res.status(201).json(newEmployee);
     }
     catch (error) {
@@ -421,6 +464,17 @@ const getEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* (
         const where = {};
         const filter = req.query.filter;
         const search = req.query.search;
+        // Generic search — when `search` is given WITHOUT a specific `filter`,
+        // match across name, employee code and email. (Used by the autocomplete
+        // pickers in HR Corrections, leave-apply, etc. — which only send `search`.)
+        if (search && !filter) {
+            where.OR = [
+                { firstName: { contains: search } },
+                { lastName: { contains: search } },
+                { employeeCode: { contains: search } },
+                { email: { contains: search } },
+            ];
+        }
         if (search && filter) {
             switch (filter) {
                 case "name":
@@ -559,6 +613,9 @@ const getEmployeeById = (req, res) => __awaiter(void 0, void 0, void 0, function
                     include: {
                         shift: true // Include shift template details
                     }
+                },
+                probationRecords: {
+                    orderBy: { createdAt: 'asc' }
                 }
             }
         });
@@ -576,7 +633,7 @@ const getEmployeeById = (req, res) => __awaiter(void 0, void 0, void 0, function
 });
 exports.getEmployeeById = getEmployeeById;
 const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
     try {
         const { id } = req.params;
         const data = req.body;
@@ -584,18 +641,39 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
         fixedShiftId, // number | undefined
         rotationPatternId, // number | undefined
         rotationStartDate, // ISO string | undefined
-        dob, dateOfJoining, probationEndDate, inchargeId, preEmploymentCheckDate, fatherName, marital, totalYearsOfExperience, experience, experienceType } = data, employeeFields = __rest(data, ["addresses", "emergencyContacts", "qualifications", "departmentId", "designationId", "branchId", "roleId", "shiftMode", "fixedShiftId", "rotationPatternId", "rotationStartDate", "dob", "dateOfJoining", "probationEndDate", "inchargeId", "preEmploymentCheckDate", "fatherName", "marital", "totalYearsOfExperience", "experience", "experienceType"]);
+        dob, dateOfJoining, probationStartDate, probationEndDate, probationConfirmedOn, inchargeId, preEmploymentCheckDate, fatherName, marital, totalYearsOfExperience, experience, experienceType } = data, employeeFields = __rest(data, ["addresses", "emergencyContacts", "qualifications", "departmentId", "designationId", "branchId", "roleId", "shiftMode", "fixedShiftId", "rotationPatternId", "rotationStartDate", "dob", "dateOfJoining", "probationStartDate", "probationEndDate", "probationConfirmedOn", "inchargeId", "preEmploymentCheckDate", "fatherName", "marital", "totalYearsOfExperience", "experience", "experienceType"]);
+        if (data.reportingManager && inchargeId &&
+            Number(data.reportingManager) === Number(inchargeId)) {
+            return res.status(400).json({
+                error: "Reporting Manager and Incharge cannot be the same person",
+            });
+        }
         const toDate = (v) => (v ? new Date(v) : null);
         employeeFields.dob = (_a = toDate(dob)) !== null && _a !== void 0 ? _a : undefined;
         employeeFields.dateOfJoining = (_b = toDate(dateOfJoining)) !== null && _b !== void 0 ? _b : undefined;
+        employeeFields.probationStartDate = toDate(probationStartDate);
         employeeFields.probationEndDate = toDate(probationEndDate);
+        employeeFields.probationConfirmedOn = toDate(probationConfirmedOn);
+        // ── Capture the BEFORE state. We need the full row (scalars +
+        // user-editable relations) so the audit log can record every field
+        // that changed, including address / emergency contact / qualification
+        // edits which live in separate tables.
+        const beforeRow = yield prisma.employee.findUnique({
+            where: { id: Number(id) },
+            include: {
+                Address: true,
+                emergencyContacts: true,
+                qualifications: true,
+            },
+        });
+        const beforeStatus = beforeRow === null || beforeRow === void 0 ? void 0 : beforeRow.employmentStatus;
         const updatedEmployee = yield prisma.employee.update({
             where: { id: Number(id) },
             data: Object.assign(Object.assign({}, employeeFields), { experienceType: data.experienceType, 
                 // Health & Wellness fields
                 preEmploymentCheckDate: preEmploymentCheckDate ? new Date(preEmploymentCheckDate) : null, height: data.height ? parseFloat(data.height) : null, weight: data.weight ? parseFloat(data.weight) : null, bmi: data.bmi ? parseFloat(data.bmi) : null, bloodPressure: data.bloodPressure, bloodSugar: data.bloodSugar, cholesterol: data.cholesterol, sameAsPermanent: data.sameAsPermanent, fatherName: data.fatherName, marital: data.marital, totalYearsOfExperience: data.totalYearsOfExperience, experience: data.experience, allergies: data.allergies, chronicConditions: data.chronicConditions, 
                 // designationId: designationId ?? null, // ✅ THIS IS THE FIX
-                smoking: data.smoking, alcohol: data.alcohol, visionType: data.visionType, usesGlasses: data.usesGlasses, visionRemarks: data.visionRemarks, hasDisability: data.hasDisability, disabilityType: data.disabilityType, disabilityDescription: data.disabilityDescription, disabilityProofFile: data.disabilityProofFile, disabilityProofFileName: data.disabilityProofFileName, disabilityProofUrl: data.disabilityProofUrl, preferredHospital: data.preferredHospital, primaryPhysician: data.primaryPhysician, emergencyNotes: data.emergencyNotes, geoTrackingEnabled: data.geoTrackingEnabled, motherName: data.motherName, alternatePhone: data.alternatePhone, uanNumber: data.uanNumber, panNumber: data.panNumber, aadharNumber: data.aadharNumber, licenseNumber: data.licenseNumber, licenseRegDate: toDate(data.licenseRegDate), licenseExpiryDate: toDate(data.licenseExpiryDate), pastSurgeries: data.pastSurgeries, exerciseFrequency: data.exerciseFrequency, healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined, vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined, Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, designation: { connect: { id: designationId } }, incharge: inchargeId
+                smoking: data.smoking, alcohol: data.alcohol, visionType: data.visionType, usesGlasses: data.usesGlasses, visionRemarks: data.visionRemarks, hasDisability: data.hasDisability, disabilityType: data.disabilityType, disabilityDescription: data.disabilityDescription, disabilityProofFile: data.disabilityProofFile, disabilityProofFileName: data.disabilityProofFileName, disabilityProofUrl: data.disabilityProofUrl, preferredHospital: data.preferredHospital, primaryPhysician: data.primaryPhysician, emergencyNotes: data.emergencyNotes, geoTrackingEnabled: data.geoTrackingEnabled, overtimeEnabled: data.overtimeEnabled, motherName: data.motherName, alternatePhone: data.alternatePhone, uanNumber: data.uanNumber, panNumber: data.panNumber, aadharNumber: data.aadharNumber, licenseNumber: data.licenseNumber, licenseRegDate: toDate(data.licenseRegDate), licenseExpiryDate: toDate(data.licenseExpiryDate), pastSurgeries: data.pastSurgeries, exerciseFrequency: data.exerciseFrequency, healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined, vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined, Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, designation: { connect: { id: designationId } }, incharge: inchargeId
                     ? { connect: { id: Number(inchargeId) } }
                     : { disconnect: true }, Address: {
                     deleteMany: {},
@@ -631,6 +709,77 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 designation: true
             }
         });
+        // ── Audit log: record the diff between before and after.
+        // Two layers of comparison:
+        //   (1) Scalar fields on the Employee row (designation, dept, role,
+        //       personal info, etc.) via the shared buildEmployeeDiff helper.
+        //   (2) User-editable relations (Address, emergencyContacts,
+        //       qualifications) — compared as normalised JSON arrays so we
+        //       can capture "Added 1 address" or "Removed an emergency contact"
+        //       even though the underlying rows are deleted-and-recreated.
+        try {
+            const afterRow = yield prisma.employee.findUnique({
+                where: { id: Number(id) },
+                include: {
+                    Address: true,
+                    emergencyContacts: true,
+                    qualifications: true,
+                },
+            });
+            if (beforeRow && afterRow) {
+                // (1) Scalar diff — strip the relation arrays first so they don't
+                //     pollute the scalar comparison.
+                const stripRelations = (r) => {
+                    const { Address, emergencyContacts, qualifications } = r, rest = __rest(r, ["Address", "emergencyContacts", "qualifications"]);
+                    return rest;
+                };
+                const diff = (_c = (0, employeeAudit_1.buildEmployeeDiff)(stripRelations(beforeRow), stripRelations(afterRow))) !== null && _c !== void 0 ? _c : {
+                    changes: {},
+                    changedFields: [],
+                };
+                // (2) Relation diffs — normalise (drop ids/timestamps) and JSON-compare.
+                const normaliseRel = (rows, fields) => (rows !== null && rows !== void 0 ? rows : [])
+                    .map((r) => {
+                    var _a;
+                    const out = {};
+                    for (const f of fields)
+                        out[f] = (_a = r[f]) !== null && _a !== void 0 ? _a : null;
+                    return out;
+                })
+                    // Sort so the comparison is order-independent
+                    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+                const compareRel = (key, fields) => {
+                    const before = normaliseRel(beforeRow[key], fields);
+                    const after = normaliseRel(afterRow[key], fields);
+                    if (JSON.stringify(before) !== JSON.stringify(after)) {
+                        diff.changes[key] = { from: before, to: after };
+                        diff.changedFields.push(key);
+                    }
+                };
+                compareRel('Address', ['type', 'line1', 'line2', 'city', 'state', 'zipCode', 'country']);
+                compareRel('emergencyContacts', ['name', 'phone', 'relationship']);
+                compareRel('qualifications', ['degree', 'institution', 'year']);
+                if (diff.changedFields.length > 0) {
+                    const ctx = (0, employeeAudit_1.auditCtxFromReq)(req, { source: 'WEB' });
+                    yield prisma.employeeAuditLog.create({
+                        data: {
+                            employeeId: Number(id),
+                            action: 'UPDATE',
+                            changes: diff.changes,
+                            changedFields: diff.changedFields,
+                            changedBy: (_d = ctx.changedBy) !== null && _d !== void 0 ? _d : null,
+                            source: (_e = ctx.source) !== null && _e !== void 0 ? _e : 'WEB',
+                            ipAddress: (_f = ctx.ip) !== null && _f !== void 0 ? _f : null,
+                            userAgent: (_g = ctx.userAgent) !== null && _g !== void 0 ? _g : null,
+                        },
+                    });
+                }
+            }
+        }
+        catch (auditErr) {
+            // Audit failures must NEVER break the user flow. Log and move on.
+            console.error("[updateEmployee audit] failed:", auditErr);
+        }
         // 2) upsert EmployeeShiftSetting (simple & type-safe)
         // map 'FIXED' | 'ROTATIONAL' -> Prisma enum
         const mode = shiftMode === 'FIXED'
@@ -663,6 +812,80 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 },
             });
         }
+        // Sync ProbationRecord whenever start+end dates are present.
+        // This covers:
+        //   - Legacy backfill: HR edits a PERMANENT employee and records their past probation (e.g. CONFIRMED)
+        //   - First-time setup: PROBATION employee gets dates for the first time
+        //   - Data-entry correction: HR fixes a date on the current IN_PROGRESS record
+        // Transitions like extend / confirm / terminate still go through the dedicated action endpoints
+        // so the full audit trail is produced cleanly.
+        if (updatedEmployee.probationStartDate &&
+            updatedEmployee.probationEndDate) {
+            const allRecords = yield prisma.probationRecord.findMany({
+                where: { employeeId: updatedEmployee.id },
+                orderBy: { createdAt: 'desc' },
+            });
+            const inProgress = allRecords.find((r) => r.status === 'IN_PROGRESS');
+            if (inProgress) {
+                // Correction: keep the current active record in sync with the form
+                yield prisma.probationRecord.update({
+                    where: { id: inProgress.id },
+                    data: {
+                        startDate: updatedEmployee.probationStartDate,
+                        endDate: updatedEmployee.probationEndDate,
+                        remarks: (_h = updatedEmployee.probationRemarks) !== null && _h !== void 0 ? _h : null,
+                    },
+                });
+            }
+            else if (allRecords.length === 0) {
+                // Backfill: no records yet → create the first record using the form status.
+                // If status is a terminal one (CONFIRMED/TERMINATED/WAIVED/EXTENDED) we stamp decidedOn
+                // so the history panel shows when the decision was taken.
+                const formStatus = updatedEmployee.probationStatus || 'IN_PROGRESS';
+                const isTerminal = formStatus !== 'IN_PROGRESS';
+                yield prisma.probationRecord.create({
+                    data: {
+                        employeeId: updatedEmployee.id,
+                        startDate: updatedEmployee.probationStartDate,
+                        endDate: updatedEmployee.probationEndDate,
+                        status: formStatus,
+                        remarks: (_j = updatedEmployee.probationRemarks) !== null && _j !== void 0 ? _j : null,
+                        decidedOn: isTerminal
+                            ? ((_k = updatedEmployee.probationConfirmedOn) !== null && _k !== void 0 ? _k : new Date())
+                            : null,
+                    },
+                });
+                if (!updatedEmployee.probationStatus) {
+                    yield prisma.employee.update({
+                        where: { id: updatedEmployee.id },
+                        data: { probationStatus: 'IN_PROGRESS' },
+                    });
+                }
+            }
+            // else: records exist but none are IN_PROGRESS (e.g. already CONFIRMED) →
+            // form is read-only from a history standpoint. Use Extend/Confirm/Terminate buttons
+            // to change state going forward.
+        }
+        // Push to central directory in case phone/name/code/active changed
+        (0, directory_1.syncEmployeeToDirectory)(updatedEmployee).catch(() => { });
+        // ── Status-transition revoke ──────────────────────────────
+        // If this update flipped the employee from an active state
+        // (ACTIVE / NOTICE_PERIOD) to a non-active state (TERMINATED /
+        // RESIGNED / SUSPENDED / SABBATICAL), wipe their device tokens,
+        // mobile sessions and stamp accessRevokedAt. Catches the gap where
+        // HR uses the generic PUT /employees/:id instead of the dedicated
+        // terminate / sabbatical endpoints.
+        const ACTIVE = new Set(['ACTIVE', 'NOTICE_PERIOD']);
+        const wasActive = ACTIVE.has(String(beforeStatus));
+        const isActive = ACTIVE.has(String(updatedEmployee.employmentStatus));
+        if (wasActive && !isActive) {
+            try {
+                yield (0, employeeAccess_1.revokeEmployeeAccess)(Number(id), `Status changed via updateEmployee: ${beforeStatus} → ${updatedEmployee.employmentStatus}`);
+            }
+            catch (e) {
+                console.error('[updateEmployee] revokeEmployeeAccess failed:', e);
+            }
+        }
         res.json(updatedEmployee);
     }
     catch (error) {
@@ -675,9 +898,17 @@ exports.updateEmployee = updateEmployee;
 const deleteEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { id } = req.params;
+        // Capture phone first so we can deactivate the directory entry after delete
+        const employee = yield prisma.employee.findUnique({
+            where: { id: Number(id) },
+            select: { phone: true },
+        });
         yield prisma.employee.delete({
             where: { id: Number(id) }
         });
+        if (employee === null || employee === void 0 ? void 0 : employee.phone) {
+            (0, directory_1.deactivateEmployeeInDirectory)(employee.phone).catch(() => { });
+        }
         res.json({ message: "Employee deleted successfully" });
     }
     catch (error) {
@@ -2726,6 +2957,14 @@ const startSabbatical = (req, res) => __awaiter(void 0, void 0, void 0, function
             });
             return sabbatical;
         }));
+        // Revoke session/access — sabbatical employees should not retain
+        // active logins (they're not working while on sabbatical).
+        try {
+            yield (0, employeeAccess_1.revokeEmployeeAccess)(Number(employeeId), 'Sabbatical started');
+        }
+        catch (e) {
+            console.error('[sabbatical] revokeEmployeeAccess failed:', e);
+        }
         res.json(result);
     }
     catch (err) {
@@ -2786,6 +3025,13 @@ const terminateFromSabbatical = (req, res) => __awaiter(void 0, void 0, void 0, 
                 where: { id: sabbatical.employeeId },
                 data: { employmentStatus: "TERMINATED" }
             });
+            // Revoke session/access on TERMINATED.
+            try {
+                yield (0, employeeAccess_1.revokeEmployeeAccess)(sabbatical.employeeId, 'Sabbatical completed → terminated');
+            }
+            catch (e) {
+                console.error('[sabbatical-complete] revokeEmployeeAccess failed:', e);
+            }
             return sabbatical;
         }));
         res.json(result);
@@ -2818,17 +3064,14 @@ const initSabbaticalReminderScheduler = () => {
         for (const sab of sabbaticals) {
             const emp = sab.employee;
             const message = `Your sabbatical ends on ${sab.endDate.toDateString()}. Please contact HR.`;
-            // await createNotification(emp.id, message);
+            yield (0, notifications_controller_1.createNotification)(emp.id, message);
             const hrUsers = yield prisma.employee.findMany({
                 where: { roleId: 1, employmentStatus: "ACTIVE" },
                 select: { id: true }
             });
-            // for (const hr of hrUsers) {
-            //   await createNotification(
-            //     hr.id,
-            //     `${emp.firstName}'s sabbatical ends on ${sab.endDate.toDateString()}`
-            //   );
-            // }
+            for (const hr of hrUsers) {
+                yield (0, notifications_controller_1.createNotification)(hr.id, `${emp.firstName}'s sabbatical ends on ${sab.endDate.toDateString()}`);
+            }
         }
     }));
 };
@@ -3183,3 +3426,245 @@ const bulkUploadLeaveBalance = (req, res) => __awaiter(void 0, void 0, void 0, f
     }
 });
 exports.bulkUploadLeaveBalance = bulkUploadLeaveBalance;
+// ── Probation Actions ──────────────────────────────────────────────────────
+const extendProbation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const employeeId = Number(req.params.id);
+        const { newEndDate, remarks } = req.body;
+        const decidedBy = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        if (!newEndDate)
+            return res.status(400).json({ error: 'newEndDate is required' });
+        const result = yield prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            const emp = yield tx.employee.findUnique({ where: { id: employeeId } });
+            if (!emp)
+                throw new Error('Employee not found');
+            if (!emp.probationStartDate || !emp.probationEndDate) {
+                throw new Error('Employee has no active probation to extend');
+            }
+            // Close the current in-progress record as EXTENDED
+            yield tx.probationRecord.updateMany({
+                where: { employeeId, status: 'IN_PROGRESS' },
+                data: {
+                    status: 'EXTENDED',
+                    decidedBy,
+                    decidedOn: new Date(),
+                    remarks: remarks !== null && remarks !== void 0 ? remarks : null,
+                },
+            });
+            // Create a new IN_PROGRESS record for the extension
+            const newRecord = yield tx.probationRecord.create({
+                data: {
+                    employeeId,
+                    startDate: emp.probationEndDate,
+                    endDate: new Date(newEndDate),
+                    status: 'IN_PROGRESS',
+                    remarks: remarks !== null && remarks !== void 0 ? remarks : null,
+                },
+            });
+            // Update employee snapshot
+            const updated = yield tx.employee.update({
+                where: { id: employeeId },
+                data: {
+                    probationEndDate: new Date(newEndDate),
+                    probationStatus: 'IN_PROGRESS',
+                    probationRemarks: remarks !== null && remarks !== void 0 ? remarks : null,
+                },
+            });
+            return { employee: updated, record: newRecord };
+        }));
+        res.json(result);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.extendProbation = extendProbation;
+const confirmProbation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const employeeId = Number(req.params.id);
+        const { confirmedOn, remarks } = req.body;
+        const decidedBy = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const when = confirmedOn ? new Date(confirmedOn) : new Date();
+        const result = yield prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            // Close the current IN_PROGRESS record as CONFIRMED
+            yield tx.probationRecord.updateMany({
+                where: { employeeId, status: 'IN_PROGRESS' },
+                data: {
+                    status: 'CONFIRMED',
+                    decidedBy,
+                    decidedOn: when,
+                    remarks: remarks !== null && remarks !== void 0 ? remarks : null,
+                },
+            });
+            const updated = yield tx.employee.update({
+                where: { id: employeeId },
+                data: {
+                    probationStatus: 'CONFIRMED',
+                    probationConfirmedOn: when,
+                    probationConfirmedBy: decidedBy,
+                    probationRemarks: remarks !== null && remarks !== void 0 ? remarks : null,
+                    employmentType: 'PERMANENT',
+                },
+            });
+            return updated;
+        }));
+        res.json(result);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.confirmProbation = confirmProbation;
+const terminateProbation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const employeeId = Number(req.params.id);
+        const { remarks } = req.body;
+        const decidedBy = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const result = yield prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            yield tx.probationRecord.updateMany({
+                where: { employeeId, status: 'IN_PROGRESS' },
+                data: {
+                    status: 'TERMINATED',
+                    decidedBy,
+                    decidedOn: new Date(),
+                    remarks: remarks !== null && remarks !== void 0 ? remarks : null,
+                },
+            });
+            const updated = yield tx.employee.update({
+                where: { id: employeeId },
+                data: {
+                    probationStatus: 'TERMINATED',
+                    probationRemarks: remarks !== null && remarks !== void 0 ? remarks : null,
+                    employmentStatus: 'TERMINATED',
+                },
+            });
+            return updated;
+        }));
+        // Probation termination → kill the employee's access.
+        try {
+            yield (0, employeeAccess_1.revokeEmployeeAccess)(employeeId, 'Probation terminated');
+        }
+        catch (e) {
+            console.error('[probation-terminate] revokeEmployeeAccess failed:', e);
+        }
+        res.json(result);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.terminateProbation = terminateProbation;
+const getProbationHistory = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const employeeId = Number(req.params.id);
+        const records = yield prisma.probationRecord.findMany({
+            where: { employeeId },
+            orderBy: { createdAt: 'asc' },
+        });
+        res.json(records);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(400).json({ error: err.message });
+    }
+});
+exports.getProbationHistory = getProbationHistory;
+/* ════════════════════════════════════════════════════════════════════
+   EMPLOYEE AUDIT LOG
+   GET /api/employees/:id/audit-log
+   Filters: field, source, changedBy, from, to, page, pageSize
+   ════════════════════════════════════════════════════════════════════ */
+const getEmployeeAuditLog = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const employeeId = Number(req.params.id);
+        if (!employeeId)
+            return res.status(400).json({ error: "employeeId required" });
+        const { field, source, changedBy, from, to, page = '1', pageSize = '50' } = req.query;
+        const where = { employeeId };
+        if (source)
+            where.source = String(source);
+        if (changedBy)
+            where.changedBy = Number(changedBy);
+        if (from || to) {
+            where.changedAt = {};
+            if (from)
+                where.changedAt.gte = new Date(String(from));
+            if (to)
+                where.changedAt.lte = new Date(String(to));
+        }
+        const take = Math.min(200, Number(pageSize) || 50);
+        const skip = (Math.max(1, Number(page) || 1) - 1) * take;
+        const [rows, total] = yield Promise.all([
+            prisma.employeeAuditLog.findMany({
+                where,
+                orderBy: { changedAt: 'desc' },
+                take, skip,
+                include: {
+                    changedByEmployee: { select: { id: true, employeeCode: true, firstName: true, lastName: true } },
+                },
+            }),
+            prisma.employeeAuditLog.count({ where }),
+        ]);
+        let filtered = rows;
+        if (field) {
+            const f = String(field);
+            // changedFields is JSON; client-side filter is safer than brittle JSON path queries.
+            filtered = rows.filter((r) => Array.isArray(r.changedFields) && r.changedFields.includes(f));
+        }
+        return res.json({ total: field ? filtered.length : total, rows: filtered });
+    }
+    catch (err) {
+        console.error("getEmployeeAuditLog error:", err);
+        return res.status(500).json({ error: (err === null || err === void 0 ? void 0 : err.message) || "Failed to load audit log" });
+    }
+});
+exports.getEmployeeAuditLog = getEmployeeAuditLog;
+/** Bulk audit-log query — for HR's "everyone whose salary changed last month" view. */
+const queryAuditLog = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { field, source, changedBy, from, to, page = '1', pageSize = '50' } = req.query;
+        const where = {};
+        if (source)
+            where.source = String(source);
+        if (changedBy)
+            where.changedBy = Number(changedBy);
+        if (from || to) {
+            where.changedAt = {};
+            if (from)
+                where.changedAt.gte = new Date(String(from));
+            if (to)
+                where.changedAt.lte = new Date(String(to));
+        }
+        const take = Math.min(200, Number(pageSize) || 50);
+        const skip = (Math.max(1, Number(page) || 1) - 1) * take;
+        const [rows, total] = yield Promise.all([
+            prisma.employeeAuditLog.findMany({
+                where,
+                orderBy: { changedAt: 'desc' },
+                take, skip,
+                include: {
+                    employee: { select: { id: true, employeeCode: true, firstName: true, lastName: true } },
+                    changedByEmployee: { select: { id: true, employeeCode: true, firstName: true, lastName: true } },
+                },
+            }),
+            prisma.employeeAuditLog.count({ where }),
+        ]);
+        let filtered = rows;
+        if (field) {
+            const f = String(field);
+            filtered = rows.filter((r) => Array.isArray(r.changedFields) && r.changedFields.includes(f));
+        }
+        return res.json({ total: field ? filtered.length : total, rows: filtered });
+    }
+    catch (err) {
+        console.error("queryAuditLog error:", err);
+        return res.status(500).json({ error: (err === null || err === void 0 ? void 0 : err.message) || "Failed to load audit log" });
+    }
+});
+exports.queryAuditLog = queryAuditLog;

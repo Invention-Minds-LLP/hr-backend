@@ -1,3 +1,4 @@
+import "dotenv/config"; // must run before any module that reads process.env at import time
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -35,6 +36,7 @@ import attendanceCalendarRoutes from "./api/attendance/attendance.routes";
 import { initSurveyScheduler } from "./api/survey/survery.controller";
 import { initNoticePeriodSchedular } from "./api/resignation/resignation.controller";
 import incidentRouter from "./api/incident/incident.routes";
+import committeeRouter from "./api/committee/committee.routes";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { startSchedulers } from "./schedulers/scheduler";
@@ -56,6 +58,7 @@ import loanRoutes from "./api/loan/loan.routes";
 import weeklyRatingRoutes from "./api/weekly-rating/weekly-rating.routes";
 import pipRoutes, { respondViaToken } from "./api/pip/pip.routes";
 import managementRoutes from "./api/management/management.routes";
+import { authenticateToken } from "./middleware/authMiddleware";
 
 
 
@@ -68,11 +71,28 @@ const port = 3002;
 
 dotenv.config();
 const app = express();
+// Behind a single reverse proxy (nginx). Lets express-rate-limit / req.ip use
+// the real client IP from X-Forwarded-For without trusting arbitrary hops.
+app.set("trust proxy", 1);
 app.use(helmet());
-// app.use("/api/", rateLimit({
-//   windowMs: 10 * 60 * 1000, 
-//   max: 300
-// }));
+
+// Global API rate limit (per IP). Blanket protection against scraping/abuse.
+app.use("/api/", rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+}));
+
+// Stricter limit on auth endpoints to blunt credential/OTP brute-forcing.
+app.use(["/api/users/login", "/api/users/login-init", "/api/users/verify-otp",
+         "/api/users/candidate/login", "/api/auth"],
+  rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+  }));
 
 
 // app.use(cors({
@@ -125,7 +145,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 // Routes
 app.use("/api/employees", employeeRoutes);
@@ -158,6 +178,7 @@ app.use('/api/notifications', notificationRouter);
 app.use('/api/trainings', trainingRouter);
 app.use('/api/attendance', attendanceCalendarRoutes);
 app.use('/api/incidents', incidentRouter);
+app.use('/api/committees', committeeRouter);
 app.use("/api/designation", designationRoutes);
 app.use("/api/sms", smsRoutes);
 app.use("/api/auth", mobileAuthRoutes);
@@ -181,7 +202,7 @@ app.post("/api/pip-respond/:token", respondViaToken);
 
 // Utility: backfill biometric attendance for one employee across a date range
 import { backfillEmployeeAttendance, runBiometricSync, debugFetchCosec } from "./api/biometric/biometric.controller";
-app.post("/api/biometric/backfill-employee", async (req, res) => {
+app.post("/api/biometric/backfill-employee", authenticateToken, async (req, res) => {
   try {
     const { employeeCode, fromDate, toDate } = req.body;
     if (!employeeCode || !fromDate || !toDate) {
@@ -213,7 +234,7 @@ app.post("/api/biometric/backfill-employee", async (req, res) => {
  * holding the HTTP request open for minutes, this kicks the job off in the
  * background and returns immediately. Watch the server console for progress.
  */
-app.post("/api/biometric/run-sync", async (req, res) => {
+app.post("/api/biometric/run-sync", authenticateToken, async (req, res) => {
   const isFinalRun = !!(req.body || {}).isFinalRun;
   console.log(`[manual] biometric sync requested | isFinalRun=${isFinalRun}`);
 
@@ -252,7 +273,7 @@ app.post("/api/biometric/run-sync", async (req, res) => {
  * `totalRecords` and `presence.foundExact` tells you exactly which filter
  * is dropping the user.
  */
-app.post("/api/biometric/cosec-debug", async (req, res) => {
+app.post("/api/biometric/cosec-debug", authenticateToken, async (req, res) => {
   try {
     const body = req.body || {};
     const date = body.date ? new Date(body.date) : new Date();

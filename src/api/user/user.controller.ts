@@ -173,22 +173,24 @@ const getClientIp = (req: Request) => {
 export const resetMyPassword = async (req: Request, res: Response) => {
   try {
     const authUserId = (req as any).user?.userId as number; // set by auth middleware
-    const { userId, confirmPassword, newPassword } = req.body;
+    const { confirmPassword, newPassword } = req.body;
 
-    // if (!authUserId) return res.status(401).json({ error: "Unauthorized" });
+    if (!authUserId) return res.status(401).json({ error: "Unauthorized" });
     if (!confirmPassword || !newPassword) {
       return res.status(400).json({ error: "currentPassword and newPassword are required" });
     }
 
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    // Always operate on the authenticated user's own account — never trust a
+    // userId supplied in the request body (that allowed resetting anyone's password).
+    const user = await prisma.user.findUnique({ where: { id: authUserId } });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // const ok = await bcrypt.compare( confirmPassword, user.passwordHash);
-    // if (!ok) return res.status(401).json({ error: "Current password is incorrect" });
+    const ok = await bcrypt.compare(confirmPassword, user.passwordHash);
+    if (!ok) return res.status(401).json({ error: "Current password is incorrect" });
 
     const newHash = await bcrypt.hash(newPassword, 10);
     await prisma.user.update({
-      where: { id: userId },
+      where: { id: user.id },
       data: { passwordHash: newHash }
     });
 
@@ -202,8 +204,8 @@ export const resetMyPassword = async (req: Request, res: Response) => {
 // ADMIN RESET (requires admin role)
 export const adminResetPassword = async (req: Request, res: Response) => {
   try {
-    const requesterRole = (req as any).user?.role as string;
-    if (requesterRole !== "admin") return res.status(403).json({ error: "Forbidden" });
+    const requesterRole = String((req as any).user?.role ?? "").toUpperCase();
+    if (requesterRole !== "ADMIN") return res.status(403).json({ error: "Forbidden" });
 
     const { userId, newPassword } = req.body;
     if (!userId || !newPassword) {

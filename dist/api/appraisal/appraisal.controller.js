@@ -95,12 +95,13 @@ const createAppraisalsForEmployees = (employeeIds_1, cycle_1, ...args_1) => __aw
         // } catch (e) {
         //   console.error("Appraisal create WA (manager) failed:", e);
         // }
-        const message = `A new appraisal has been created for ${employeeName} and assigned to you for review.\nKindly acknowledge and take appropriate action.`;
-        // try {
-        //   await createNotification(mgr.id, message); // ✅ send SSE + DB notification
-        // } catch (e) {
-        //   console.error("Appraisal in-app notification failed:", e);
-        // }
+        const message = `A new appraisal has been created for ${employeeName} and assigned to you for review. Kindly acknowledge and take appropriate action.`;
+        try {
+            yield (0, notifications_controller_1.createNotification)(mgr.id, message);
+        }
+        catch (e) {
+            console.error("Appraisal in-app notification failed:", e);
+        }
     })));
     return created;
 });
@@ -201,7 +202,42 @@ const initQuarterlyAppraisalScheduler = () => {
 exports.initQuarterlyAppraisalScheduler = initQuarterlyAppraisalScheduler;
 const getAllAppraisalsWithManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
+        const user = req.user;
+        const userRole = (user === null || user === void 0 ? void 0 : user.role) || '';
+        const empId = Number(user === null || user === void 0 ? void 0 : user.empId);
+        const deptId = Number(user === null || user === void 0 ? void 0 : user.deptId);
+        const isHRManager = userRole === 'HR Manager' || userRole === 'HR';
+        const isManagement = userRole === 'Management';
+        const isReportingManager = userRole === 'Reporting Manager';
+        // HR dept (dept 1), role 2 — handles appraisals for all other departments
+        const isHRExecutive = deptId === 1 && !isHRManager && !isManagement && !isReportingManager;
+        // Build where clause based on role/dept
+        let whereClause = {};
+        if (isHRManager || isManagement) {
+            whereClause = {}; // see all
+        }
+        else if (isHRExecutive) {
+            // HR executives see other-dept appraisals + their own appraisal (for self-appraisal module)
+            whereClause = {
+                OR: [
+                    { employee: { departmentId: { not: 1 } } },
+                    { employeeId: empId },
+                ],
+            };
+        }
+        else if (isReportingManager) {
+            whereClause = {
+                OR: [
+                    { employee: { reportingManager: empId } },
+                    { employeeId: empId },
+                ],
+            };
+        }
+        else {
+            whereClause = { employeeId: empId }; // own appraisal only
+        }
         const appraisals = yield prisma_1.prisma.appraisalForm.findMany({
+            where: whereClause,
             include: {
                 employee: {
                     select: {
@@ -218,7 +254,8 @@ const getAllAppraisalsWithManagerReview = (req, res) => __awaiter(void 0, void 0
                         photoUrl: true
                     }
                 },
-                managerReview: true // include ONLY ManagerAppraisal
+                managerReview: true,
+                editRequests: { where: { status: "PENDING" }, select: { id: true, requestType: true, status: true } },
             },
             orderBy: { createdAt: "desc" }
         });
@@ -230,9 +267,27 @@ const getAllAppraisalsWithManagerReview = (req, res) => __awaiter(void 0, void 0
             select: { id: true, firstName: true, lastName: true },
         });
         const managerMap = new Map(managers.map((m) => [m.id, `${m.firstName} ${m.lastName}`]));
-        const formatted = appraisals.map((appraisal) => (Object.assign(Object.assign({}, appraisal), { managerName: appraisal.managerId
-                ? managerMap.get(appraisal.managerId) || null
-                : null })));
+        const formatted = appraisals.map((appraisal) => {
+            const result = Object.assign(Object.assign({}, appraisal), { managerName: appraisal.managerId
+                    ? managerMap.get(appraisal.managerId) || null
+                    : null });
+            // Determine per-appraisal score visibility:
+            // HR Manager and Management always see scores.
+            // Reporting Manager sees scores for appraisals they manage.
+            // HR Executive sees scores for other-dept appraisals but NOT their own.
+            // Everyone else never sees scores.
+            const isOwnAppraisal = appraisal.employeeId === empId;
+            const canViewThisScore = isHRManager ||
+                isManagement ||
+                (isHRExecutive && !isOwnAppraisal) ||
+                (isReportingManager && !isOwnAppraisal);
+            if (!canViewThisScore) {
+                result.managerReview = null;
+                result.finalDecision = null;
+                result.finalComments = null;
+            }
+            return result;
+        });
         res.json(formatted);
     }
     catch (error) {
@@ -313,9 +368,9 @@ const saveManagerReview = (req, res) => __awaiter(void 0, void 0, void 0, functi
                 where: { departmentId: 1 },
                 select: { id: true },
             });
-            // for (const hr of hrEmployees) {
-            //   await createNotification(hr.id, message);
-            // }
+            for (const hr of hrEmployees) {
+                yield (0, notifications_controller_1.createNotification)(hr.id, message);
+            }
         }
         res.json({ message: 'Manager review saved successfully' });
     }

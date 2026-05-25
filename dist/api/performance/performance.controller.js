@@ -13,6 +13,7 @@ exports.getAllSummaries = exports.assignFormToEmployee = exports.submitFullForm 
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+const notifications_controller_1 = require("../notifications/notifications.controller");
 // Create a template
 const createTemplate = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
@@ -200,11 +201,11 @@ const submitFullForm = (req, res) => __awaiter(void 0, void 0, void 0, function*
             });
             const hrIds = hrUsers.map(u => u.id);
             const messages = `HOD has submitted appraisal for ${employeeName} for ${data.cycle} – ${data.summaries[0].period}. Please review`;
-            // if (hrIds.length) {
-            //   for (const hrId of hrIds) {
-            //     await createNotification(hrId, messages)
-            //   }
-            // }
+            if (hrIds.length) {
+                for (const hrId of hrIds) {
+                    yield (0, notifications_controller_1.createNotification)(hrId, messages);
+                }
+            }
         }
         // 3) Save final review
         if (data.finalReview) {

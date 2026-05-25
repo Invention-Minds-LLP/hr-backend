@@ -13,6 +13,7 @@ exports.getAssignedTestOverview = exports.getAssignedTests = exports.assignTestT
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+const notifications_controller_1 = require("../notifications/notifications.controller");
 const TEST_ASSIGNED_TEMPLATE_ID = '888289';
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" }) : "";
 const fmtTime = (d) => d ? new Date(d).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "";
@@ -64,11 +65,12 @@ const assignTestToEmployees = (req, res) => __awaiter(void 0, void 0, void 0, fu
             // 📩 Notification message
             const message = `You have been assigned the ${testName} scheduled on ${dateLabel} at ${timeLabel}.\nKindly ensure to complete it as instructed.`;
             // --- In-App Notification
-            // try {
-            //   await createNotification(emp.id, message); // creates + broadcasts
-            // } catch (e) {
-            //   console.error("Test assign in-app notification failed:", e);
-            // }
+            try {
+                yield (0, notifications_controller_1.createNotification)(emp.id, message);
+            }
+            catch (e) {
+                console.error("Test assign in-app notification failed:", e);
+            }
             // try {
             //   await sendWhatsAppTemplate({
             //     to,

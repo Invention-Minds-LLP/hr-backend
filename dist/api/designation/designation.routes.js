@@ -2,11 +2,11 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const designation_controller_1 = require("./designation.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = (0, express_1.Router)();
-/* ==========================
-   DESIGNATION ROUTES
-   ========================== */
-router.post("/", designation_controller_1.createDesignation); // Create designation
-router.get("/", designation_controller_1.getDesignations); // Get all designations
-router.get("/:id", designation_controller_1.getDesignationById); // Get designation by id
+router.post("/", authMiddleware_1.authenticateToken, designation_controller_1.createDesignation);
+router.get("/", authMiddleware_1.authenticateToken, designation_controller_1.getDesignations);
+router.get("/:id", authMiddleware_1.authenticateToken, designation_controller_1.getDesignationById);
+router.put("/:id", authMiddleware_1.authenticateToken, designation_controller_1.updateDesignation);
+router.delete("/:id", authMiddleware_1.authenticateToken, designation_controller_1.deleteDesignation);
 exports.default = router;

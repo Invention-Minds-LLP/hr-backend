@@ -1,0 +1,10 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const comp_off_controller_1 = require("./comp-off.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const router = (0, express_1.Router)();
+router.get("/", authMiddleware_1.authenticateToken, comp_off_controller_1.getCompOffCredits);
+router.post("/", authMiddleware_1.authenticateToken, comp_off_controller_1.createCompOff);
+router.delete("/:id", authMiddleware_1.authenticateToken, comp_off_controller_1.deleteCompOff);
+exports.default = router;

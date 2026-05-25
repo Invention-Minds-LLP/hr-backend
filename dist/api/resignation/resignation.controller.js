@@ -86,6 +86,8 @@ const basic_ftp_1 = require("basic-ftp");
 const prisma = new client_1.PrismaClient();
 const node_cron_1 = __importDefault(require("node-cron"));
 const employee_controller_1 = require("../employee/employee.controller");
+const notifications_controller_1 = require("../notifications/notifications.controller");
+const employeeAccess_1 = require("../../lib/employeeAccess");
 function computeClearanceDecision(items) {
     // If any DUE -> REJECTED
     if (items.some(i => i.status === "DUE"))
@@ -132,9 +134,9 @@ function createResignation(req, res) {
                     notifyIds.add(emp.reportingManager);
                 hrIds.forEach(id => notifyIds.add(id));
                 const message = `New resignation submitted by Employee ${emp.firstName} ${emp.lastName} (${emp.employeeCode}).`;
-                // for (const id of notifyIds) {
-                //   await createNotification(id, message);
-                // }
+                for (const id of notifyIds) {
+                    yield (0, notifications_controller_1.createNotification)(id, message);
+                }
             }
             catch (err) {
                 console.error("Resignation notification failed:", err);
@@ -352,9 +354,9 @@ function managerApprove(req, res) {
             try {
                 const hrIds = yield getHRIds();
                 const message = `Manager has approved the resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
-                // for (const hrId of hrIds) {
-                //   await createNotification(hrId, message);
-                // }
+                for (const hrId of hrIds) {
+                    yield (0, notifications_controller_1.createNotification)(hrId, message);
+                }
             }
             catch (err) {
                 console.error("Manager action notification failed:", err);
@@ -394,9 +396,10 @@ function managerReject(req, res) {
             try {
                 const hrIds = yield getHRIds();
                 const message = `Manager has rejected the resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
-                // for (const hrId of hrIds) {
-                //   await createNotification(hrId, message);
-                // }
+                for (const hrId of hrIds) {
+                    yield (0, notifications_controller_1.createNotification)(hrId, message);
+                }
+                yield (0, notifications_controller_1.createNotification)(upd.employeeId, `Your resignation has been rejected by your manager.`);
             }
             catch (err) {
                 console.error("Manager action notification failed:", err);
@@ -464,12 +467,12 @@ function hrApprove(req, res) {
                 console.log(`✅ Created new job for replacement: Job ID ${newJob.id}`);
             }
             // 🔔 Notify employee about HR approval
-            // try {
-            //   const message = `Your resignation has been approved. Please complete exit formalities.`;
-            //   await createNotification(upd.employeeId, message);
-            // } catch (err) {
-            //   console.error("HR approval notification failed:", err);
-            // }
+            try {
+                yield (0, notifications_controller_1.createNotification)(upd.employeeId, `Your resignation has been approved by HR. Please complete exit formalities.`);
+            }
+            catch (err) {
+                console.error("HR approval notification failed:", err);
+            }
             const defaultDepts = yield prisma.department.findMany({
                 where: { isDefaultClearance: true },
                 select: { id: true },
@@ -502,12 +505,12 @@ function hrReject(req, res) {
                     status: 'REJECTED'
                 }
             });
-            // try {
-            //   const message = `Your resignation has been rejected by HR.`;
-            //   await createNotification(upd.employeeId, message);
-            // } catch (err) {
-            //   console.error("HR rejection notification failed:", err);
-            // }
+            try {
+                yield (0, notifications_controller_1.createNotification)(upd.employeeId, `Your resignation has been rejected by HR.`);
+            }
+            catch (err) {
+                console.error("HR rejection notification failed:", err);
+            }
             res.json(upd);
         }
         catch (e) {
@@ -524,12 +527,12 @@ function hrCancel(req, res) {
                 where: { id },
                 data: { status: 'CANCELLED' }
             });
-            // try {
-            //   const message = `Your resignation has been cancelled by HR.`;
-            //   await createNotification(upd.employeeId, message);
-            // } catch (err) {
-            //   console.error("HR cancel notification failed:", err);
-            // }
+            try {
+                yield (0, notifications_controller_1.createNotification)(upd.employeeId, `Your resignation has been cancelled by HR.`);
+            }
+            catch (err) {
+                console.error("HR cancel notification failed:", err);
+            }
             res.json(upd);
         }
         catch (e) {
@@ -1596,12 +1599,20 @@ const initNoticePeriodSchedular = () => {
                 },
             });
             console.log(`📋 Found ${dueResignations.length} employees with ended notice period.`);
-            // 2️⃣ Update each employee to 'RESIGNED'
+            // 2️⃣ Update each employee to 'RESIGNED' AND revoke their access
+            //    (delete device tokens, mobile sessions, stamp accessRevokedAt
+            //    so existing JWTs can no longer authenticate).
             for (const resignation of dueResignations) {
                 yield prisma.employee.update({
                     where: { id: resignation.employeeId },
                     data: { employmentStatus: 'RESIGNED' },
                 });
+                try {
+                    yield (0, employeeAccess_1.revokeEmployeeAccess)(resignation.employeeId, 'Notice period ended (cron)');
+                }
+                catch (e) {
+                    console.error(`[resignation cron] revoke failed for emp ${resignation.employeeId}:`, e);
+                }
                 console.log(`✅ Employee ID ${resignation.employeeId} marked as RESIGNED.`);
                 // // Optional: also update the resignation request status → COMPLETED
                 // await prisma.resignationRequest.update({

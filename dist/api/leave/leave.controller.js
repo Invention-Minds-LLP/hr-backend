@@ -44,18 +44,29 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
+var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.uploadPrescription = exports.initFinancialYearRolloverCron = exports.bulkUploadLeaveBalancesExcel = exports.initNewJoineeLeaveAllocationCron = exports.initELAccrualCron = exports.getCompOffCredits = exports.getMonthlyCasualUsage = exports.updateLeaveType = exports.initLeaveEndSchedular = exports.getLeaveBalance = exports.getBlockedDates = exports.createLeaveBalances = exports.updateLeaveStatus = exports.getLeaveTypes = exports.createLeaveType = exports.getLeaveRequests = exports.createLeaveRequest = void 0;
+exports.uploadPrescription = exports.triggerFYRollover = exports.purgeAndRerunFYRollover = exports.initFinancialYearRolloverCron = exports.bulkUploadLeaveBalancesExcel = exports.initNewJoineeLeaveAllocationCron = exports.initELAccrualCron = exports.triggerELAccrual = exports.getCompOffCredits = exports.getMonthlyCasualUsage = exports.updateLeaveType = exports.initLeaveEndScheduler = exports.getLeaveBalance = exports.getBlockedDates = exports.createLeaveBalances = exports.updateLeaveStatus = exports.getLeaveTypes = exports.createLeaveType = exports.getLeaveRequests = exports.cancelLeaveRequest = exports.updateLeaveRequest = exports.createLeaveRequest = void 0;
 exports.daysInclusive = daysInclusive;
+exports.countWorkingDays = countWorkingDays;
 exports.getLeaveDashboard = getLeaveDashboard;
 exports.getWhoIsOnLeaveToday = getWhoIsOnLeaveToday;
 exports.getWhoIsOnLeaveBuckets = getWhoIsOnLeaveBuckets;
 exports.sendWhatsAppTemplate = sendWhatsAppTemplate;
+exports.computeTotalUsed = computeTotalUsed;
+exports.getTouchedMonths = getTouchedMonths;
+exports.insertLedgerTx = insertLedgerTx;
+exports.getLastLedgerBalanceTx = getLastLedgerBalanceTx;
+exports.getFinancialYear = getFinancialYear;
+exports.getCalendarYear = getCalendarYear;
+exports.runFYRollover = runFYRollover;
 // import { PrismaClient, LeaveStatus } from "@prisma/client";
 const axios_1 = __importDefault(require("axios"));
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+const notifications_controller_1 = require("../notifications/notifications.controller");
 const node_cron_1 = __importDefault(require("node-cron"));
+const client_1 = require("@prisma/client");
 const formidable_1 = __importDefault(require("formidable"));
 const XLSX = __importStar(require("xlsx"));
 const p_limit_1 = __importDefault(require("p-limit"));
@@ -63,10 +74,10 @@ const fs_1 = __importDefault(require("fs"));
 const basic_ftp_1 = require("basic-ftp");
 const path_1 = __importDefault(require("path"));
 const FTP_CONFIG = {
-    host: "srv680.main-hosting.eu", // Your FTP hostname
-    user: "u948610439.hrproindia.in", // Your FTP username
-    password: "Bsrenuk@1993", // Your FTP password
-    secure: false // Set to true if using FTPS
+    host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
+    user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
+    password: (_c = process.env.FTP_PASSWORD) !== null && _c !== void 0 ? _c : "",
+    secure: false,
 };
 const LEAVE_APPLY_TEMPLATE_ID = "890321";
 const LEAVE_STATUS_TEMPLATE_ID = "909803";
@@ -92,6 +103,19 @@ const createLeaveRequest = (req, res) => __awaiter(void 0, void 0, void 0, funct
         if (lt.name === "CO" && isHalfDay) {
             return res.status(400).json({ error: "Half-day not allowed for CO" });
         }
+        // ── Rule A: one leave TYPE per ISO week ──────────────────────────
+        // If the employee already has a PENDING/APPROVED leave of a DIFFERENT
+        // type touching any week of this request, block it. (RH / CO exempt.)
+        const weeklyClash = yield findWeeklyTypeConflict(Number(employeeId), Number(leaveTypeId), lt.name, start, end);
+        if (weeklyClash) {
+            const wkLabel = startOfISOWeek(new Date(weeklyClash.startDate))
+                .toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+            return res.status(400).json({
+                error: `You already have a ${weeklyClash.leaveType.name} leave in the week of ${wkLabel}. `
+                    + `Only one leave type is allowed per week — please use ${weeklyClash.leaveType.name} for these dates `
+                    + `or pick dates in a different week.`,
+            });
+        }
         // Fetch balance for that year & leave type
         const balance = yield prisma_1.prisma.employeeLeaveBalance.findFirst({
             where: {
@@ -100,20 +124,76 @@ const createLeaveRequest = (req, res) => __awaiter(void 0, void 0, void 0, funct
                 year: year,
             }
         });
-        if (!balance) {
+        // Allow advance applications for the next FY when rollover hasn't run yet
+        // (e.g., applying for April leave while still in March)
+        const currentFY = getFinancialYear(new Date());
+        // const isAdvanceNextFY = !balance && year === currentFY + 1;
+        if (!balance && (lt.name !== "CO" && lt.name !== "RH")) {
             return res.status(400).json({
                 error: `Leave balance not configured for ${year}`
             });
         }
         // const year = start.getFullYear();
-        const requestedUnits = isHalfDay ? 0.5 : daysInclusive(start, end);
+        // EL counts week-offs that fall inside the range (sandwich rule).
+        const isEarnedLeave = lt.name === "EL";
+        const requestedUnits = isHalfDay
+            ? 0.5
+            : yield countWorkingDays(employeeId, start, end, { includeWeekOffs: isEarnedLeave });
         if (isHalfDay && !isSameDate(new Date(startDate), new Date(endDate))) {
             return res.status(400).json({ error: "Half-day must be a single date" });
         }
         if (isHalfDay && !halfDaySession) {
             return res.status(400).json({ error: "halfDaySession is required for half-day" });
         }
-        if (lt.name !== "CO") {
+        if (lt.name === "CL" && requestedUnits > 2) {
+            return res.status(400).json({
+                error: "Casual Leave (CL) can be applied for a maximum of 2 days at a time",
+            });
+        }
+        // ── RH (Restricted Holiday) validations ───────────────────────────────
+        if (lt.name === "RH") {
+            // RH must be exactly 1 day
+            if (requestedUnits > 1) {
+                return res.status(400).json({ error: "RH can only be applied for 1 day at a time" });
+            }
+            // RH date must fall on an optional holiday
+            // The start date from frontend is IST midnight in UTC (e.g. 2026-04-02T18:30:00Z for April 3rd IST)
+            // Holiday dates are stored as UTC midnight (e.g. 2026-04-03T00:00:00Z)
+            // So we need to check a window around the start date to account for timezone
+            const rhDateStart = new Date(start.getTime() - 6 * 60 * 60 * 1000); // -6 hours buffer
+            const rhDateEnd = new Date(start.getTime() + 24 * 60 * 60 * 1000); // +24 hours buffer
+            const optionalHoliday = yield prisma_1.prisma.holiday.findFirst({
+                where: {
+                    isOptional: true,
+                    date: {
+                        gte: rhDateStart,
+                        lt: rhDateEnd,
+                    },
+                },
+            });
+            if (!optionalHoliday) {
+                return res.status(400).json({
+                    error: "RH can only be applied on a Restricted Holiday (optional holiday) date",
+                });
+            }
+            // Max 2 RH allowed per financial year (out of available optional holidays)
+            const MAX_RH_PER_YEAR = 2;
+            const rhUsedCount = yield prisma_1.prisma.leaveRequest.count({
+                where: {
+                    employeeId: Number(employeeId),
+                    leaveTypeId: Number(leaveTypeId),
+                    status: { in: ["PENDING", "APPROVED"] },
+                    startDate: { gte: new Date(Date.UTC(year, 3, 1)) },
+                    endDate: { lt: new Date(Date.UTC(year + 1, 3, 1)) },
+                },
+            });
+            if (rhUsedCount >= MAX_RH_PER_YEAR) {
+                return res.status(400).json({
+                    error: `Maximum ${MAX_RH_PER_YEAR} Restricted Holidays allowed per financial year. You have already used ${rhUsedCount}.`,
+                });
+            }
+        }
+        if (lt.name !== "CO" && lt.name !== "RH") {
             const bal = yield getBalance(Number(employeeId), Number(leaveTypeId), year);
             if (!bal)
                 return res.status(400).json({ error: `Leave balance not configured for ${year}` });
@@ -208,9 +288,9 @@ const createLeaveRequest = (req, res) => __awaiter(void 0, void 0, void 0, funct
         }
         // const name = [emp.firstName, emp.lastName].filter(Boolean).join(" ");
         const message = `${name} has applied for leave for ${days} day(s), from ${fmtDate(leaveRequest.startDate)} to ${fmtDate(leaveRequest.endDate)}. Please review and take action.`;
-        // for (const id of recipients) {
-        //   await createNotification(id, message);
-        // }
+        for (const id of recipients) {
+            yield (0, notifications_controller_1.createNotification)(id, message);
+        }
         if (notifyTo) {
             const approver = yield prisma_1.prisma.employee.findUnique({
                 where: { id: notifyTo },
@@ -239,6 +319,145 @@ const createLeaveRequest = (req, res) => __awaiter(void 0, void 0, void 0, funct
     }
 });
 exports.createLeaveRequest = createLeaveRequest;
+// ─────────────────────────────────────────────────────────────────
+// EDIT a pending leave request
+// Only allowed when no approver (incharge / RM/HOD / HR) has acted yet,
+// AND the overall status is still PENDING.
+// ─────────────────────────────────────────────────────────────────
+const updateLeaveRequest = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const id = Number(req.params.id);
+        const { startDate, endDate, reason, isHalfDay, halfDaySession, leaveTypeId } = req.body;
+        const userId = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const existing = yield prisma_1.prisma.leaveRequest.findUnique({ where: { id } });
+        if (!existing)
+            return res.status(404).json({ error: "Leave request not found" });
+        // Only the owner may edit
+        if (userId && existing.employeeId !== Number(userId)) {
+            return res.status(403).json({ error: "You can only edit your own leave request" });
+        }
+        // Block edit once any approver has acted
+        if (existing.status !== "PENDING") {
+            return res.status(400).json({ error: `Cannot edit a ${existing.status.toLowerCase()} leave request` });
+        }
+        if (existing.inChargeDecision !== "PENDING" ||
+            existing.hodDecision !== "PENDING" ||
+            existing.hrDecision !== "PENDING") {
+            return res.status(400).json({ error: "Cannot edit — at least one approver has already acted" });
+        }
+        // Build a partial update payload; only include fields the user actually sent
+        const data = { updatedAt: new Date() };
+        if (startDate)
+            data.startDate = new Date(startDate);
+        if (endDate)
+            data.endDate = new Date(endDate);
+        if (reason !== undefined)
+            data.reason = reason;
+        if (isHalfDay !== undefined)
+            data.isHalfDay = !!isHalfDay;
+        if (halfDaySession !== undefined)
+            data.halfDaySession = halfDaySession;
+        if (leaveTypeId)
+            data.leaveTypeId = Number(leaveTypeId);
+        if (data.startDate && data.endDate && data.endDate < data.startDate) {
+            return res.status(400).json({ error: "endDate cannot be before startDate" });
+        }
+        const updated = yield prisma_1.prisma.leaveRequest.update({ where: { id }, data });
+        return res.json(updated);
+    }
+    catch (err) {
+        console.error("Error updating leave request:", err);
+        return res.status(500).json({ error: err.message || "Failed to update leave request" });
+    }
+});
+exports.updateLeaveRequest = updateLeaveRequest;
+// ─────────────────────────────────────────────────────────────────
+// CANCEL a pending leave request
+// Same rule as edit — disallowed once any approver has acted.
+// ─────────────────────────────────────────────────────────────────
+const cancelLeaveRequest = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e;
+    try {
+        const id = Number(req.params.id);
+        const { reason } = (_a = req.body) !== null && _a !== void 0 ? _a : {};
+        const userId = (_c = (_b = req.user) === null || _b === void 0 ? void 0 : _b.empId) !== null && _c !== void 0 ? _c : null;
+        const existing = yield prisma_1.prisma.leaveRequest.findUnique({
+            where: { id },
+            include: {
+                leaveType: true,
+                employee: {
+                    select: {
+                        firstName: true, lastName: true, employeeCode: true,
+                        reportingManager: true, inchargeId: true, departmentId: true,
+                    },
+                },
+            },
+        });
+        if (!existing)
+            return res.status(404).json({ error: "Leave request not found" });
+        if (userId && existing.employeeId !== Number(userId)) {
+            return res.status(403).json({ error: "You can only cancel your own leave request" });
+        }
+        if (existing.status === "CANCELLED") {
+            return res.status(400).json({ error: "Already cancelled" });
+        }
+        if (existing.status !== "PENDING" ||
+            existing.inChargeDecision !== "PENDING" ||
+            existing.hodDecision !== "PENDING" ||
+            existing.hrDecision !== "PENDING") {
+            return res.status(400).json({ error: "Cannot cancel — request has already been actioned" });
+        }
+        const updated = yield prisma_1.prisma.leaveRequest.update({
+            where: { id },
+            data: {
+                status: "CANCELLED",
+                cancelledAt: new Date(),
+                cancelledBy: userId ? Number(userId) : null,
+                cancellationReason: reason !== null && reason !== void 0 ? reason : "Cancelled by employee",
+            },
+        });
+        // ── Notify the same people who were notified on creation ────────
+        const emp = existing.employee;
+        const recipients = new Set();
+        if (emp.departmentId === 1) {
+            // HR employee → only their reporting manager
+            if (emp.reportingManager)
+                recipients.add(emp.reportingManager);
+        }
+        else {
+            if (emp.inchargeId)
+                recipients.add(emp.inchargeId);
+            if (emp.reportingManager)
+                recipients.add(emp.reportingManager);
+            const hrManagers = yield prisma_1.prisma.employee.findMany({
+                where: { departmentId: 1, employmentStatus: "ACTIVE" },
+                select: { id: true },
+            });
+            hrManagers.forEach((hr) => recipients.add(hr.id));
+        }
+        const name = [emp.firstName, emp.lastName].filter(Boolean).join(" ");
+        const days = daysInclusive(existing.startDate, existing.endDate);
+        const message = `${name} has CANCELLED their ${(_e = (_d = existing.leaveType) === null || _d === void 0 ? void 0 : _d.name) !== null && _e !== void 0 ? _e : "leave"} request for ${days} day(s), ` +
+            `from ${fmtDate(existing.startDate)} to ${fmtDate(existing.endDate)}. ` +
+            `Reason: ${reason !== null && reason !== void 0 ? reason : "Cancelled by employee"}.`;
+        for (const rid of recipients) {
+            try {
+                yield (0, notifications_controller_1.createNotification)(rid, message);
+            }
+            catch (notifyErr) {
+                console.error(`Failed to notify recipient ${rid}:`, notifyErr);
+                // Don't fail the cancellation if notification delivery fails
+            }
+        }
+        return res.json(updated);
+    }
+    catch (err) {
+        console.error("Error cancelling leave request:", err);
+        return res.status(500).json({ error: err.message || "Failed to cancel leave request" });
+    }
+});
+exports.cancelLeaveRequest = cancelLeaveRequest;
 // Get All Leave Requests (optional)
 const getLeaveRequests = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
@@ -1126,7 +1345,7 @@ const updateLeaveStatus = (req, res) => __awaiter(void 0, void 0, void 0, functi
             //   Level1: MANAGEMENT
             //   Level2: HR_MANAGER
             // ================================================================
-            else if (roleId === 3 || roleId === 5) {
+            else if (roleId === 3) {
                 if (role === "MANAGEMENT") {
                     data.hodDecision = approved ? "APPROVED" : "REJECTED";
                     data.hodDecidedAt = new Date();
@@ -1167,8 +1386,27 @@ const updateLeaveStatus = (req, res) => __awaiter(void 0, void 0, void 0, functi
             //   Level1: REPORTING_MANAGER
             //   Level2: HR_MANAGER
             // ================================================================
-            else if (roleId === 2) {
-                if (role === "REPORTING_MANAGER") {
+            else if (roleId === 2 || roleId === 5) {
+                // Level 1: the employee's assigned reportingManager approves —
+                // regardless of whether that manager's own role is 3 (Reporting
+                // Manager) or 4 (Management). Frontend may send either label, so
+                // we authorize by identity (userId === emp.reportingManager), not
+                // by the role string.
+                if (role === "REPORTING_MANAGER" || role === "MANAGEMENT") {
+                    if (!emp.reportingManager) {
+                        return {
+                            kind: "ERR",
+                            status: 400,
+                            body: { error: "No reporting manager assigned for this employee" },
+                        };
+                    }
+                    if (!userId || userId !== emp.reportingManager) {
+                        return {
+                            kind: "ERR",
+                            status: 403,
+                            body: { error: "Only the assigned reporting manager can approve this leave" },
+                        };
+                    }
                     data.hodDecision = approved ? "APPROVED" : "REJECTED";
                     data.hodDecidedAt = new Date();
                     if (!approved) {
@@ -1225,8 +1463,25 @@ const updateLeaveStatus = (req, res) => __awaiter(void 0, void 0, void 0, functi
             // ================================================================
             const startDate = new Date(updatedLeave.startDate);
             const endDate = new Date(updatedLeave.endDate);
+            // ── Rule A re-check at approval (catches legacy / race conflicts).
+            // If a different-type leave now occupies the same ISO week, refuse.
+            const weeklyClashOnApprove = yield findWeeklyTypeConflict(updatedLeave.employeeId, updatedLeave.leaveTypeId, updatedLeave.leaveType.name, startDate, endDate, updatedLeave.id);
+            if (weeklyClashOnApprove) {
+                return {
+                    kind: "ERR",
+                    status: 400,
+                    body: {
+                        error: `Cannot approve — employee already has a ${weeklyClashOnApprove.leaveType.name} `
+                            + `leave in the same week. Only one leave type is allowed per week.`,
+                    },
+                };
+            }
             const year = getFinancialYear(startDate);
-            const requestedUnits = updatedLeave.isHalfDay ? 0.5 : daysInclusive(startDate, endDate);
+            // EL counts week-offs inside the range (sandwich rule); other types don't.
+            const isEarnedLeave = updatedLeave.leaveType.name === "EL";
+            const requestedUnits = updatedLeave.isHalfDay
+                ? 0.5
+                : yield countWorkingDays(updatedLeave.employeeId, startDate, endDate, { includeWeekOffs: isEarnedLeave });
             // ---- CO: consume credits only (leave balance untouched)
             if (updatedLeave.leaveType.name === "CO") {
                 const today = atStartOfDay(new Date());
@@ -1254,7 +1509,11 @@ const updateLeaveStatus = (req, res) => __awaiter(void 0, void 0, void 0, functi
                 }
                 return { kind: "OK", status: 200, body: Object.assign(Object.assign({}, updatedLeave), { requestedUnits }) };
             }
-            // ---- Non-CO: validate balance
+            // ---- RH: no balance table, just approve (validated at creation)
+            if (updatedLeave.leaveType.name === "RH") {
+                return { kind: "OK", status: 200, body: Object.assign(Object.assign({}, updatedLeave), { requestedUnits }) };
+            }
+            // ---- Non-CO/RH: validate balance
             const bal = yield tx.employeeLeaveBalance.findFirst({
                 where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year, category: "LEAVE" },
             });
@@ -1276,7 +1535,6 @@ const updateLeaveStatus = (req, res) => __awaiter(void 0, void 0, void 0, functi
             }
             // ledger balance check
             const ledgerBalance = yield getLastLedgerBalanceTx(tx, updatedLeave.employeeId, updatedLeave.leaveTypeId, year);
-            console.log(ledgerBalance, requestedUnits);
             if (requestedUnits > ledgerBalance) {
                 return { kind: "ERR", status: 400, body: { error: "Insufficient balance (ledger)" } };
             }
@@ -1299,7 +1557,12 @@ const updateLeaveStatus = (req, res) => __awaiter(void 0, void 0, void 0, functi
             // IMPORTANT: start running balance from current ledger AFTER the debit inserts base
             let runningBalance = ledgerBalance;
             for (const m of touched) {
-                const days = calculateDaysForMonth(startDate, endDate, m.year, m.month);
+                const calYear = getCalendarYear(m.year, m.month);
+                const monthStart = new Date(calYear, m.month - 1, 1);
+                const monthEnd = new Date(calYear, m.month, 0);
+                const from = startDate > monthStart ? startDate : monthStart;
+                const to = endDate < monthEnd ? endDate : monthEnd;
+                const days = yield countWorkingDays(updatedLeave.employeeId, from, to, { includeWeekOffs: isEarnedLeave });
                 if (days <= 0)
                     continue;
                 runningBalance -= days;
@@ -1356,6 +1619,18 @@ const updateLeaveStatus = (req, res) => __awaiter(void 0, void 0, void 0, functi
         // cleanup helper key
         if (body === null || body === void 0 ? void 0 : body.__touched)
             delete body.__touched;
+        // 🔔 Notify employee of final decision
+        if ((body === null || body === void 0 ? void 0 : body.status) === 'APPROVED' || (body === null || body === void 0 ? void 0 : body.status) === 'REJECTED') {
+            try {
+                const start = fmtDate(body.startDate);
+                const end = fmtDate(body.endDate);
+                const days = daysInclusive(new Date(body.startDate), new Date(body.endDate));
+                yield (0, notifications_controller_1.createNotification)(body.employeeId, `Your leave request from ${start} to ${end} (${days} day(s)) has been ${body.status}.`);
+            }
+            catch (err) {
+                console.error("Leave status notification failed:", err);
+            }
+        }
         return res.status(result.status).json(body);
     }
     catch (error) {
@@ -1580,19 +1855,86 @@ function daysInclusive(s, e) {
     ee.setHours(0, 0, 0, 0);
     return Math.floor((ee.getTime() - ss.getTime()) / MS_PER_DAY) + 1;
 }
+// Counts leave days between start and end (inclusive).
+// By default, excludes:
+//   - week-offs (per employee shift config, fallback Sunday)
+//   - mandatory national holidays (isOptional = false)
+// Optional holidays (RH) are always counted as working days.
+//
+// When opts.includeWeekOffs is true, week-offs that fall inside the range ARE
+// counted as leave days. This implements the "Earned Leave sandwich rule" —
+// if an employee takes EL spanning a weekend, the weekend is deducted too.
+// Mandatory national holidays are still excluded even in that mode.
+function countWorkingDays(employeeId, start, end, opts) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        if (start > end)
+            return 0;
+        const includeWeekOffs = !!(opts === null || opts === void 0 ? void 0 : opts.includeWeekOffs);
+        // Fetch all mandatory holidays in the date range once
+        const mandatoryHolidays = yield prisma_1.prisma.holiday.findMany({
+            where: {
+                isOptional: false,
+                date: { gte: start, lte: end }
+            },
+            select: { date: true }
+        });
+        const holidaySet = new Set(mandatoryHolidays.map(h => {
+            const d = new Date(h.date);
+            d.setHours(0, 0, 0, 0);
+            return d.toISOString().slice(0, 10);
+        }));
+        const monthConfigs = new Map();
+        let total = 0;
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+            const current = new Date(d);
+            current.setHours(0, 0, 0, 0);
+            const dateKey = current.toISOString().slice(0, 10);
+            // Skip mandatory national holidays — always, even for EL.
+            if (holidaySet.has(dateKey))
+                continue;
+            // For EL (includeWeekOffs), don't even bother resolving the week-off
+            // config — every non-holiday day counts.
+            if (includeWeekOffs) {
+                total++;
+                continue;
+            }
+            const month = current.getMonth() + 1;
+            const year = current.getFullYear();
+            const monthKey = `${year}-${month}`;
+            if (!monthConfigs.has(monthKey)) {
+                const approval = yield prisma_1.prisma.shiftApproval.findFirst({
+                    where: {
+                        employeeId,
+                        month,
+                        year,
+                        status: "APPROVED",
+                        weekOffConfig: { not: client_1.Prisma.DbNull }
+                    }
+                });
+                monthConfigs.set(monthKey, (_a = approval === null || approval === void 0 ? void 0 : approval.weekOffConfig) !== null && _a !== void 0 ? _a : null);
+            }
+            const config = monthConfigs.get(monthKey);
+            if (!isWeeklyOffFromConfig(config, current)) {
+                total++;
+            }
+        }
+        return total;
+    });
+}
 function getLeaveDashboard(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
         var _a;
         try {
             const employeeId = Number(req.params.id);
             const today = req.query.date ? new Date(String(req.query.date)) : new Date();
-            const y = today.getFullYear();
-            const yearStart = new Date(y, 0, 1);
-            const yearEnd = new Date(y, 11, 31, 23, 59, 59);
-            const monthStart = new Date(y, today.getMonth(), 1);
-            const monthEnd = new Date(y, today.getMonth() + 1, 0, 23, 59, 59);
-            // Entitlement for this year
-            const policy = yield prisma_1.prisma.entitlementPolicy.findFirst({ where: { year: y } });
+            const fyYear = getFinancialYear(today);
+            const yearStart = new Date(fyYear, 3, 1); // April 1 of FY
+            const yearEnd = new Date(fyYear + 1, 2, 31, 23, 59, 59); // March 31 end of FY
+            const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+            const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0, 23, 59, 59);
+            // Entitlement for this financial year
+            const policy = yield prisma_1.prisma.entitlementPolicy.findFirst({ where: { year: fyYear } });
             const entitlement = (_a = policy === null || policy === void 0 ? void 0 : policy.leaveEntitlement) !== null && _a !== void 0 ? _a : 0;
             // Approved leave requests (clamped to year)
             const leaves = yield prisma_1.prisma.leaveRequest.findMany({
@@ -1656,8 +1998,8 @@ function getWhoIsOnLeaveToday(req, res) {
         }
     });
 }
-function atStartOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
-function atEndOfDay(d) { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; }
+function atStartOfDay(d) { const x = new Date(d); x.setUTCHours(0, 0, 0, 0); return x; }
+function atEndOfDay(d) { const x = new Date(d); x.setUTCHours(23, 59, 59, 999); return x; }
 function startOfISOWeek(d) {
     const x = atStartOfDay(d);
     const day = x.getDay(); // 0 Sun..6 Sat
@@ -1670,6 +2012,49 @@ function endOfISOWeek(d) {
     const e = new Date(s);
     e.setDate(s.getDate() + 6);
     return atEndOfDay(e);
+}
+/** Every ISO week (Mon..Sun) that the date range [start, end] overlaps. */
+function isoWeeksTouched(start, end) {
+    const out = [];
+    let cur = startOfISOWeek(start);
+    const lastWeekStart = startOfISOWeek(end);
+    // Walk Monday → Monday until we've covered the week containing `end`.
+    while (cur.getTime() <= lastWeekStart.getTime()) {
+        const ws = new Date(cur);
+        const we = endOfISOWeek(cur);
+        out.push({ weekStart: ws, weekEnd: we });
+        cur = new Date(cur);
+        cur.setDate(cur.getDate() + 7);
+    }
+    return out;
+}
+/**
+ * Rule A — one leave TYPE per ISO week.
+ * Checks whether the employee already has a PENDING/APPROVED leave of a
+ * DIFFERENT type in any ISO week the new request touches. RH and CO are
+ * exempt (special-case leaves: tied to a fixed holiday / earned by working).
+ * Returns the conflicting record (with leaveType) or null if clear.
+ *
+ * Pass `excludeRequestId` when re-checking on approval so the request being
+ * approved doesn't conflict with itself.
+ */
+function findWeeklyTypeConflict(employeeId, leaveTypeId, leaveTypeName, start, end, excludeRequestId) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const WEEKLY_RULE_EXEMPT = ['RH', 'CO'];
+        // The leave being applied for is itself exempt → no restriction.
+        if (WEEKLY_RULE_EXEMPT.includes(leaveTypeName))
+            return null;
+        for (const w of isoWeeksTouched(start, end)) {
+            const clash = yield prisma_1.prisma.leaveRequest.findFirst({
+                where: Object.assign({ employeeId, status: { in: ['PENDING', 'APPROVED'] }, startDate: { lte: w.weekEnd }, endDate: { gte: w.weekStart }, leaveTypeId: { not: leaveTypeId }, leaveType: { name: { notIn: WEEKLY_RULE_EXEMPT } } }, (excludeRequestId ? { id: { not: excludeRequestId } } : {})),
+                include: { leaveType: { select: { name: true } } },
+                orderBy: { startDate: 'asc' },
+            });
+            if (clash)
+                return clash;
+        }
+        return null;
+    });
 }
 function startOfNextMonth(d) {
     return new Date(d.getFullYear(), d.getMonth() + 1, 1, 0, 0, 0, 0);
@@ -1685,6 +2070,13 @@ function getWhoIsOnLeaveBuckets(req, res) {
         var _a, _b;
         try {
             const base = req.query.date ? new Date(String(req.query.date)) : new Date();
+            // Optional scope: when a leave-detail view passes the applicant's
+            // departmentId, restrict buckets to that department only. Without it,
+            // behavior is unchanged (org-wide buckets).
+            const deptIdRaw = req.query.departmentId;
+            const departmentId = deptIdRaw !== undefined && deptIdRaw !== '' && !Number.isNaN(Number(deptIdRaw))
+                ? Number(deptIdRaw)
+                : null;
             // Ranges
             const todayStart = atStartOfDay(base);
             const todayEnd = atEndOfDay(base);
@@ -1696,13 +2088,12 @@ function getWhoIsOnLeaveBuckets(req, res) {
             const minStart = weekStart; // earliest we care about
             const maxEnd = nextMonthEnd; // latest we care about
             const rows = yield prisma_1.prisma.leaveRequest.findMany({
-                where: {
-                    status: 'APPROVED',
-                    AND: [
+                where: Object.assign({ status: 'APPROVED', AND: [
                         { endDate: { gte: minStart } }, // overlaps window
                         { startDate: { lte: maxEnd } }
-                    ]
-                },
+                    ] }, (departmentId !== null
+                    ? { employee: { is: { departmentId } } }
+                    : {})),
                 select: {
                     startDate: true,
                     endDate: true,
@@ -1808,7 +2199,7 @@ const getBlockedDates = (req, res) => __awaiter(void 0, void 0, void 0, function
             employeeId,
             status: { in: ["APPROVED", "PENDING"] }
         },
-        select: { startDate: true, endDate: true }
+        select: { id: true, startDate: true, endDate: true }
     });
     return res.json(existing);
 });
@@ -1892,14 +2283,15 @@ const getLeaveBalance = (req, res) => __awaiter(void 0, void 0, void 0, function
     }
 });
 exports.getLeaveBalance = getLeaveBalance;
-const initLeaveEndSchedular = () => {
+const initLeaveEndScheduler = () => {
     node_cron_1.default.schedule("0 9 * * *", () => __awaiter(void 0, void 0, void 0, function* () {
         console.log("Running leave reminder cron...");
-        const today = new Date();
+        const today = atStartOfDay(new Date());
+        const todayEnd = atEndOfDay(new Date());
         const leaves = yield prisma_1.prisma.leaveRequest.findMany({
             where: {
                 status: "APPROVED",
-                endDate: today
+                endDate: { gte: today, lte: todayEnd },
             },
             include: {
                 employee: true,
@@ -1919,10 +2311,7 @@ const initLeaveEndSchedular = () => {
                 const emp = leave.employee;
                 const message = `Hello ${emp.firstName}, today is the *last day of your approved leave*. Please be prepared to report tomorrow.`;
                 try {
-                    // await createNotification(
-                    //   emp.id,
-                    //   message
-                    // );
+                    yield (0, notifications_controller_1.createNotification)(emp.id, message);
                 }
                 catch (err) {
                     console.error("Error creating notification:", err);
@@ -1935,7 +2324,7 @@ const initLeaveEndSchedular = () => {
         }
     }));
 };
-exports.initLeaveEndSchedular = initLeaveEndSchedular;
+exports.initLeaveEndScheduler = initLeaveEndScheduler;
 function isSameDate(date1, date2) {
     return (date1.getFullYear() === date2.getFullYear() &&
         date1.getMonth() === date2.getMonth() &&
@@ -1993,7 +2382,7 @@ const updateLeaveType = (req, res) => __awaiter(void 0, void 0, void 0, function
         const end = fmtDate(updatedLeave.endDate);
         // In-app notification
         const message = `Your leave type for the leave from ${start} to ${end} has been changed to "${newLeaveType.name}".`;
-        // await createNotification(employee.id, message);
+        yield (0, notifications_controller_1.createNotification)(employee.id, message);
         res.json({
             message: "Leave type updated successfully",
             leave: updatedLeave
@@ -2141,22 +2530,35 @@ function getLastLedgerBalance(employeeId, leaveTypeId) {
  * Rebuild 1 month summary from ledger + previous month closing.
  * IMPORTANT: Opening comes from previous summary closing (or 0 if none).
  */
-function rebuildMonthlySummaryTx(tx, employeeId, leaveTypeId, year, month) {
+function rebuildMonthlySummaryTx(tx, employeeId, leaveTypeId, year, month, openingOverride) {
     return __awaiter(this, void 0, void 0, function* () {
         var _a, _b, _c, _d;
-        // previous month
-        const { year: prevYear, month: prevMonth } = getPrevMonthFY(year, month);
-        const prev = yield tx.leaveMonthlySummary.findUnique({
-            where: {
-                employeeId_leaveTypeId_year_month: {
-                    employeeId,
-                    leaveTypeId,
-                    year: prevYear,
-                    month: prevMonth,
+        let opening;
+        if (openingOverride !== undefined) {
+            // Caller knows the correct opening (e.g. rollover passing pre-lapse balance)
+            opening = openingOverride;
+        }
+        else if (month === 4) {
+            // Start of financial year — each FY ledger starts from 0.
+            // The OPENING_BALANCE credit in April is captured in `credited` below,
+            // so opening must be 0. Using March-prev-year closing would double-count
+            // any carried balance.
+            opening = 0;
+        }
+        else {
+            const { year: prevYear, month: prevMonth } = getPrevMonthFY(year, month);
+            const prev = yield tx.leaveMonthlySummary.findUnique({
+                where: {
+                    employeeId_leaveTypeId_year_month: {
+                        employeeId,
+                        leaveTypeId,
+                        year: prevYear,
+                        month: prevMonth,
+                    },
                 },
-            },
-        });
-        const opening = (_a = prev === null || prev === void 0 ? void 0 : prev.closing) !== null && _a !== void 0 ? _a : 0;
+            });
+            opening = (_a = prev === null || prev === void 0 ? void 0 : prev.closing) !== null && _a !== void 0 ? _a : 0;
+        }
         const entries = yield tx.leaveLedger.findMany({
             where: { employeeId, leaveTypeId, year, month },
             select: { credit: true, debit: true, action: true },
@@ -2201,13 +2603,19 @@ function rebuildYearlySummaryTx(tx, employeeId, leaveTypeId, year) {
         const credited = months.reduce((s, m) => { var _a; return s + Number((_a = m.credited) !== null && _a !== void 0 ? _a : 0); }, 0);
         const used = months.reduce((s, m) => { var _a; return s + Number((_a = m.used) !== null && _a !== void 0 ? _a : 0); }, 0);
         const lapsed = months.reduce((s, m) => { var _a; return s + Number((_a = m.lapsed) !== null && _a !== void 0 ? _a : 0); }, 0);
-        const closing = opening + credited - used - lapsed; // (lapsed already part of used)
+        // Sum encashment debits from the ledger for this year
+        const encashmentEntries = yield tx.leaveLedger.findMany({
+            where: { employeeId, leaveTypeId, year, action: "ENCASHMENT" },
+            select: { debit: true },
+        });
+        const encashed = encashmentEntries.reduce((s, e) => { var _a; return s + Number((_a = e.debit) !== null && _a !== void 0 ? _a : 0); }, 0);
+        const closing = opening + credited - used - lapsed - encashed;
         yield tx.leaveYearlySummary.upsert({
             where: {
                 employeeId_leaveTypeId_year: { employeeId, leaveTypeId, year },
             },
-            update: { opening, credited, used, lapsed, closing },
-            create: { employeeId, leaveTypeId, year, opening, credited, used, lapsed, closing },
+            update: { opening, credited, used, lapsed, encashed, closing },
+            create: { employeeId, leaveTypeId, year, opening, credited, used, lapsed, encashed, closing },
         });
         return { opening, credited, used, lapsed, closing };
     });
@@ -2259,42 +2667,49 @@ function insertLedgerTx(tx, params) {
         });
     });
 }
-const initELAccrualCron = () => {
-    node_cron_1.default.schedule("10 2 * * *", () => __awaiter(void 0, void 0, void 0, function* () {
-        var _a, _b, _c;
+// ── Core EL accrual logic — called by cron AND manual trigger ──────────────
+function runELAccrual(overrideYear, overrideMonth) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c, _d;
         const today = atStartOfDay(new Date());
-        const year = getFinancialYear(today);
-        const month = today.getMonth() + 1;
-        if (today.getDate() !== 1)
-            return;
-        try {
-            // 1️⃣ EL Leave Type
-            const el = yield prisma_1.prisma.leaveType.findFirst({
-                where: { name: "EL" },
-                select: { id: true }
-            });
-            if (!el)
-                return;
-            // 2️⃣ Policy
-            const policy = yield getActivePolicy(el.id, today);
-            if (!policy)
-                return;
-            if (policy.accrualType !== "MONTHLY")
-                return;
-            const monthlyCredit = Number((_a = policy.accrualRate) !== null && _a !== void 0 ? _a : 0);
-            if (!monthlyCredit)
-                return;
-            const workingDaysRequired = (_b = policy.workingDaysRequired) !== null && _b !== void 0 ? _b : 0;
-            const maxBalance = (_c = policy.maxBalance) !== null && _c !== void 0 ? _c : null;
-            // 3️⃣ Employees
-            const employees = yield prisma_1.prisma.employee.findMany({
-                where: { employmentStatus: "ACTIVE" },
-                select: { id: true }
-            });
-            // 4️⃣ Loop employees
-            for (const emp of employees) {
-                yield prisma_1.prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
-                    var _a;
+        const year = overrideYear !== null && overrideYear !== void 0 ? overrideYear : getFinancialYear(today);
+        const month = overrideMonth !== null && overrideMonth !== void 0 ? overrideMonth : (today.getMonth() + 1);
+        // 1️⃣ EL Leave Type
+        const el = yield prisma_1.prisma.leaveType.findFirst({
+            where: { name: "EL" },
+            select: { id: true }
+        });
+        if (!el)
+            return { error: "EL leave type not found" };
+        // 2️⃣ Policy
+        const policy = yield getActivePolicy(el.id, today);
+        console.log("Active EL policy:", policy);
+        if (!policy)
+            return { error: "No active EL policy found" };
+        if (policy.accrualType !== "MONTHLY")
+            return { error: "EL policy is not MONTHLY accrual" };
+        const monthlyCredit = Number((_a = policy.accrualRate) !== null && _a !== void 0 ? _a : 0);
+        if (!monthlyCredit)
+            return { error: "EL accrual rate is 0" };
+        const workingDaysRequired = (_b = policy.workingDaysRequired) !== null && _b !== void 0 ? _b : 0;
+        const maxBalance = (_c = policy.maxBalance) !== null && _c !== void 0 ? _c : null;
+        // 3️⃣ Employees — only those who have completed 1 year of service
+        const oneYearAgo = new Date(today);
+        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+        const employees = yield prisma_1.prisma.employee.findMany({
+            where: {
+                employmentStatus: "ACTIVE",
+                dateOfJoining: { lte: oneYearAgo },
+            },
+            select: { id: true },
+        });
+        let credited = 0, skipped = 0;
+        const errors = [];
+        // 4️⃣ Loop employees
+        for (const emp of employees) {
+            try {
+                let didCredit = false;
+                yield prisma_1.prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
                     // ❗ Skip if already credited
                     const exists = yield tx.leaveAccrual.findUnique({
                         where: {
@@ -2306,26 +2721,24 @@ const initELAccrualCron = () => {
                             }
                         }
                     });
-                    if (exists)
-                        return;
-                    // 4.1️⃣ Get shift config ONCE
-                    const shift = yield tx.shiftApproval.findFirst({
-                        where: {
-                            employeeId: emp.id,
-                            status: "APPROVED",
-                            month,
-                            year
-                        },
-                        select: { weekOffConfig: true }
-                    });
-                    const weekOffConfig = (_a = shift === null || shift === void 0 ? void 0 : shift.weekOffConfig) !== null && _a !== void 0 ? _a : null;
-                    // 4.2️⃣ Calculate worked days
-                    const workedDays = yield getWorkedDaysOptimized(emp.id, year, month, weekOffConfig);
-                    // ❗ POLICY CHECK
-                    if (workingDaysRequired && workedDays < workingDaysRequired) {
-                        console.log(`❌ Skipping EL for emp ${emp.id}, worked: ${workedDays}`);
+                    if (exists) {
+                        skipped++;
                         return;
                     }
+                    // 4.1️⃣ & 4.2️⃣ Working days check — PAUSED for now
+                    // TODO: Uncomment when attendance data is ready
+                    // const shift = await tx.shiftApproval.findFirst({
+                    //   where: { employeeId: emp.id, status: "APPROVED", month, year },
+                    //   select: { weekOffConfig: true }
+                    // });
+                    // const weekOffConfig = shift?.weekOffConfig ?? null;
+                    // const workedDays = await getWorkedDaysOptimized(emp.id, year, month, weekOffConfig);
+                    // if (workingDaysRequired && workedDays < workingDaysRequired) {
+                    //   console.log(`❌ Skipping EL for emp ${emp.id}, worked: ${workedDays}`);
+                    //   skipped++;
+                    //   return;
+                    // }
+                    const workedDays = 'N/A (check paused)';
                     // 4.3️⃣ Balance row
                     const bal = yield tx.employeeLeaveBalance.upsert({
                         where: {
@@ -2348,16 +2761,12 @@ const initELAccrualCron = () => {
                     });
                     // 4.4️⃣ Ledger balance
                     const prevBalance = yield getLastLedgerBalanceTx(tx, emp.id, el.id, year);
-                    let credit = monthlyCredit;
-                    if (maxBalance != null) {
-                        const remaining = maxBalance - prevBalance;
-                        if (remaining <= 0)
-                            return;
-                        credit = Math.min(credit, remaining);
-                    }
-                    if (credit <= 0)
+                    const credit = monthlyCredit;
+                    if (credit <= 0) {
+                        skipped++;
                         return;
-                    // 4.5️⃣ Accrual
+                    }
+                    // 4.5️⃣ Accrual record
                     yield tx.leaveAccrual.create({
                         data: {
                             employeeId: emp.id,
@@ -2375,8 +2784,8 @@ const initELAccrualCron = () => {
                             totalAllowed: { increment: credit }
                         }
                     });
-                    // 4.7️⃣ Ledger
-                    const newBalance = prevBalance + credit;
+                    // 4.7️⃣ Ledger — credit
+                    const balanceAfterCredit = prevBalance + credit;
                     yield insertLedgerTx(tx, {
                         employeeId: emp.id,
                         leaveTypeId: el.id,
@@ -2384,18 +2793,72 @@ const initELAccrualCron = () => {
                         month,
                         credit,
                         debit: 0,
-                        balanceAfter: newBalance,
+                        balanceAfter: balanceAfterCredit,
                         action: "CREDIT",
                         referenceType: "ACCRUAL",
                         source: "SYSTEM",
                         remarks: `EL credited (worked ${workedDays} days)`
                     });
-                    // 4.8️⃣ Summaries
-                    yield rebuildMonthlySummaryTx(tx, emp.id, el.id, year, month);
-                    yield rebuildYearlySummaryTx(tx, emp.id, el.id, year);
-                }));
+                    // 4.7b️⃣ Auto-encash excess over maxBalance
+                    if (maxBalance != null && balanceAfterCredit > maxBalance) {
+                        const excessDays = balanceAfterCredit - maxBalance;
+                        yield tx.employeeLeaveBalance.update({
+                            where: { id: bal.id },
+                            data: {
+                                totalAllowed: { decrement: excessDays }
+                            }
+                        });
+                        yield insertLedgerTx(tx, {
+                            employeeId: emp.id,
+                            leaveTypeId: el.id,
+                            year,
+                            month,
+                            credit: 0,
+                            debit: excessDays,
+                            balanceAfter: maxBalance,
+                            action: "ENCASHMENT",
+                            referenceType: "ENCASHMENT",
+                            source: "SYSTEM",
+                            remarks: `EL auto-encashed ${excessDays} days (exceeded max balance ${maxBalance})`
+                        });
+                        console.log(`💰 EL auto-encashed ${excessDays} days for emp ${emp.id}`);
+                    }
+                    credited++;
+                    didCredit = true;
+                }), { timeout: 15000 });
+                // 4.8️⃣ Summaries — outside transaction to avoid timeout
+                if (didCredit) {
+                    yield rebuildMonthlySummaryTx(prisma_1.prisma, emp.id, el.id, year, month);
+                    yield rebuildYearlySummaryTx(prisma_1.prisma, emp.id, el.id, year);
+                }
             }
-            console.log(`✅ EL accrual done for ${year}-${month}`);
+            catch (err) {
+                errors.push(`emp ${emp.id}: ${(_d = err === null || err === void 0 ? void 0 : err.message) !== null && _d !== void 0 ? _d : "unknown"}`);
+            }
+        }
+        console.log(`✅ EL accrual done for ${year}-${month}: credited=${credited}, skipped=${skipped}`);
+        return { year, month, totalEmployees: employees.length, credited, skipped, errors };
+    });
+}
+// ── Manual trigger endpoint ────────────────────────────────────────────────
+const triggerELAccrual = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const year = req.body.year ? Number(req.body.year) : undefined;
+        const month = req.body.month ? Number(req.body.month) : undefined;
+        const result = yield runELAccrual(year, month);
+        return res.json(result);
+    }
+    catch (e) {
+        console.error("Manual EL accrual error:", e);
+        return res.status(500).json({ error: e.message });
+    }
+});
+exports.triggerELAccrual = triggerELAccrual;
+// ── Cron wrapper ───────────────────────────────────────────────────────────
+const initELAccrualCron = () => {
+    node_cron_1.default.schedule("10 2 1 * *", () => __awaiter(void 0, void 0, void 0, function* () {
+        try {
+            yield runELAccrual();
         }
         catch (e) {
             console.error("EL CRON ERROR:", e);
@@ -2413,14 +2876,6 @@ function getLastLedgerBalanceTx(tx, employeeId, leaveTypeId, year) {
         });
         return (_a = last === null || last === void 0 ? void 0 : last.balanceAfter) !== null && _a !== void 0 ? _a : 0;
     });
-}
-function calculateDaysForMonth(start, end, year, month) {
-    const calYear = getCalendarYear(year, month);
-    const monthStart = new Date(calYear, month - 1, 1);
-    const monthEnd = new Date(calYear, month, 0);
-    const from = start > monthStart ? start : monthStart;
-    const to = end < monthEnd ? end : monthEnd;
-    return daysInclusive(from, to);
 }
 function getWeekOfMonth(date) {
     const firstDay = new Date(date.getFullYear(), date.getMonth(), 1);
@@ -2452,6 +2907,8 @@ function getWorkedDaysOptimized(employeeId, year, month, weekOffConfig) {
         const calYear = getCalendarYear(year, month);
         const start = new Date(calYear, month - 1, 1);
         const end = new Date(calYear, month, 0, 23, 59, 59);
+        console.log(`Calculating worked days for emp ${employeeId} in ${year}-${month}...`);
+        console.log(`Date range: ${fmtDate(start)} to ${fmtDate(end)}`);
         const workedDates = new Set();
         // 1️⃣ Attendance
         const attendance = yield prisma_1.prisma.attendance.findMany({
@@ -2462,6 +2919,7 @@ function getWorkedDaysOptimized(employeeId, year, month, weekOffConfig) {
             },
             select: { date: true }
         });
+        console.log(`Attendance records for emp ${employeeId} in ${year}-${month}:`, attendance.length);
         attendance.forEach(a => {
             workedDates.add(atStartOfDay(a.date).toISOString());
         });
@@ -2489,6 +2947,7 @@ function getWorkedDaysOptimized(employeeId, year, month, weekOffConfig) {
                 finalCount++;
             }
         }
+        console.log(`Final worked days for emp ${employeeId} in ${year}-${month}: ${finalCount}`);
         return finalCount;
     });
 }
@@ -2639,8 +3098,8 @@ const bulkUploadLeaveBalancesExcel = (req, res) => __awaiter(void 0, void 0, voi
             // =========================
             // 🔧 PREP DATA
             // =========================
-            const year = getFinancialYear(new Date());
-            const month = new Date().getMonth() + 1;
+            const year = fields.year ? Number(fields.year) : getFinancialYear(new Date());
+            const month = fields.month ? Number(fields.month) : new Date().getMonth() + 1;
             const [leaveTypes, employees] = yield Promise.all([
                 prisma_1.prisma.leaveType.findMany(),
                 prisma_1.prisma.employee.findMany({
@@ -2663,7 +3122,16 @@ const bulkUploadLeaveBalancesExcel = (req, res) => __awaiter(void 0, void 0, voi
             // PROCESS EACH ROW
             // =========================
             const processRow = (row, index) => __awaiter(void 0, void 0, void 0, function* () {
-                const code = row.employeeCode || row["Emp Code"];
+                var _a;
+                // Normalize: find the employee code regardless of header casing/spacing
+                const code = row.employeeCode
+                    || row["Emp Code"]
+                    || row["emp code"]
+                    || row["EmpCode"]
+                    || row["empCode"]
+                    || row["Employee Code"]
+                    || row["employee code"]
+                    || ((_a = Object.entries(row).find(([k]) => k.trim().toLowerCase().replace(/\s+/g, '') === 'empcode')) === null || _a === void 0 ? void 0 : _a[1]);
                 console.log(code);
                 try {
                     if (!code)
@@ -2771,182 +3239,275 @@ const bulkUploadLeaveBalancesExcel = (req, res) => __awaiter(void 0, void 0, voi
     }
 });
 exports.bulkUploadLeaveBalancesExcel = bulkUploadLeaveBalancesExcel;
+// ── Core rollover logic — called by cron AND manual trigger ──────────────────
+function runFYRollover(overrideYear) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        const today = atStartOfDay(new Date());
+        const newYear = overrideYear !== null && overrideYear !== void 0 ? overrideYear : getFinancialYear(today);
+        const prevYear = newYear - 1;
+        const month = 4; // April — first month of Indian FY
+        let processed = 0;
+        let skipped = 0;
+        const errors = [];
+        const [employees, leaveTypes] = yield Promise.all([
+            prisma_1.prisma.employee.findMany({
+                where: { employmentStatus: "ACTIVE" },
+                select: { id: true },
+            }),
+            prisma_1.prisma.leaveType.findMany(),
+        ]);
+        console.log('hi');
+        const leaveTypeMap = {};
+        leaveTypes.forEach(lt => { leaveTypeMap[lt.name.toUpperCase()] = lt.id; });
+        for (const emp of employees) {
+            try {
+                // ── Idempotency: read-only check outside any transaction ──────────────
+                const alreadyProcessed = yield prisma_1.prisma.leaveLedger.findFirst({
+                    where: { employeeId: emp.id, year: newYear, action: "OPENING_BALANCE", source: "SYSTEM" },
+                    select: { id: true },
+                });
+                if (alreadyProcessed) {
+                    skipped++;
+                    continue;
+                }
+                // =====================================================
+                // 🔹 CL — NO CARRY FORWARD (policy: lapses at year-end)
+                // ── Small tx: writes only. Rebuilds happen outside. ──
+                // =====================================================
+                const clId = leaveTypeMap["CL"];
+                let clLapsedPrev = false;
+                let clPrevRemaining = 0;
+                if (clId) {
+                    yield prisma_1.prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
+                        // Use ledger balance as source of truth — balance table may be out of sync
+                        const prevCLLedger = yield getLastLedgerBalanceTx(tx, emp.id, clId, prevYear);
+                        clPrevRemaining = Math.max(0, prevCLLedger);
+                        if (clPrevRemaining > 0) {
+                            yield insertLedgerTx(tx, {
+                                employeeId: emp.id, leaveTypeId: clId, year: prevYear, month: 3,
+                                credit: 0, debit: clPrevRemaining, balanceAfter: 0,
+                                action: "LAPSE", referenceType: "LAPSE", source: "SYSTEM", remarks: "CL year-end lapse",
+                            });
+                            clLapsedPrev = true;
+                        }
+                        const totalCL = 12;
+                        yield tx.employeeLeaveBalance.upsert({
+                            where: { employeeId_leaveTypeId_year: { employeeId: emp.id, leaveTypeId: clId, year: newYear } },
+                            update: { totalAllowed: totalCL, used: 0, halfDayUsed: 0 },
+                            create: { employeeId: emp.id, leaveTypeId: clId, category: "LEAVE", year: newYear, totalAllowed: totalCL, used: 0, halfDayUsed: 0 },
+                        });
+                        const clPrevBal = yield getLastLedgerBalanceTx(tx, emp.id, clId, newYear);
+                        yield insertLedgerTx(tx, {
+                            employeeId: emp.id, leaveTypeId: clId, year: newYear, month,
+                            credit: totalCL, debit: 0, balanceAfter: clPrevBal + totalCL,
+                            action: "OPENING_BALANCE", referenceType: "MANUAL", source: "SYSTEM", remarks: "CL yearly allocation",
+                        });
+                    }), { timeout: 8000 });
+                    // Rebuild OUTSIDE transaction (avoids P2028 / P1017 timeout)
+                    if (clLapsedPrev) {
+                        // Pass clPrevRemaining as openingOverride so March opening is correct
+                        // even when earlier monthly summaries are missing.
+                        yield rebuildMonthlySummaryTx(prisma_1.prisma, emp.id, clId, prevYear, 3, clPrevRemaining);
+                        yield rebuildYearlySummaryTx(prisma_1.prisma, emp.id, clId, prevYear);
+                    }
+                    yield rebuildMonthlySummaryTx(prisma_1.prisma, emp.id, clId, newYear, month);
+                    yield rebuildYearlySummaryTx(prisma_1.prisma, emp.id, clId, newYear);
+                }
+                // =====================================================
+                // 🔹 SL — CARRY FORWARD MAX 60 DAYS
+                // =====================================================
+                const slId = leaveTypeMap["SL"];
+                let slLapsedPrev = false;
+                let slPrevRemaining = 0;
+                if (slId) {
+                    yield prisma_1.prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
+                        // Use ledger balance as source of truth — balance table may be out of sync
+                        const prevSLLedger = yield getLastLedgerBalanceTx(tx, emp.id, slId, prevYear);
+                        slPrevRemaining = Math.max(0, prevSLLedger);
+                        const slCarry = Math.min(slPrevRemaining, 60);
+                        const slLapsed = slPrevRemaining - slCarry;
+                        if (slLapsed > 0) {
+                            yield insertLedgerTx(tx, {
+                                employeeId: emp.id, leaveTypeId: slId, year: prevYear, month: 3,
+                                credit: 0, debit: slLapsed, balanceAfter: prevSLLedger - slLapsed,
+                                action: "LAPSE", referenceType: "LAPSE", source: "SYSTEM",
+                                remarks: "SL year-end lapse (excess over 60-day carry limit)",
+                            });
+                            slLapsedPrev = true;
+                        }
+                        const totalSL = 12 + slCarry;
+                        yield tx.employeeLeaveBalance.upsert({
+                            where: { employeeId_leaveTypeId_year: { employeeId: emp.id, leaveTypeId: slId, year: newYear } },
+                            update: { totalAllowed: totalSL, used: 0, halfDayUsed: 0 },
+                            create: { employeeId: emp.id, leaveTypeId: slId, category: "LEAVE", year: newYear, totalAllowed: totalSL, used: 0, halfDayUsed: 0 },
+                        });
+                        const slPrevBal = yield getLastLedgerBalanceTx(tx, emp.id, slId, newYear);
+                        yield insertLedgerTx(tx, {
+                            employeeId: emp.id, leaveTypeId: slId, year: newYear, month,
+                            credit: totalSL, debit: 0, balanceAfter: slPrevBal + totalSL,
+                            action: "OPENING_BALANCE", referenceType: "MANUAL", source: "SYSTEM",
+                            remarks: `SL yearly allocation (12 fresh + ${slCarry} carried)`,
+                        });
+                    }), { timeout: 8000 });
+                    if (slLapsedPrev) {
+                        yield rebuildMonthlySummaryTx(prisma_1.prisma, emp.id, slId, prevYear, 3, slPrevRemaining);
+                        yield rebuildYearlySummaryTx(prisma_1.prisma, emp.id, slId, prevYear);
+                    }
+                    yield rebuildMonthlySummaryTx(prisma_1.prisma, emp.id, slId, newYear, month);
+                    yield rebuildYearlySummaryTx(prisma_1.prisma, emp.id, slId, newYear);
+                }
+                // =====================================================
+                // 🔹 EL — POLICY-BASED CARRY FORWARD
+                // =====================================================
+                const elId = leaveTypeMap["EL"];
+                let elLapsedPrev = false;
+                let elPrevRemaining = 0;
+                if (elId) {
+                    // Fetch policy OUTSIDE tx (read-only, no need to hold a connection)
+                    const elPolicy = yield getActivePolicy(elId, today);
+                    yield prisma_1.prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
+                        // Use ledger balance as source of truth — balance table may be out of sync
+                        const prevELLedger = yield getLastLedgerBalanceTx(tx, emp.id, elId, prevYear);
+                        elPrevRemaining = Math.max(0, prevELLedger);
+                        let elCarry = 0;
+                        console.log(`EL rollover for emp ${emp.id}: prevRemaining=${elPrevRemaining}, policy carryForward=${elPolicy === null || elPolicy === void 0 ? void 0 : elPolicy.carryForward}, maxCarryForward=${elPolicy === null || elPolicy === void 0 ? void 0 : elPolicy.maxCarryForward}`);
+                        if (elPolicy === null || elPolicy === void 0 ? void 0 : elPolicy.carryForward) {
+                            elCarry = elPolicy.maxCarryForward
+                                ? Math.min(elPrevRemaining, elPolicy.maxCarryForward)
+                                : elPrevRemaining;
+                            console.log(`EL policy for emp ${emp.id}: carryForward=${elPolicy.carryForward}, maxCarryForward=${elPolicy.maxCarryForward}, prevRemaining=${elPrevRemaining}, calculatedCarry=${elCarry}`);
+                        }
+                        const elLapsed = elPrevRemaining - elCarry;
+                        if (elLapsed > 0) {
+                            yield insertLedgerTx(tx, {
+                                employeeId: emp.id, leaveTypeId: elId, year: prevYear, month: 3,
+                                credit: 0, debit: elLapsed, balanceAfter: prevELLedger - elLapsed,
+                                action: "LAPSE", referenceType: "LAPSE", source: "SYSTEM",
+                                remarks: "EL year-end lapse (excess over carry limit)",
+                            });
+                            elLapsedPrev = true;
+                        }
+                        yield tx.employeeLeaveBalance.upsert({
+                            where: { employeeId_leaveTypeId_year: { employeeId: emp.id, leaveTypeId: elId, year: newYear } },
+                            update: { totalAllowed: elCarry, used: 0, halfDayUsed: 0 },
+                            create: { employeeId: emp.id, leaveTypeId: elId, category: "LEAVE", year: newYear, totalAllowed: elCarry, used: 0, halfDayUsed: 0 },
+                        });
+                        if (elCarry > 0) {
+                            const elPrevBal = yield getLastLedgerBalanceTx(tx, emp.id, elId, newYear);
+                            yield insertLedgerTx(tx, {
+                                employeeId: emp.id, leaveTypeId: elId, year: newYear, month,
+                                credit: elCarry, debit: 0, balanceAfter: elPrevBal + elCarry,
+                                action: "OPENING_BALANCE", referenceType: "MANUAL", source: "SYSTEM",
+                                remarks: "EL carry forward",
+                            });
+                        }
+                    }), { timeout: 8000 });
+                    if (elLapsedPrev) {
+                        yield rebuildMonthlySummaryTx(prisma_1.prisma, emp.id, elId, prevYear, 3, elPrevRemaining);
+                        yield rebuildYearlySummaryTx(prisma_1.prisma, emp.id, elId, prevYear);
+                    }
+                    yield rebuildMonthlySummaryTx(prisma_1.prisma, emp.id, elId, newYear, month);
+                    yield rebuildYearlySummaryTx(prisma_1.prisma, emp.id, elId, newYear);
+                }
+                processed++;
+            }
+            catch (err) {
+                errors.push(`emp ${emp.id}: ${(_a = err === null || err === void 0 ? void 0 : err.message) !== null && _a !== void 0 ? _a : "unknown error"}`);
+                console.error(`❌ FY rollover failed for emp ${emp.id}:`, err);
+            }
+        }
+        return { processed, skipped, errors };
+    });
+}
+// ── Cron wrapper ─────────────────────────────────────────────────────────────
 const initFinancialYearRolloverCron = () => {
     node_cron_1.default.schedule("0 2 1 4 *", () => __awaiter(void 0, void 0, void 0, function* () {
         console.log("🚀 Running FY Rollover Cron...");
-        const today = new Date();
-        const newYear = getFinancialYear(today);
-        const prevYear = newYear - 1;
-        const month = 4; // April
-        try {
-            const [employees, leaveTypes] = yield Promise.all([
-                prisma_1.prisma.employee.findMany({
-                    where: { employmentStatus: "ACTIVE" },
-                    select: { id: true }
-                }),
-                prisma_1.prisma.leaveType.findMany()
-            ]);
-            const leaveTypeMap = {};
-            leaveTypes.forEach(lt => {
-                leaveTypeMap[lt.name.toUpperCase()] = lt.id;
-            });
-            for (const emp of employees) {
-                yield prisma_1.prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
-                    var _a, _b;
-                    // =====================================================
-                    // 🔹 CL (NO CARRY FORWARD)
-                    // =====================================================
-                    const clId = leaveTypeMap["CL"];
-                    if (clId) {
-                        const totalCL = 12;
-                        yield tx.employeeLeaveBalance.upsert({
-                            where: {
-                                employeeId_leaveTypeId_year: {
-                                    employeeId: emp.id,
-                                    leaveTypeId: clId,
-                                    year: newYear
-                                }
-                            },
-                            update: { totalAllowed: totalCL, used: 0, halfDayUsed: 0 },
-                            create: {
-                                employeeId: emp.id,
-                                leaveTypeId: clId,
-                                category: "LEAVE",
-                                year: newYear,
-                                totalAllowed: totalCL,
-                                used: 0,
-                                halfDayUsed: 0
-                            }
-                        });
-                        const prevBalance = yield getLastLedgerBalanceTx(tx, emp.id, clId, newYear);
-                        const newBalance = prevBalance + totalCL;
-                        yield insertLedgerTx(tx, {
-                            employeeId: emp.id,
-                            leaveTypeId: clId,
-                            year: newYear,
-                            month,
-                            credit: totalCL,
-                            debit: 0,
-                            balanceAfter: newBalance,
-                            action: "OPENING_BALANCE",
-                            referenceType: "MANUAL",
-                            source: "SYSTEM",
-                            remarks: "CL yearly allocation"
-                        });
-                        yield rebuildMonthlySummaryTx(tx, emp.id, clId, newYear, month);
-                        yield rebuildYearlySummaryTx(tx, emp.id, clId, newYear);
-                    }
-                    // =====================================================
-                    // 🔹 SL (CARRY FORWARD MAX 60)
-                    // =====================================================
-                    const slId = leaveTypeMap["SL"];
-                    if (slId) {
-                        const prev = yield tx.employeeLeaveBalance.findFirst({
-                            where: { employeeId: emp.id, leaveTypeId: slId, year: prevYear }
-                        });
-                        const prevRemaining = Math.max(0, ((_a = prev === null || prev === void 0 ? void 0 : prev.totalAllowed) !== null && _a !== void 0 ? _a : 0) - computeTotalUsed(prev || { used: 0, halfDayUsed: 0 }));
-                        const carry = Math.min(prevRemaining, 60);
-                        const totalSL = 12 + carry;
-                        yield tx.employeeLeaveBalance.upsert({
-                            where: {
-                                employeeId_leaveTypeId_year: {
-                                    employeeId: emp.id,
-                                    leaveTypeId: slId,
-                                    year: newYear
-                                }
-                            },
-                            update: { totalAllowed: totalSL, used: 0, halfDayUsed: 0 },
-                            create: {
-                                employeeId: emp.id,
-                                leaveTypeId: slId,
-                                category: "LEAVE",
-                                year: newYear,
-                                totalAllowed: totalSL,
-                                used: 0,
-                                halfDayUsed: 0
-                            }
-                        });
-                        const prevBalance = yield getLastLedgerBalanceTx(tx, emp.id, slId, newYear);
-                        const newBalance = prevBalance + totalSL;
-                        yield insertLedgerTx(tx, {
-                            employeeId: emp.id,
-                            leaveTypeId: slId,
-                            year: newYear,
-                            month,
-                            credit: totalSL,
-                            debit: 0,
-                            balanceAfter: newBalance,
-                            action: "OPENING_BALANCE",
-                            referenceType: "MANUAL",
-                            source: "SYSTEM",
-                            remarks: "SL yearly allocation with carry"
-                        });
-                        yield rebuildMonthlySummaryTx(tx, emp.id, slId, newYear, month);
-                        yield rebuildYearlySummaryTx(tx, emp.id, slId, newYear);
-                    }
-                    // =====================================================
-                    // 🔹 EL (POLICY BASED CARRY)
-                    // =====================================================
-                    const elId = leaveTypeMap["EL"];
-                    if (elId) {
-                        const policy = yield getActivePolicy(elId, today);
-                        const prev = yield tx.employeeLeaveBalance.findFirst({
-                            where: { employeeId: emp.id, leaveTypeId: elId, year: prevYear }
-                        });
-                        const prevRemaining = Math.max(0, ((_b = prev === null || prev === void 0 ? void 0 : prev.totalAllowed) !== null && _b !== void 0 ? _b : 0) - computeTotalUsed(prev || { used: 0, halfDayUsed: 0 }));
-                        let carry = 0;
-                        if (policy === null || policy === void 0 ? void 0 : policy.carryForward) {
-                            carry = policy.maxCarryForward
-                                ? Math.min(prevRemaining, policy.maxCarryForward)
-                                : prevRemaining;
-                        }
-                        yield tx.employeeLeaveBalance.upsert({
-                            where: {
-                                employeeId_leaveTypeId_year: {
-                                    employeeId: emp.id,
-                                    leaveTypeId: elId,
-                                    year: newYear
-                                }
-                            },
-                            update: { totalAllowed: carry, used: 0, halfDayUsed: 0 },
-                            create: {
-                                employeeId: emp.id,
-                                leaveTypeId: elId,
-                                category: "LEAVE",
-                                year: newYear,
-                                totalAllowed: carry,
-                                used: 0,
-                                halfDayUsed: 0
-                            }
-                        });
-                        const prevBalance = yield getLastLedgerBalanceTx(tx, emp.id, elId, newYear);
-                        const newBalance = prevBalance + carry;
-                        yield insertLedgerTx(tx, {
-                            employeeId: emp.id,
-                            leaveTypeId: elId,
-                            year: newYear,
-                            month,
-                            credit: carry,
-                            debit: 0,
-                            balanceAfter: newBalance,
-                            action: "OPENING_BALANCE",
-                            referenceType: "MANUAL",
-                            source: "SYSTEM",
-                            remarks: "EL carry forward"
-                        });
-                        yield rebuildMonthlySummaryTx(tx, emp.id, elId, newYear, month);
-                        yield rebuildYearlySummaryTx(tx, emp.id, elId, newYear);
-                    }
-                }), { timeout: 15000 });
-            }
-            console.log("✅ FY rollover completed successfully");
-        }
-        catch (err) {
-            console.error("❌ FY rollover failed:", err);
-        }
+        const result = yield runFYRollover();
+        console.log(`✅ FY rollover done — processed: ${result.processed}, skipped: ${result.skipped}, errors: ${result.errors.length}`);
+        if (result.errors.length)
+            console.error("FY rollover errors:", result.errors);
     }));
 };
 exports.initFinancialYearRolloverCron = initFinancialYearRolloverCron;
+// ── Purge wrong rollover data + re-run ───────────────────────────────────────
+const purgeAndRerunFYRollover = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
+    const year = ((_a = req.body) === null || _a === void 0 ? void 0 : _a.year) ? Number(req.body.year) : 2026;
+    const prevYear = year - 1;
+    try {
+        console.log(`🗑️ Purging FY ${year} rollover data (prev year lapse entries from ${prevYear})...`);
+        // 1. Delete all ledger entries for the target year (opening balances etc.)
+        const deletedLedger2026 = yield prisma_1.prisma.leaveLedger.deleteMany({
+            where: { year },
+        });
+        // 2. Delete LAPSE entries added for prevYear month=3 during the wrong rollover
+        const deletedLapse2025 = yield prisma_1.prisma.leaveLedger.deleteMany({
+            where: {
+                year: prevYear,
+                month: 3,
+                action: 'LAPSE',
+                source: 'SYSTEM',
+            },
+        });
+        // 3. Delete EmployeeLeaveBalance for target year
+        const deletedBalance = yield prisma_1.prisma.employeeLeaveBalance.deleteMany({
+            where: { year },
+        });
+        // 4. Delete monthly/yearly summaries for target year
+        const deletedMonthly2026 = yield prisma_1.prisma.leaveMonthlySummary.deleteMany({
+            where: { year },
+        });
+        const deletedYearly2026 = yield prisma_1.prisma.leaveYearlySummary.deleteMany({
+            where: { year },
+        });
+        // 5. Delete prevYear month=3 summaries (rebuilt wrongly during bad rollover)
+        const deletedMonthly2025 = yield prisma_1.prisma.leaveMonthlySummary.deleteMany({
+            where: { year: prevYear, month: 3 },
+        });
+        const deletedYearly2025 = yield prisma_1.prisma.leaveYearlySummary.deleteMany({
+            where: { year: prevYear },
+        });
+        console.log(`✅ Purge complete — ledger:${deletedLedger2026.count}, lapse:${deletedLapse2025.count}, balance:${deletedBalance.count}, monthly2026:${deletedMonthly2026.count}, yearly2026:${deletedYearly2026.count}, monthly2025march:${deletedMonthly2025.count}, yearly2025:${deletedYearly2025.count}`);
+        // 6. Re-run rollover with clean data
+        console.log(`🚀 Re-running FY rollover for year ${year}...`);
+        const result = yield runFYRollover(year);
+        return res.json({
+            message: `FY ${year} data purged and rollover re-run successfully`,
+            purged: {
+                ledger2026: deletedLedger2026.count,
+                lapse2025: deletedLapse2025.count,
+                balance2026: deletedBalance.count,
+                monthly2026: deletedMonthly2026.count,
+                yearly2026: deletedYearly2026.count,
+                monthly2025March: deletedMonthly2025.count,
+                yearly2025: deletedYearly2025.count,
+            },
+            rollover: result,
+        });
+    }
+    catch (err) {
+        console.error('Purge + re-run failed:', err);
+        return res.status(500).json({ error: 'Purge failed', message: err === null || err === void 0 ? void 0 : err.message });
+    }
+});
+exports.purgeAndRerunFYRollover = purgeAndRerunFYRollover;
+// ── Manual trigger (admin endpoint handler) ───────────────────────────────────
+const triggerFYRollover = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
+    try {
+        const overrideYear = ((_a = req.body) === null || _a === void 0 ? void 0 : _a.year) ? Number(req.body.year) : undefined;
+        console.log(`🔧 Manual FY rollover triggered${overrideYear ? ` for year ${overrideYear}` : ""}`);
+        const result = yield runFYRollover(overrideYear);
+        return res.json(Object.assign({ message: "FY rollover completed", year: overrideYear !== null && overrideYear !== void 0 ? overrideYear : getFinancialYear(new Date()) }, result));
+    }
+    catch (err) {
+        console.error("Manual FY rollover failed:", err);
+        return res.status(500).json({ error: "FY rollover failed", message: err === null || err === void 0 ? void 0 : err.message });
+    }
+});
+exports.triggerFYRollover = triggerFYRollover;
 function uploadToFTP(localFilePath, remoteFileName) {
     return __awaiter(this, void 0, void 0, function* () {
         const client = new basic_ftp_1.Client();

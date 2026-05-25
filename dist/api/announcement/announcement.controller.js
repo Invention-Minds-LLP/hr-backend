@@ -21,6 +21,7 @@ const client_1 = require("@prisma/client");
 const basic_ftp_1 = require("basic-ftp");
 const fs_1 = __importDefault(require("fs"));
 const multer_1 = __importDefault(require("multer"));
+const notifications_controller_1 = require("../notifications/notifications.controller");
 const prisma = new client_1.PrismaClient();
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu",
@@ -155,9 +156,9 @@ function createAnnouncement(req, res) {
                 select: { id: true }
             });
             // ---- notify all target employees ----
-            // for (const emp of employees) {
-            //   await createNotification(emp.id, 'NEW_ANNOUNCEMENT');
-            // }
+            for (const emp of employees) {
+                yield (0, notifications_controller_1.createNotification)(emp.id, 'NEW_ANNOUNCEMENT');
+            }
             return res.status(201).json(created);
         }
         catch (e) {
