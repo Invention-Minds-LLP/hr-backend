@@ -656,8 +656,9 @@ export const getEmployees = async (req: Request, res: Response) => {
           roleId: true,
           photoUrl: true,
           gender: true,
+          attendanceMode: true,
           Department: { select: { id: true, name: true } },
-          Branch: { select: { id: true, name: true } },
+          Branch: { select: { id: true, name: true, attendanceMode: true } },
           shifts: {
             orderBy: { date: "desc" },
             take: 1,
