@@ -19,7 +19,7 @@ import { max } from "date-fns";
 const FTP_CONFIG = {
   host: process.env.FTP_HOST ?? "",
   user: process.env.FTP_USER ?? "",
-  password: process.env.FTP_PASSWORD ?? "",
+  password: process.env.FTP_PASS ?? "",
   secure: false,
 };
 

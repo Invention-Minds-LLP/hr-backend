@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { generateCompOffIfEligible } from "../../services/comOff.service";
 import { autoCancelLeaveIfPresent, runOtAndLateLoginForDate } from "../biometric/biometric.controller";
+import { getEffectiveAttendanceMode } from "../../lib/attendanceMode";
 
 /**
  * POST /api/mobile-attendance/punch
@@ -21,6 +22,13 @@ export const recordPunch = async (req: Request, res: Response) => {
 
     if (!["OFFICE", "CLIENT_VISIT", "FIELD_WORK"].includes(activityType)) {
       return res.status(400).json({ message: "activityType must be OFFICE, CLIENT_VISIT, or FIELD_WORK" });
+    }
+
+    // Mobile attendance is only allowed when the employee's effective mode is
+    // MOBILE or BOTH. BIOMETRIC-only employees cannot punch from the app.
+    const mode = await getEffectiveAttendanceMode(Number(employeeId));
+    if (mode === "BIOMETRIC") {
+      return res.status(403).json({ message: "Mobile attendance is not enabled for this employee." });
     }
 
     const now = new Date();
@@ -55,9 +63,12 @@ export const recordPunch = async (req: Request, res: Response) => {
             date: todayStart,
             status: "Present",
             checkIn: now,
+            source: "MOBILE",
           },
         });
       }
+      // If the day already exists and was written by biometric, leave it —
+      // biometric wins for BOTH-mode employees.
 
       // Mirror biometric: cancel any approved/pending leave for today
       try {
@@ -74,10 +85,15 @@ export const recordPunch = async (req: Request, res: Response) => {
       }
     }
 
-    // If this is a CHECK_OUT, update the daily Attendance record's checkOut
+    // If this is a CHECK_OUT, update the daily Attendance record's checkOut.
+    // Skip when biometric owns the day (biometric wins for BOTH-mode employees).
     if (type === "CHECK_OUT") {
       await prisma.attendance.updateMany({
-        where: { employeeId: Number(employeeId), date: todayStart },
+        where: {
+          employeeId: Number(employeeId),
+          date: todayStart,
+          NOT: { source: "BIOMETRIC" },
+        },
         data: { checkOut: now },
       });
 

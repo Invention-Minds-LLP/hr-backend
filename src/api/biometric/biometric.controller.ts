@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { createNotification } from '../notifications/notifications.controller';
 import { ShiftType } from '@prisma/client';
 import { generateCompOffIfEligible } from '../../services/comOff.service';
+import { resolveAttendanceMode } from '../../lib/attendanceMode';
 
 const prisma = new PrismaClient();
 
@@ -275,13 +276,20 @@ export async function runBiometricSync(isFinalRun: boolean) {
     select: {
       id: true,
       employeeCode: true,
+      attendanceMode: true,
+      Branch: { select: { attendanceMode: true } },
     },
   });
 
 
   // Normalize employeeCode to uppercase so biometric userid matches regardless of case
-  // (e.g. DB "JMRH234" vs device sending "jmrh234")
-  const empMap = new Map(employees.map(e => [String(e.employeeCode).toUpperCase().trim(), e.id]));
+  // (e.g. DB "JMRH234" vs device sending "jmrh234").
+  // Skip MOBILE-only employees — their attendance comes from the app, not the device.
+  const empMap = new Map(
+    employees
+      .filter(e => resolveAttendanceMode(e) !== 'MOBILE')
+      .map(e => [String(e.employeeCode).toUpperCase().trim(), e.id]),
+  );
   // console.log(empMap)
 
 
@@ -364,11 +372,13 @@ export async function runBiometricSync(isFinalRun: boolean) {
         checkIn,
         checkOut,
         status: finalStatus,
+        source: 'BIOMETRIC',
       },
       update: {
         checkIn,
         checkOut,
         status: finalStatus,
+        source: 'BIOMETRIC',
       },
     });
 
@@ -981,8 +991,8 @@ export async function backfillEmployeeAttendance(
       console.log(`   💾 Upserting attendance: status=${finalStatus}`);
       const attendance = await prisma.attendance.upsert({
         where: { employeeId_date: { employeeId: employee.id, date: day } },
-        create: { employeeId: employee.id, date: day, checkIn, checkOut, status: finalStatus },
-        update: { checkIn, checkOut, status: finalStatus },
+        create: { employeeId: employee.id, date: day, checkIn, checkOut, status: finalStatus, source: 'BIOMETRIC' },
+        update: { checkIn, checkOut, status: finalStatus, source: 'BIOMETRIC' },
       });
       console.log(`   ✅ Attendance upserted id=${attendance.id}`);
 

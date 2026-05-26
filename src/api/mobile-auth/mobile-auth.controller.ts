@@ -6,6 +6,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { sendOtpSms } from '../sms/sms.controller';
 import { sendEmailOtp } from '../../utils/sendEmailOtp';
+import { resolveAttendanceMode } from '../../lib/attendanceMode';
 
 export const mobilePhoneInit = async (req: Request, res: Response) => {
     const { phone } = req.body;
@@ -80,7 +81,7 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
             designation: employee.designation?.name || '',
             photoUrl: employee.photoUrl || null,
             roleId: employee.roleId,
-            attendanceMode: employee.Branch?.attendanceMode ?? 'MOBILE'
+            attendanceMode: resolveAttendanceMode(employee)
         });
     }
 
@@ -316,7 +317,7 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
         photoUrl: employee.photoUrl || null,
         roleId: employee.roleId,
         gender: employee.gender || '',
-        attendanceMode: employee.Branch?.attendanceMode ?? 'MOBILE'
+        attendanceMode: resolveAttendanceMode(employee)
     });
 
 };

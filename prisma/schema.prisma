@@ -87,6 +87,10 @@ model Employee {
   experienceType          String?
   overtimeEnabled         Boolean?         @default(false)
 
+  // Per-employee attendance channel. NULL = inherit the branch's attendanceMode.
+  // Effective mode = attendanceMode ?? Branch.attendanceMode ?? MOBILE.
+  attendanceMode          AttendanceMode?
+
   // Access-revocation timestamp. When HR fires/suspends an employee or the
   // resignation cron flips them to RESIGNED, this is set to "now". The auth
   // middleware refuses any JWT whose `iat` is older than this value, so all
@@ -154,6 +158,7 @@ model Employee {
   weekOffHolidayOverrides  WeekOffHolidayOverrideLog[]
   appraisalOverrides       AppraisalOverrideLog[]
   salaryStructure          SalaryStructure?
+  salaryRevisions          SalaryRevision[]
   payslips                 Payslip[]
   attendancePunches        AttendancePunch[]
   weeklyPerformanceReports WeeklyPerformanceReport[]
@@ -176,6 +181,9 @@ model Employee {
   // Audit log — every change to this employee's row, plus changes this person made to others.
   auditLogTargets              EmployeeAuditLog[]      @relation("EmployeeAuditTarget")
   auditLogAuthored             EmployeeAuditLog[]      @relation("EmployeeAuditAuthor")
+
+  // Committee memberships (ICC for POSH, Grievance Redressal Committee, etc.)
+  committeeMemberships         CommitteeMember[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -255,6 +263,18 @@ model Department {
   createdAt               DateTime                  @default(now())
   updatedAt               DateTime                  @default(now()) @updatedAt
   isDefaultClearance      Boolean?                  @default(false)
+  // HR-ops planning masters (management dashboard #18/#19):
+  //   otBudgetHoursPerMonth — allotted OT hours/month for the dept (0 = no budget set)
+  //   minDailyStrength      — minimum staff that must be present each day
+  otBudgetHoursPerMonth   Int?                      @default(0)
+  minDailyStrength        Int?                      @default(0)
+  // Appraisal-cycle policy (management dashboard #20):
+  //   appraisalCycleBasis  — 'DOJ' (anniversary from joining) or 'CALENDAR' (fixed month)
+  //   appraisalPeriodMonths — 6 or 12 (used for DOJ basis)
+  //   appraisalCalendarMonth — 1-12, the fixed month appraisals run (used for CALENDAR basis)
+  appraisalCycleBasis     String?                   @default("DOJ")
+  appraisalPeriodMonths   Int?                      @default(12)
+  appraisalCalendarMonth  Int?
   employees               Employee[]
   Internship              Internship[]
   Job                     Job[]
@@ -317,6 +337,9 @@ model Attendance {
   punchCorrectionId  Int?
   isOverridden       Boolean   @default(false)
   overrideId         Int?
+  // Which channel last wrote this day's check-in/out: 'BIOMETRIC' | 'MOBILE'.
+  // Used to enforce "biometric wins" for BOTH-mode employees.
+  source             String?
   employee           Employee  @relation(fields: [employeeId], references: [id])
 
   @@unique([employeeId, date])
@@ -1808,14 +1831,17 @@ model Grievance {
   description              String                     @db.LongText
   category                 String?
   status                   GrievanceStatus            @default(OPEN)
+  committeeId              Int?                       // which Grievance Committee is handling this case
   createdAt                DateTime                   @default(now())
   updatedAt                DateTime                   @default(now()) @updatedAt
   ComplaintAcknowledgement ComplaintAcknowledgement[]
   employee                 Employee                   @relation(fields: [employeeId], references: [id])
+  committee                Committee?                 @relation(fields: [committeeId], references: [id])
   comments                 GrievanceComment[]
 
   @@index([status])
   @@index([employeeId], map: "Grievance_employeeId_fkey")
+  @@index([committeeId])
 }
 
 model GrievanceComment {
@@ -1838,16 +1864,19 @@ model PoshCase {
   description              String                     @db.LongText
   status                   PoshStatus                 @default(FILED)
   committeeNote            String?                    @db.LongText
+  committeeId              Int?                       // which ICC is handling this case
   createdAt                DateTime                   @default(now())
   updatedAt                DateTime                   @default(now()) @updatedAt
   ComplaintAcknowledgement ComplaintAcknowledgement[]
   accused                  Employee                   @relation("AccusedCases", fields: [accusedId], references: [id])
   complainant              Employee                   @relation("ComplainantCases", fields: [complainantId], references: [id])
+  committee                Committee?                 @relation(fields: [committeeId], references: [id])
   hearings                 PoshHearing[]
 
   @@index([status])
   @@index([accusedId], map: "PoshCase_accusedId_fkey")
   @@index([complainantId], map: "PoshCase_complainantId_fkey")
+  @@index([committeeId])
 }
 
 model PoshHearing {
@@ -1859,8 +1888,32 @@ model PoshHearing {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
   poshCase  PoshCase @relation(fields: [poshId], references: [id])
+  attendees PoshHearingAttendee[]
 
   @@index([poshId], map: "PoshHearing_poshId_fkey")
+}
+
+/// ──────────────────────────────────────────────────────────────────────
+///  POSH HEARING ATTENDEE — records who attended each hearing.
+///  Provides the quorum-proof audit trail required if any decision is
+///  challenged. Each row links a hearing to one committee member (the
+///  CommitteeMember row, which itself can be internal OR external) plus
+///  an attended/absent flag and optional remarks.
+/// ──────────────────────────────────────────────────────────────────────
+model PoshHearingAttendee {
+  id                Int             @id @default(autoincrement())
+  hearingId         Int
+  committeeMemberId Int
+  attended          Boolean         @default(true)
+  remarks           String?         @db.LongText
+  createdAt         DateTime        @default(now())
+
+  hearing           PoshHearing     @relation(fields: [hearingId], references: [id])
+  member            CommitteeMember @relation(fields: [committeeMemberId], references: [id])
+
+  @@index([hearingId])
+  @@index([committeeMemberId])
+  @@unique([hearingId, committeeMemberId])
 }
 
 model Training {
@@ -3069,6 +3122,25 @@ model SalaryStructure {
   @@index([employeeId])
 }
 
+// Salary revision history — one row per CTC change, so increment %
+// (management dashboard #22) can be computed. Written by
+// upsertSalaryStructure whenever the monthly CTC actually changes.
+model SalaryRevision {
+  id            Int      @id @default(autoincrement())
+  employeeId    Int
+  previousCtc   Float
+  newCtc        Float
+  percentage    Float
+  effectiveFrom DateTime @default(now())
+  reason        String?
+  createdBy     Int?
+  createdAt     DateTime @default(now())
+  employee      Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId])
+  @@index([effectiveFrom])
+}
+
 model PayrollRun {
   id          Int       @id @default(autoincrement())
   month       Int
@@ -3540,5 +3612,54 @@ model EmployeeAuditLog {
   @@index([changedBy])
   @@index([source])
   @@index([causedByPromotionId])
+}
+
+/// ──────────────────────────────────────────────────────────────────────
+///  COMMITTEE — POSH ICC and Grievance Redressal Committee.
+///  One row per committee instance (e.g. "ICC 2026", "Grievance Committee").
+///  Active members come via CommitteeMember.
+/// ──────────────────────────────────────────────────────────────────────
+model Committee {
+  id           Int       @id @default(autoincrement())
+  type         String                                     // 'POSH' | 'GRIEVANCE'
+  name         String                                     // "ICC 2026", "Grievance Committee — Plant A"
+  scope        String?                                    // 'ORG_WIDE' | branch name | dept name
+  termStart    DateTime
+  termEnd      DateTime
+  isActive     Boolean   @default(true)
+  notes        String?   @db.LongText
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  members      CommitteeMember[]
+  grievances   Grievance[]
+  poshCases    PoshCase[]
+
+  @@index([type, isActive])
+}
+
+/// ──────────────────────────────────────────────────────────────────────
+///  COMMITTEE MEMBER — internal (Employee FK) or external (NGO/lawyer).
+///  External members get token-based access in a later phase.
+/// ──────────────────────────────────────────────────────────────────────
+model CommitteeMember {
+  id            Int       @id @default(autoincrement())
+  committeeId   Int
+  employeeId    Int?                                       // null for external members
+  externalName  String?
+  externalEmail String?
+  externalPhone String?                                    // for WhatsApp / SMS — externals only (internal members use Employee.phone)
+  externalOrg   String?
+  role          String                                     // 'PRESIDING_OFFICER' | 'CHAIR' | 'MEMBER' | 'EXTERNAL_MEMBER' | 'SECRETARY'
+  addedOn       DateTime  @default(now())
+  removedOn     DateTime?
+  isActive      Boolean   @default(true)
+
+  committee     Committee @relation(fields: [committeeId], references: [id])
+  employee      Employee? @relation(fields: [employeeId], references: [id])
+  hearingAttendances PoshHearingAttendee[]
+
+  @@index([committeeId, isActive])
+  @@index([employeeId])
 }
 

@@ -3,13 +3,24 @@ import { Request, Response } from "express";
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
 
+// Whitelist the planning/appraisal master fields a Department write may set.
+const planningData = (body: any) => {
+  const data: any = {};
+  if (body.otBudgetHoursPerMonth !== undefined) data.otBudgetHoursPerMonth = Math.max(0, Number(body.otBudgetHoursPerMonth) || 0);
+  if (body.minDailyStrength !== undefined) data.minDailyStrength = Math.max(0, Number(body.minDailyStrength) || 0);
+  if (body.appraisalCycleBasis !== undefined) data.appraisalCycleBasis = body.appraisalCycleBasis === "CALENDAR" ? "CALENDAR" : "DOJ";
+  if (body.appraisalPeriodMonths !== undefined) data.appraisalPeriodMonths = [6, 12].includes(Number(body.appraisalPeriodMonths)) ? Number(body.appraisalPeriodMonths) : 12;
+  if (body.appraisalCalendarMonth !== undefined) data.appraisalCalendarMonth = body.appraisalCalendarMonth ? Math.min(12, Math.max(1, Number(body.appraisalCalendarMonth))) : null;
+  return data;
+};
+
 // CREATE Department
 export const createDepartment = async (req: Request, res: Response) => {
   try {
     const { name } = req.body;
 
     const department = await prisma.department.create({
-      data: { name }
+      data: { name, ...planningData(req.body) }
     });
 
     res.status(201).json(department);
@@ -52,7 +63,7 @@ export const updateDepartment = async (req: Request, res: Response) => {
 
     const updatedDepartment = await prisma.department.update({
       where: { id: Number(id) },
-      data: { name }
+      data: { ...(name !== undefined ? { name } : {}), ...planningData(req.body) }
     });
 
     res.json(updatedDepartment);

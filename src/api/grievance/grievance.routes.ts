@@ -8,6 +8,8 @@ import {
   getAcknowledgementsByEmployee,
   checkAcknowledgement,
   getUnacknowledgedComplaints,
+  getGrievanceCommitteeAcks,
+  getPoshCommitteeAcks,
 } from "./grievance.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -25,5 +27,8 @@ router.get("/acknowledge/:employeeId", getAcknowledgementsByEmployee);
 // Check if already acknowledged
 router.get("/acknowledge", checkAcknowledgement);
 router.get("/get-unacknowledged/:employeeId", getUnacknowledgedComplaints)
+
+// Committee-member acknowledgement progress for a case (Phase 6).
+router.get("/:id/committee-acks", authenticateToken, getGrievanceCommitteeAcks);
 
 export default router;
