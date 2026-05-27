@@ -251,8 +251,8 @@ export const createEmployee = async (req: Request, res: Response) => {
           experienceType,
           geoTrackingEnabled: geoTrackingEnabled ?? false,
           overtimeEnabled: overtimeEnabled ?? false,
-          // null = inherit branch's attendanceMode
-          attendanceMode: data.attendanceMode ?? null,
+          // Biometric is the default; BOTH adds mobile (set via the form toggle).
+          attendanceMode: data.attendanceMode ?? 'BIOMETRIC',
           // Health & Wellness fields
           preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
           height: data.height ? parseFloat(data.height) : null,
@@ -838,8 +838,8 @@ export const updateEmployee = async (req: Request, res: Response) => {
 
         geoTrackingEnabled: data.geoTrackingEnabled,
         overtimeEnabled: data.overtimeEnabled,
-        // null = inherit branch's attendanceMode
-        attendanceMode: data.attendanceMode ?? null,
+        // Biometric is the default; BOTH adds mobile (set via the form toggle).
+        attendanceMode: data.attendanceMode ?? 'BIOMETRIC',
 
 
         motherName: data.motherName,

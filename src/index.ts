@@ -77,12 +77,12 @@ app.set("trust proxy", 1);
 app.use(helmet());
 
 // Global API rate limit (per IP). Blanket protection against scraping/abuse.
-// app.use("/api/", rateLimit({
-//   windowMs: 10 * 60 * 1000,
-//   max: 300,
-//   standardHeaders: true,
-//   legacyHeaders: false,
-// }));
+app.use("/api/", rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 500,
+  standardHeaders: true,
+  legacyHeaders: false,
+}));
 
 // Stricter limit on auth endpoints to blunt credential/OTP brute-forcing.
 app.use(["/api/users/login", "/api/users/login-init", "/api/users/verify-otp",
