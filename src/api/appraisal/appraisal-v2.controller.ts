@@ -726,6 +726,82 @@ export const getEditHistory = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * POST /api/appraisals/:id/reassign-manager
+ * HR override: reassign the manager on an open appraisal. Blocked once the
+ * manager has already submitted (use the edit-request flow for that case).
+ * Body: { newManagerId: number, reason?: string }
+ */
+export const reassignAppraisalManager = async (req: Request, res: Response) => {
+  try {
+    const appraisalId = Number(req.params.id);
+    const { newManagerId, reason } = req.body as { newManagerId: number; reason?: string };
+    const editedBy = (req as any).user?.empId ?? null;
+
+    if (!appraisalId || !newManagerId) {
+      return res.status(400).json({ error: "appraisalId and newManagerId are required" });
+    }
+
+    const appraisal = await prisma.appraisalForm.findUnique({
+      where: { id: appraisalId },
+      include: { employee: { select: { firstName: true, lastName: true } } },
+    });
+    if (!appraisal) return res.status(404).json({ error: "Appraisal not found" });
+
+    if (appraisal.managerAppraisalSubmittedAt) {
+      return res.status(400).json({
+        error: "Manager has already submitted this appraisal. Use the edit-request flow.",
+      });
+    }
+    if (appraisal.managerId === Number(newManagerId)) {
+      return res.status(400).json({ error: "That employee is already the appraisal's manager." });
+    }
+
+    const newMgr = await prisma.employee.findUnique({
+      where: { id: Number(newManagerId) },
+      select: { id: true, firstName: true, lastName: true },
+    });
+    if (!newMgr) return res.status(404).json({ error: "New manager not found" });
+
+    const oldManagerId = appraisal.managerId;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.appraisalForm.update({
+        where: { id: appraisalId },
+        data: { managerId: Number(newManagerId) },
+      });
+      await tx.appraisalEditHistory.create({
+        data: {
+          appraisalFormId: appraisalId,
+          editedBy: editedBy ?? Number(newManagerId), // fall back so the FK is satisfied
+          editType: "MANAGER_REASSIGN",
+          previousValues: { managerId: oldManagerId },
+          newValues: { managerId: Number(newManagerId) },
+          editReason: reason || null,
+        },
+      });
+    });
+
+    const empName = `${appraisal.employee.firstName} ${appraisal.employee.lastName}`.trim();
+    const cycleLabel = appraisal.cycle ? ` (${appraisal.cycle})` : "";
+    await createNotification(
+      Number(newManagerId),
+      `You have been assigned as the appraiser for ${empName}${cycleLabel}. Please complete the manager review.`,
+    );
+    if (oldManagerId) {
+      await createNotification(
+        oldManagerId,
+        `The appraisal for ${empName}${cycleLabel} has been reassigned to another manager.`,
+      );
+    }
+
+    return res.json({ success: true, appraisalId, oldManagerId, newManagerId: Number(newManagerId) });
+  } catch (e: any) {
+    console.error("reassignAppraisalManager error:", e);
+    return res.status(500).json({ error: e.message || "Failed to reassign manager" });
+  }
+};
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CRON: AUTO-CREATE APPRAISAL AT 11 MONTHS
 // ═══════════════════════════════════════════════════════════════════════════════

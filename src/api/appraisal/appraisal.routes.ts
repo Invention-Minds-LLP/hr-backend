@@ -5,6 +5,7 @@ import {
   hrVerifyAppraisal, submitSelfAppraisal, submitManagerAppraisalV2, submitManagementAppraisal,
   hrReviewAppraisal, requestEdit, respondEditRequest,
   getAppraisalDetail, getEditHistory, getEmployeeInsights,
+  reassignAppraisalManager,
 } from './appraisal-v2.controller';
 import { authenticateToken } from '../../middleware/authMiddleware';
 
@@ -27,6 +28,7 @@ router.post('/:id/self-appraisal', authenticateToken, submitSelfAppraisal);
 router.post('/:id/manager-appraisal', authenticateToken, submitManagerAppraisalV2);
 router.post('/:id/management-appraisal', authenticateToken, submitManagementAppraisal);
 router.post('/:id/hr-review', authenticateToken, hrReviewAppraisal);
+router.post('/:id/reassign-manager', authenticateToken, reassignAppraisalManager);
 
 // V2: Edit requests
 router.post('/:id/edit-request', authenticateToken, requestEdit);

@@ -1861,7 +1861,7 @@ export const getActiveEmployees = async (req: Request, res: Response) => {
       where: {
         employmentStatus: 'ACTIVE'
       },
-      select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true, employeeCode: true }
+      select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true, employeeCode: true, roleId: true}
     });
     res.json(employees);
   } catch (error) {
