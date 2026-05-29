@@ -260,10 +260,27 @@ export const getAllAppraisalsWithManagerReview = async (req: Request, res: Respo
         OR: [
           { employee: { reportingManager: empId } },
           { employeeId: empId },
+          // The snapshotted appraisal-level manager (set by HR via the
+          // Reassign Manager flow, which doesn't change the employee's RM).
+          { managerId: empId },
+          // Also surface anyone they're the in-charge of (snapshot on the
+          // appraisal once HR verifies; falls back to the employee's current
+          // in-charge for pre-verification rows).
+          { inchargeId: empId },
+          { employee: { inchargeId: empId } },
         ],
       };
     } else {
-      whereClause = { employeeId: empId }; // own appraisal only
+      // Default: own appraisal + appraisals where they're the snapshotted
+      // manager (reassigned by HR) or the in-charge.
+      whereClause = {
+        OR: [
+          { employeeId: empId },
+          { managerId: empId },
+          { inchargeId: empId },
+          { employee: { inchargeId: empId } },
+        ],
+      };
     }
 
     const appraisals = await prisma.appraisalForm.findMany({
@@ -280,6 +297,7 @@ export const getAllAppraisalsWithManagerReview = async (req: Request, res: Respo
             email: true,
             dateOfJoining: true,
             reportingManager: true,
+            inchargeId: true,
             gender: true,
             photoUrl: true
           }

@@ -698,6 +698,10 @@ model AppraisalForm {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @default(now()) @updatedAt
   managerId     Int?
+  // Snapshot of the employee's in-charge at HR verification time. Null when
+  // the employee has no in-charge, in which case the flow skips the INCHARGE
+  // step and goes Employee → Manager → Management.
+  inchargeId    Int?
 
   // New fields for enhanced flow
   appraisalStartDate          DateTime?
@@ -706,6 +710,11 @@ model AppraisalForm {
   hrVerifiedBy                Int?
   hrVerifiedAt                DateTime?
   selfAppraisalSubmittedAt       DateTime?
+  inchargeAppraisalSubmittedAt   DateTime?
+  // In-charge's supplementary summary (no final decision — that stays with
+  // the manager). Nullable so existing rows are unaffected.
+  inchargeOverallScore           Float?
+  inchargeOverallComments        String?   @db.Text
   managerAppraisalSubmittedAt    DateTime?
   managementAppraisalSubmittedAt DateTime?
   hrReviewComments               String?   @db.Text
@@ -719,11 +728,56 @@ model AppraisalForm {
   managementReview   ManagementAppraisal?
   selfAppraisal      SelfAppraisal?
   selfAnswers        SelfAppraisalAnswer[]
+  reviewAnswers      AppraisalReviewAnswer[]
   editRequests       AppraisalEditRequest[]
   editHistory        AppraisalEditHistory[]
 
   @@index([employeeId], map: "AppraisalForm_employeeId_fkey")
   @@index([status])
+}
+
+/// Master question pool shared by all three review levels (In-charge,
+/// Manager, Management). Per-level applicability is captured in `levels`
+/// (e.g. ["INCHARGE","MANAGER","MANAGEMENT"]) so HR can scope a question to
+/// a subset later without altering the schema.
+model AppraisalReviewQuestion {
+  id            Int      @id @default(autoincrement())
+  title         String                                  // e.g. "Quality of Work"
+  description   String?  @db.Text                       // one-line intent
+  prompts       Json?                                   // array of bullet questions
+  aboveAverage  String?  @db.Text
+  average       String?  @db.Text
+  belowAverage  String?  @db.Text
+  category      String?                                 // CLINICAL | NONCLINICAL | PARAMEDICAL
+  section       String?
+  levels        Json     @default("[\"INCHARGE\",\"MANAGER\",\"MANAGEMENT\"]")
+  displayOrder  Int      @default(0)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @default(now()) @updatedAt
+
+  answers AppraisalReviewAnswer[]
+}
+
+/// One row per (appraisal, question, reviewer level). Single unified table
+/// for In-charge / Manager / Management answers, replacing the column-based
+/// ManagerAppraisal / ManagementAppraisal tables for new appraisals.
+model AppraisalReviewAnswer {
+  id              Int      @id @default(autoincrement())
+  appraisalFormId Int
+  questionId      Int
+  level           String                                // INCHARGE | MANAGER | MANAGEMENT
+  rating          Float?
+  comments        String?  @db.Text
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+
+  appraisalForm AppraisalForm           @relation(fields: [appraisalFormId], references: [id])
+  question      AppraisalReviewQuestion @relation(fields: [questionId], references: [id])
+
+  @@unique([appraisalFormId, questionId, level])
+  @@index([appraisalFormId, level])
+  @@index([questionId])
 }
 
 model SelfAppraisalQuestion {
