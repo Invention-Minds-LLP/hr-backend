@@ -22,6 +22,7 @@ var __rest = (this && this.__rest) || function (s, e) {
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
+var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.queryAuditLog = exports.getEmployeeAuditLog = exports.getProbationHistory = exports.terminateProbation = exports.confirmProbation = exports.extendProbation = exports.bulkUploadLeaveBalance = exports.bulkUpdateEmployeeExtras = exports.getEmployeesByManager = exports.initSabbaticalReminderScheduler = exports.terminateFromSabbatical = exports.endSabbatical = exports.extendSabbatical = exports.startSabbatical = exports.getEmployeeProfile = exports.updateEmployeeProfile = exports.deleteEmployeeDocument = exports.getInchargeEmployees = exports.bulkUpdateReportingManager = exports.getBulkUploadProgress = exports.bulkUploadEmployees = exports.downloadEmployeeTemplate = exports.getUnreportedAbsentees = exports.sendHealthCheckReminders = exports.getEmployeesByDepartments = exports.uploadVaccineProof = exports.getEmployeeRequests = exports.getActiveEmployees = exports.getEmployeesByRole = exports.getSpecificRoles = exports.uploadEmployeeDisabilityProof = exports.uploadEmployeePhoto = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
 exports.getAccruals = getAccruals;
@@ -44,10 +45,10 @@ const xlsx_1 = __importDefault(require("xlsx"));
 const node_cron_1 = __importDefault(require("node-cron"));
 const directory_1 = require("../../lib/directory");
 const FTP_CONFIG = {
-    host: "srv680.main-hosting.eu", // Your FTP hostname
-    user: "u948610439.hrproindia.in", // Your FTP username
-    password: "Bsrenuk@1993", // Your FTP password
-    secure: false // Set to true if using FTPS
+    host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
+    user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
+    password: (_c = process.env.FTP_PASS) !== null && _c !== void 0 ? _c : "",
+    secure: process.env.FTP_SECURE === "true"
 };
 const TEMP_FOLDER = path_1.default.join(__dirname, '../temp'); // absolute path
 if (!fs_1.default.existsSync(TEMP_FOLDER)) {
@@ -136,7 +137,7 @@ function generateEmployeeCode(employmentType) {
 }
 // CREATE Employee (with emergency contacts & qualifications)
 const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b;
+    var _a, _b, _c;
     try {
         const { employeeCode, referenceCode, firstName, lastName, gender, dob, photoUrl, phone, email, designation, designationId, departmentId, branchId, dateOfJoining, employmentType, probationStartDate, probationEndDate, probationStatus, probationConfirmedOn, probationConfirmedBy, probationRemarks, employmentStatus, emergencyContacts, qualifications, addresses, roleId, bloodGroup, reportingManager, age, shiftMode, // 'FIXED' | 'ROTATIONAL' (optional)
         fixedShiftId, // optional
@@ -192,6 +193,8 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     experienceType,
                     geoTrackingEnabled: geoTrackingEnabled !== null && geoTrackingEnabled !== void 0 ? geoTrackingEnabled : false,
                     overtimeEnabled: overtimeEnabled !== null && overtimeEnabled !== void 0 ? overtimeEnabled : false,
+                    // Biometric is the default; BOTH adds mobile (set via the form toggle).
+                    attendanceMode: (_a = data.attendanceMode) !== null && _a !== void 0 ? _a : 'BIOMETRIC',
                     // Health & Wellness fields
                     preEmploymentCheckDate: data.preEmploymentCheckDate ? new Date(data.preEmploymentCheckDate) : null,
                     height: data.height ? parseFloat(data.height) : null,
@@ -278,7 +281,7 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
             });
         }
         catch (err) {
-            if (err.code === 'P2002' && ((_b = (_a = err.meta) === null || _a === void 0 ? void 0 : _a.target) === null || _b === void 0 ? void 0 : _b.includes('employeeCode'))) {
+            if (err.code === 'P2002' && ((_c = (_b = err.meta) === null || _b === void 0 ? void 0 : _b.target) === null || _c === void 0 ? void 0 : _c.includes('employeeCode'))) {
                 // Regenerate a fresh code and retry
                 finalCode = yield generateEmployeeCode(employmentType);
                 console.log(finalCode);
@@ -566,8 +569,9 @@ const getEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                     roleId: true,
                     photoUrl: true,
                     gender: true,
+                    attendanceMode: true,
                     Department: { select: { id: true, name: true } },
-                    Branch: { select: { id: true, name: true } },
+                    Branch: { select: { id: true, name: true, attendanceMode: true } },
                     shifts: {
                         orderBy: { date: "desc" },
                         take: 1,
@@ -633,7 +637,7 @@ const getEmployeeById = (req, res) => __awaiter(void 0, void 0, void 0, function
 });
 exports.getEmployeeById = getEmployeeById;
 const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
     try {
         const { id } = req.params;
         const data = req.body;
@@ -673,7 +677,9 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 // Health & Wellness fields
                 preEmploymentCheckDate: preEmploymentCheckDate ? new Date(preEmploymentCheckDate) : null, height: data.height ? parseFloat(data.height) : null, weight: data.weight ? parseFloat(data.weight) : null, bmi: data.bmi ? parseFloat(data.bmi) : null, bloodPressure: data.bloodPressure, bloodSugar: data.bloodSugar, cholesterol: data.cholesterol, sameAsPermanent: data.sameAsPermanent, fatherName: data.fatherName, marital: data.marital, totalYearsOfExperience: data.totalYearsOfExperience, experience: data.experience, allergies: data.allergies, chronicConditions: data.chronicConditions, 
                 // designationId: designationId ?? null, // ✅ THIS IS THE FIX
-                smoking: data.smoking, alcohol: data.alcohol, visionType: data.visionType, usesGlasses: data.usesGlasses, visionRemarks: data.visionRemarks, hasDisability: data.hasDisability, disabilityType: data.disabilityType, disabilityDescription: data.disabilityDescription, disabilityProofFile: data.disabilityProofFile, disabilityProofFileName: data.disabilityProofFileName, disabilityProofUrl: data.disabilityProofUrl, preferredHospital: data.preferredHospital, primaryPhysician: data.primaryPhysician, emergencyNotes: data.emergencyNotes, geoTrackingEnabled: data.geoTrackingEnabled, overtimeEnabled: data.overtimeEnabled, motherName: data.motherName, alternatePhone: data.alternatePhone, uanNumber: data.uanNumber, panNumber: data.panNumber, aadharNumber: data.aadharNumber, licenseNumber: data.licenseNumber, licenseRegDate: toDate(data.licenseRegDate), licenseExpiryDate: toDate(data.licenseExpiryDate), pastSurgeries: data.pastSurgeries, exerciseFrequency: data.exerciseFrequency, healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined, vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined, Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, designation: { connect: { id: designationId } }, incharge: inchargeId
+                smoking: data.smoking, alcohol: data.alcohol, visionType: data.visionType, usesGlasses: data.usesGlasses, visionRemarks: data.visionRemarks, hasDisability: data.hasDisability, disabilityType: data.disabilityType, disabilityDescription: data.disabilityDescription, disabilityProofFile: data.disabilityProofFile, disabilityProofFileName: data.disabilityProofFileName, disabilityProofUrl: data.disabilityProofUrl, preferredHospital: data.preferredHospital, primaryPhysician: data.primaryPhysician, emergencyNotes: data.emergencyNotes, geoTrackingEnabled: data.geoTrackingEnabled, overtimeEnabled: data.overtimeEnabled, 
+                // Biometric is the default; BOTH adds mobile (set via the form toggle).
+                attendanceMode: (_c = data.attendanceMode) !== null && _c !== void 0 ? _c : 'BIOMETRIC', motherName: data.motherName, alternatePhone: data.alternatePhone, uanNumber: data.uanNumber, panNumber: data.panNumber, aadharNumber: data.aadharNumber, licenseNumber: data.licenseNumber, licenseRegDate: toDate(data.licenseRegDate), licenseExpiryDate: toDate(data.licenseExpiryDate), pastSurgeries: data.pastSurgeries, exerciseFrequency: data.exerciseFrequency, healthIssues: data.healthIssues ? JSON.stringify(data.healthIssues) : undefined, vaccinations: data.vaccinations ? JSON.stringify(data.vaccinations) : undefined, Department: { connect: { id: departmentId } }, Branch: { connect: { id: branchId } }, role: { connect: { id: roleId } }, designation: { connect: { id: designationId } }, incharge: inchargeId
                     ? { connect: { id: Number(inchargeId) } }
                     : { disconnect: true }, Address: {
                     deleteMany: {},
@@ -733,7 +739,7 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     const { Address, emergencyContacts, qualifications } = r, rest = __rest(r, ["Address", "emergencyContacts", "qualifications"]);
                     return rest;
                 };
-                const diff = (_c = (0, employeeAudit_1.buildEmployeeDiff)(stripRelations(beforeRow), stripRelations(afterRow))) !== null && _c !== void 0 ? _c : {
+                const diff = (_d = (0, employeeAudit_1.buildEmployeeDiff)(stripRelations(beforeRow), stripRelations(afterRow))) !== null && _d !== void 0 ? _d : {
                     changes: {},
                     changedFields: [],
                 };
@@ -767,10 +773,10 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                             action: 'UPDATE',
                             changes: diff.changes,
                             changedFields: diff.changedFields,
-                            changedBy: (_d = ctx.changedBy) !== null && _d !== void 0 ? _d : null,
-                            source: (_e = ctx.source) !== null && _e !== void 0 ? _e : 'WEB',
-                            ipAddress: (_f = ctx.ip) !== null && _f !== void 0 ? _f : null,
-                            userAgent: (_g = ctx.userAgent) !== null && _g !== void 0 ? _g : null,
+                            changedBy: (_e = ctx.changedBy) !== null && _e !== void 0 ? _e : null,
+                            source: (_f = ctx.source) !== null && _f !== void 0 ? _f : 'WEB',
+                            ipAddress: (_g = ctx.ip) !== null && _g !== void 0 ? _g : null,
+                            userAgent: (_h = ctx.userAgent) !== null && _h !== void 0 ? _h : null,
                         },
                     });
                 }
@@ -833,7 +839,7 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     data: {
                         startDate: updatedEmployee.probationStartDate,
                         endDate: updatedEmployee.probationEndDate,
-                        remarks: (_h = updatedEmployee.probationRemarks) !== null && _h !== void 0 ? _h : null,
+                        remarks: (_j = updatedEmployee.probationRemarks) !== null && _j !== void 0 ? _j : null,
                     },
                 });
             }
@@ -849,9 +855,9 @@ const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                         startDate: updatedEmployee.probationStartDate,
                         endDate: updatedEmployee.probationEndDate,
                         status: formStatus,
-                        remarks: (_j = updatedEmployee.probationRemarks) !== null && _j !== void 0 ? _j : null,
+                        remarks: (_k = updatedEmployee.probationRemarks) !== null && _k !== void 0 ? _k : null,
                         decidedOn: isTerminal
-                            ? ((_k = updatedEmployee.probationConfirmedOn) !== null && _k !== void 0 ? _k : new Date())
+                            ? ((_l = updatedEmployee.probationConfirmedOn) !== null && _l !== void 0 ? _l : new Date())
                             : null,
                     },
                 });
@@ -1533,7 +1539,7 @@ const getActiveEmployees = (req, res) => __awaiter(void 0, void 0, void 0, funct
             where: {
                 employmentStatus: 'ACTIVE'
             },
-            select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true, employeeCode: true }
+            select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true, employeeCode: true, roleId: true }
         });
         res.json(employees);
     }
@@ -2772,7 +2778,7 @@ function deleteFromFTP(remotePath) {
                 host: FTP_CONFIG.host,
                 user: FTP_CONFIG.user,
                 password: FTP_CONFIG.password,
-                secure: false,
+                secure: FTP_CONFIG.secure,
             });
             yield client.remove(remotePath);
         }

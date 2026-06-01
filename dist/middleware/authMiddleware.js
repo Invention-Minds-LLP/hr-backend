@@ -15,7 +15,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.requireRoleOrDept = exports.requireRole = exports.authenticateToken = void 0;
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const employeeAccess_1 = require("../lib/employeeAccess");
-const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret"; // make sure to store in .env
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    // Fail fast: a missing/known-default secret means anyone can forge tokens.
+    throw new Error("JWT_SECRET is not set. Refusing to start without a signing secret.");
+}
 /**
  * Authenticate the request and ensure the holder still has system access.
  *

@@ -197,14 +197,22 @@ const getEmployeeSalaryStructure = (req, res) => __awaiter(void 0, void 0, void 
 });
 exports.getEmployeeSalaryStructure = getEmployeeSalaryStructure;
 const upsertSalaryStructure = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d;
     try {
         const { employeeId, basic = 0, hra = 0, medicalAllowance = 0, travelAllowance = 0, specialAllowance = 0, otherAllowances = 0, pfApplicable = true, esiApplicable = true, ptApplicable = true, tdsMonthly = 0, effectiveFrom, } = req.body;
         if (!employeeId)
             return res.status(400).json({ message: 'employeeId required' });
+        const empId = Number(employeeId);
+        const ctc = (n) => (n.basic || 0) + (n.hra || 0) + (n.medicalAllowance || 0) + (n.travelAllowance || 0) +
+            (n.specialAllowance || 0) + (n.otherAllowances || 0);
+        // Capture the prior CTC before the upsert so we can log a revision.
+        const existing = yield prisma_1.prisma.salaryStructure.findUnique({ where: { employeeId: empId } });
+        const oldCtc = existing ? ctc(existing) : 0;
+        const newCtc = ctc({ basic, hra, medicalAllowance, travelAllowance, specialAllowance, otherAllowances });
         const structure = yield prisma_1.prisma.salaryStructure.upsert({
-            where: { employeeId: Number(employeeId) },
+            where: { employeeId: empId },
             create: {
-                employeeId: Number(employeeId),
+                employeeId: empId,
                 basic, hra, medicalAllowance, travelAllowance, specialAllowance, otherAllowances,
                 pfApplicable, esiApplicable, ptApplicable, tdsMonthly,
                 effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : new Date(),
@@ -215,6 +223,21 @@ const upsertSalaryStructure = (req, res) => __awaiter(void 0, void 0, void 0, fu
                 effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : undefined,
             },
         });
+        // Record a salary revision when an existing CTC actually changed
+        // (feeds management dashboard #22 — increment % by department).
+        if (existing && oldCtc > 0 && Math.round(oldCtc) !== Math.round(newCtc)) {
+            yield prisma_1.prisma.salaryRevision.create({
+                data: {
+                    employeeId: empId,
+                    previousCtc: oldCtc,
+                    newCtc,
+                    percentage: +(((newCtc - oldCtc) / oldCtc) * 100).toFixed(2),
+                    effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : new Date(),
+                    reason: (_b = (_a = req.body) === null || _a === void 0 ? void 0 : _a.reason) !== null && _b !== void 0 ? _b : null,
+                    createdBy: (_d = (_c = req.user) === null || _c === void 0 ? void 0 : _c.id) !== null && _d !== void 0 ? _d : null,
+                },
+            });
+        }
         res.json(structure);
     }
     catch (err) {

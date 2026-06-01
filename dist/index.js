@@ -45,6 +45,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+require("dotenv/config"); // must run before any module that reads process.env at import time
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const dotenv_1 = __importDefault(require("dotenv"));
@@ -80,6 +81,7 @@ const attendance_routes_1 = __importDefault(require("./api/attendance/attendance
 const incident_routes_1 = __importDefault(require("./api/incident/incident.routes"));
 const committee_routes_1 = __importDefault(require("./api/committee/committee.routes"));
 const helmet_1 = __importDefault(require("helmet"));
+const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
 const scheduler_1 = require("./schedulers/scheduler");
 const designation_routes_1 = __importDefault(require("./api/designation/designation.routes"));
 const sms_routes_1 = __importDefault(require("./api/sms/sms.routes"));
@@ -99,14 +101,29 @@ const loan_routes_1 = __importDefault(require("./api/loan/loan.routes"));
 const weekly_rating_routes_1 = __importDefault(require("./api/weekly-rating/weekly-rating.routes"));
 const pip_routes_1 = __importStar(require("./api/pip/pip.routes"));
 const management_routes_1 = __importDefault(require("./api/management/management.routes"));
+const authMiddleware_1 = require("./middleware/authMiddleware");
 const port = 3002;
 dotenv_1.default.config();
 const app = (0, express_1.default)();
+// Behind a single reverse proxy (nginx). Lets express-rate-limit / req.ip use
+// the real client IP from X-Forwarded-For without trusting arbitrary hops.
+app.set("trust proxy", 1);
 app.use((0, helmet_1.default)());
-// app.use("/api/", rateLimit({
-//   windowMs: 10 * 60 * 1000, 
-//   max: 300
-// }));
+// Global API rate limit (per IP). Blanket protection against scraping/abuse.
+app.use("/api/", (0, express_rate_limit_1.default)({
+    windowMs: 10 * 60 * 1000,
+    max: 500,
+    standardHeaders: true,
+    legacyHeaders: false,
+}));
+// Stricter limit on auth endpoints to blunt credential/OTP brute-forcing.
+app.use(["/api/users/login", "/api/users/login-init", "/api/users/verify-otp",
+    "/api/users/candidate/login", "/api/auth"], (0, express_rate_limit_1.default)({
+    windowMs: 10 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+}));
 // app.use(cors({
 //   origin: ["http://localhost:4300",
 //     "https://demo.hrproindia.in",
@@ -155,7 +172,7 @@ app.use((0, cors_1.default)({
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
-app.use(express_1.default.json());
+app.use(express_1.default.json({ limit: "2mb" }));
 // Routes
 app.use("/api/employees", employee_routes_1.default);
 app.use("/api/users", user_routes_1.default);
@@ -210,7 +227,7 @@ app.use("/api/management", management_routes_1.default);
 app.post("/api/pip-respond/:token", pip_routes_1.respondViaToken);
 // Utility: backfill biometric attendance for one employee across a date range
 const biometric_controller_1 = require("./api/biometric/biometric.controller");
-app.post("/api/biometric/backfill-employee", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+app.post("/api/biometric/backfill-employee", authMiddleware_1.authenticateToken, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { employeeCode, fromDate, toDate } = req.body;
         if (!employeeCode || !fromDate || !toDate) {
@@ -238,7 +255,7 @@ app.post("/api/biometric/backfill-employee", (req, res) => __awaiter(void 0, voi
  * holding the HTTP request open for minutes, this kicks the job off in the
  * background and returns immediately. Watch the server console for progress.
  */
-app.post("/api/biometric/run-sync", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+app.post("/api/biometric/run-sync", authMiddleware_1.authenticateToken, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const isFinalRun = !!(req.body || {}).isFinalRun;
     console.log(`[manual] biometric sync requested | isFinalRun=${isFinalRun}`);
     // Fire-and-forget so the caller isn't blocked. Errors are logged.
@@ -274,7 +291,7 @@ app.post("/api/biometric/run-sync", (req, res) => __awaiter(void 0, void 0, void
  * `totalRecords` and `presence.foundExact` tells you exactly which filter
  * is dropping the user.
  */
-app.post("/api/biometric/cosec-debug", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+app.post("/api/biometric/cosec-debug", authMiddleware_1.authenticateToken, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const body = req.body || {};
         const date = body.date ? new Date(body.date) : new Date();

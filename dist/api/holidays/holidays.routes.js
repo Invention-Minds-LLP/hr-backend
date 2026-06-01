@@ -2,7 +2,10 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const holidays_controller_1 = require("./holidays.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = (0, express_1.Router)();
+// All holiday endpoints require a valid login.
+router.use(authMiddleware_1.authenticateToken);
 /** Holiday Calendar */
 router.post("/calendar", holidays_controller_1.createHolidayCalendar);
 router.get("/calendar/:year", holidays_controller_1.getHolidaysByYear);

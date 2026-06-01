@@ -9,7 +9,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getPayrollReadiness = exports.getIncentiveOverview = exports.getLoanOverview = exports.getPayrollTrend = exports.getPayrollOverview = exports.getTrainingCalendar = exports.getTrainingInsights = exports.getElInsights = exports.getQualifications = exports.getMobileLoginActivity = exports.getWorkforceInsights = exports.getAbsenteeism = exports.getLeaveUtilization = exports.getLateArrivals = exports.getOtAnalysis = exports.getKpiDetail = exports.getPerformanceDistribution = exports.getWeeklyTrend = exports.getDeptSnapshot = exports.getDeptRisk = exports.getActionItems = exports.getTrainingByDept = exports.getRecruitmentFunnel = exports.getAttritionTrend = exports.getActivePIPs = exports.getPerformanceRadar = exports.getLeaveCalendar = exports.getAttendanceSummary = exports.getWorkforce = exports.getAttention = exports.getPulse = void 0;
+exports.getPayrollReadiness = exports.getIncentiveOverview = exports.getLoanOverview = exports.getPayrollTrend = exports.getPayrollOverview = exports.getTrainingCalendar = exports.getTrainingInsights = exports.getElInsights = exports.getQualifications = exports.getMobileLoginActivity = exports.getWorkforceInsights = exports.getAbsenteeism = exports.getLeaveUtilization = exports.getLateArrivals = exports.getProbationOverview = exports.getAppraisalEligibility = exports.getSalaryIncrements = exports.getOtVsHire = exports.getPipMonitor = exports.getReliabilityScores = exports.getAppraisalScores = exports.setDeptPlanning = exports.getDeptPlanning = exports.getRecruitmentOps = exports.getWorkedHours = exports.getPunctuality = exports.getOtEligibility = exports.getIncidentsAnalytics = exports.getWeeklyPerfStatus = exports.getLeaveAbuse = exports.getLeaveByTypeWeekly = exports.getOtAnalysis = exports.getKpiDetail = exports.getPerformanceDistribution = exports.getWeeklyTrend = exports.getDeptAttendanceToday = exports.getDeptSnapshot = exports.getDeptRisk = exports.getActionItems = exports.getTrainingByDept = exports.getRecruitmentFunnel = exports.getAttritionTrend = exports.getActivePIPs = exports.getPerformanceRadar = exports.getLeaveCalendar = exports.getAttendanceSummary = exports.getWorkforce = exports.getAttention = exports.getPulse = void 0;
 const prisma_1 = require("../../lib/prisma");
 const date_fns_1 = require("date-fns");
 function startOfDayIST(d = new Date()) {
@@ -919,14 +919,14 @@ const getActivePIPs = (_req, res) => __awaiter(void 0, void 0, void 0, function*
 });
 exports.getActivePIPs = getActivePIPs;
 // ═══════════════════════════════════════════════════════════
-// SECTION 5 — ATTRITION TREND (last 12 months)
+// SECTION 5 — ATTRITION TREND (last 3 months)
 // GET /api/management/attrition-trend
 // ═══════════════════════════════════════════════════════════
 const getAttritionTrend = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a;
     try {
         const months = [];
-        for (let i = 11; i >= 0; i--) {
+        for (let i = 2; i >= 0; i--) {
             const d = (0, date_fns_1.subMonths)(new Date(), i);
             const mStart = (0, date_fns_1.startOfMonth)(d);
             const mEnd = (0, date_fns_1.endOfMonth)(d);
@@ -1445,7 +1445,7 @@ const getDeptSnapshot = (_req, res) => __awaiter(void 0, void 0, void 0, functio
             headcount: v.headcount,
             present: v.present,
             attendancePct: v.headcount > 0 ? Math.round((v.present / v.headcount) * 100) : 0,
-            avgScore: v.scores.length > 0 ? Math.round(v.scores.reduce((s, x) => s + x, 0) / v.scores.length) : null,
+            avgScore: v.scores.length > 0 ? Math.round((v.scores.reduce((s, x) => s + x, 0) / v.scores.length) * 10) / 10 : null,
             pips: v.pips,
         }))
             .sort((a, b) => b.headcount - a.headcount);
@@ -1456,6 +1456,129 @@ const getDeptSnapshot = (_req, res) => __awaiter(void 0, void 0, void 0, functio
     }
 });
 exports.getDeptSnapshot = getDeptSnapshot;
+// ═══════════════════════════════════════════════════════════
+// DEPT-WISE ATTENDANCE (today) — present / leave / permission /
+// absent / week-off per department, with a per-dept employee list
+// for the click-through popup.
+// GET /api/management/dept-attendance-today
+// Mirrors the status + week-off logic of getAttendanceSummary.
+// ═══════════════════════════════════════════════════════════
+const getDeptAttendanceToday = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g;
+    try {
+        const todayStart = startOfDayIST();
+        const todayEnd = endOfDayIST();
+        const today = new Date();
+        const dayStr = (0, date_fns_1.format)(today, "yyyy-MM-dd");
+        const employees = yield prisma_1.prisma.employee.findMany({
+            where: { employmentStatus: { in: ["ACTIVE", "NOTICE_PERIOD"] } },
+            select: {
+                id: true, firstName: true, lastName: true, employeeCode: true,
+                Department: { select: { name: true } },
+                designation: { select: { name: true } },
+            },
+        });
+        const todayAttendance = yield prisma_1.prisma.attendance.findMany({
+            where: { date: { gte: todayStart, lte: todayEnd } },
+            select: { employeeId: true, status: true },
+        });
+        const statusByEmp = new Map();
+        for (const a of todayAttendance)
+            statusByEmp.set(a.employeeId, (a.status || "").toUpperCase());
+        const holiday = yield prisma_1.prisma.holiday.findFirst({
+            where: { date: { gte: todayStart, lte: todayEnd } },
+            select: { title: true },
+        });
+        const isHoliday = !!holiday;
+        // Week-off employees today: approved shift config + Sunday fallback.
+        const weekOffSet = new Set();
+        if (!isHoliday) {
+            const year = today.getFullYear();
+            const month = today.getMonth() + 1;
+            const approvals = yield prisma_1.prisma.shiftApproval.findMany({
+                where: { status: "APPROVED", month, year },
+                select: { employeeId: true, weekOffConfig: true },
+            });
+            const approvedEmps = new Set();
+            const monthStart = new Date(year, month - 1, 1);
+            const firstWeekStart = new Date(monthStart);
+            firstWeekStart.setDate(monthStart.getDate() - monthStart.getDay());
+            firstWeekStart.setHours(0, 0, 0, 0);
+            for (const ap of approvals) {
+                approvedEmps.add(ap.employeeId);
+                const cfg = ap.weekOffConfig;
+                if (!(cfg === null || cfg === void 0 ? void 0 : cfg.weeks))
+                    continue;
+                for (const [wkStr, dow] of Object.entries(cfg.weeks)) {
+                    const wk = Number(wkStr);
+                    if (Number.isNaN(wk) || typeof dow !== "number")
+                        continue;
+                    const wo = new Date(firstWeekStart);
+                    wo.setDate(firstWeekStart.getDate() + wk * 7 + dow);
+                    if ((0, date_fns_1.format)(wo, "yyyy-MM-dd") === dayStr)
+                        weekOffSet.add(ap.employeeId);
+                }
+            }
+            if (today.getDay() === 0) {
+                for (const e of employees)
+                    if (!approvedEmps.has(e.id))
+                        weekOffSet.add(e.id);
+            }
+        }
+        const deptMap = new Map();
+        for (const e of employees) {
+            const dept = ((_a = e.Department) === null || _a === void 0 ? void 0 : _a.name) || "Unassigned";
+            if (!deptMap.has(dept)) {
+                deptMap.set(dept, { dept, headcount: 0, present: 0, leave: 0, permission: 0, absent: 0, weekoff: 0, employees: [] });
+            }
+            const row = deptMap.get(dept);
+            row.headcount++;
+            const st = statusByEmp.get(e.id);
+            let category;
+            if (st === "PRESENT") {
+                row.present++;
+                category = "Present";
+            }
+            else if (st === "LEAVE") {
+                row.leave++;
+                category = "Leave";
+            }
+            else if (st === "PERMISSION") {
+                row.permission++;
+                category = "Permission";
+            }
+            else if (isHoliday || weekOffSet.has(e.id)) {
+                row.weekoff++;
+                category = isHoliday ? "Holiday" : "Week Off";
+            }
+            else {
+                row.absent++;
+                category = "Absent";
+            }
+            row.employees.push({
+                name: `${(_b = e.firstName) !== null && _b !== void 0 ? _b : ""} ${(_c = e.lastName) !== null && _c !== void 0 ? _c : ""}`.trim(),
+                employeeCode: (_d = e.employeeCode) !== null && _d !== void 0 ? _d : "",
+                designation: (_f = (_e = e.designation) === null || _e === void 0 ? void 0 : _e.name) !== null && _f !== void 0 ? _f : "—",
+                status: category,
+            });
+        }
+        const depts = Array.from(deptMap.values()).sort((a, b) => b.headcount - a.headcount);
+        const totals = depts.reduce((t, d) => ({
+            headcount: t.headcount + d.headcount,
+            present: t.present + d.present,
+            leave: t.leave + d.leave,
+            permission: t.permission + d.permission,
+            absent: t.absent + d.absent,
+            weekoff: t.weekoff + d.weekoff,
+        }), { headcount: 0, present: 0, leave: 0, permission: 0, absent: 0, weekoff: 0 });
+        res.json({ date: dayStr, isHoliday, holidayTitle: (_g = holiday === null || holiday === void 0 ? void 0 : holiday.title) !== null && _g !== void 0 ? _g : null, totals, depts });
+    }
+    catch (err) {
+        console.error("getDeptAttendanceToday error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getDeptAttendanceToday = getDeptAttendanceToday;
 // ═══════════════════════════════════════════════════════════
 // SECTION 9 — WEEKLY RATING TREND (last 8 weeks)
 // GET /api/management/weekly-trend
@@ -1547,6 +1670,7 @@ const getPerformanceDistribution = (_req, res) => __awaiter(void 0, void 0, void
                 overallScore: true,
                 status: true,
                 cycle: true,
+                finalDecision: true,
                 employee: {
                     select: {
                         firstName: true,
@@ -1565,12 +1689,12 @@ const getPerformanceDistribution = (_req, res) => __awaiter(void 0, void 0, void
                 latest.push(a);
             }
         }
-        // Score bands
+        // Score bands — overallScore is on a 0–10 scale (mean of 0–10 ratings).
         const bands = [
-            { label: "Excellent (80–100)", min: 80, max: 100, color: "#22c55e" },
-            { label: "Good (60–79)", min: 60, max: 79, color: "#60a5fa" },
-            { label: "Average (40–59)", min: 40, max: 59, color: "#f59e0b" },
-            { label: "Below Avg (<40)", min: 0, max: 39, color: "#ef4444" },
+            { label: "Excellent (8–10)", min: 8, max: 10, color: "#22c55e" },
+            { label: "Good (6–7.9)", min: 6, max: 7.9, color: "#60a5fa" },
+            { label: "Average (4–5.9)", min: 4, max: 5.9, color: "#f59e0b" },
+            { label: "Below Avg (<4)", min: 0, max: 3.9, color: "#ef4444" },
         ];
         const distribution = bands.map((b) => (Object.assign(Object.assign({}, b), { count: latest.filter((a) => { var _a, _b; return ((_a = a.overallScore) !== null && _a !== void 0 ? _a : 0) >= b.min && ((_b = a.overallScore) !== null && _b !== void 0 ? _b : 0) <= b.max; }).length })));
         // Drill-down: per-employee row with the band label so frontend can filter
@@ -1580,13 +1704,14 @@ const getPerformanceDistribution = (_req, res) => __awaiter(void 0, void 0, void
             return (_a = b === null || b === void 0 ? void 0 : b.label) !== null && _a !== void 0 ? _a : "—";
         };
         const employeeList = latest.map((a) => {
-            var _a, _b, _c, _d, _e, _f, _g, _h, _j;
+            var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
             return ({
                 name: `${(_b = (_a = a.employee) === null || _a === void 0 ? void 0 : _a.firstName) !== null && _b !== void 0 ? _b : ""} ${(_d = (_c = a.employee) === null || _c === void 0 ? void 0 : _c.lastName) !== null && _d !== void 0 ? _d : ""}`.trim(),
                 dept: ((_f = (_e = a.employee) === null || _e === void 0 ? void 0 : _e.Department) === null || _f === void 0 ? void 0 : _f.name) || "—",
                 designation: ((_h = (_g = a.employee) === null || _g === void 0 ? void 0 : _g.designation) === null || _h === void 0 ? void 0 : _h.name) || "—",
                 score: a.overallScore,
                 band: bandFor((_j = a.overallScore) !== null && _j !== void 0 ? _j : 0),
+                finalDecision: (_k = a.finalDecision) !== null && _k !== void 0 ? _k : "",
             });
         });
         // Appraisal completion: employees with a submitted/completed appraisal vs total active
@@ -1604,7 +1729,7 @@ const getPerformanceDistribution = (_req, res) => __awaiter(void 0, void 0, void
         const deptAvg = Array.from(deptScores.entries())
             .map(([dept, scores]) => ({
             dept,
-            avg: Math.round(scores.reduce((s, x) => s + x, 0) / scores.length),
+            avg: Math.round((scores.reduce((s, x) => s + x, 0) / scores.length) * 10) / 10,
             count: scores.length,
         }))
             .sort((a, b) => b.avg - a.avg);
@@ -1843,6 +1968,1326 @@ const getOtAnalysis = (req, res) => __awaiter(void 0, void 0, void 0, function* 
     }
 });
 exports.getOtAnalysis = getOtAnalysis;
+// ═══════════════════════════════════════════════════════════
+// BATCH 1 — HR operational analytics (leave-by-type, leave-abuse,
+// weekly-perf status, incidents, OT eligibility)
+// ═══════════════════════════════════════════════════════════
+// #3 Weekly approved-leave volume by leave type (last N weeks) + per-week
+//    employee list for the click-through popup.
+// GET /api/management/leave-by-type-weekly?weeks=8
+const getLeaveByTypeWeekly = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
+    try {
+        const numWeeks = Math.min(Math.max(Number(req.query.weeks) || 8, 1), 26);
+        const today = new Date();
+        const thisWeekStart = (0, date_fns_1.startOfWeek)(today, { weekStartsOn: 1 });
+        const rangeStart = (0, date_fns_1.addDays)(thisWeekStart, -7 * (numWeeks - 1));
+        const rangeEnd = (0, date_fns_1.endOfWeek)(today, { weekStartsOn: 1 });
+        const leaves = yield prisma_1.prisma.leaveRequest.findMany({
+            where: { status: "APPROVED", startDate: { gte: rangeStart, lte: rangeEnd } },
+            select: {
+                startDate: true, endDate: true, isHalfDay: true,
+                leaveType: { select: { name: true } },
+                employee: {
+                    select: {
+                        firstName: true, lastName: true, employeeCode: true,
+                        Department: { select: { name: true } },
+                        designation: { select: { name: true } },
+                    },
+                },
+            },
+        });
+        const weeks = [];
+        const weekIndex = new Map();
+        for (let i = 0; i < numWeeks; i++) {
+            const ws = (0, date_fns_1.addDays)(thisWeekStart, -7 * (numWeeks - 1 - i));
+            const key = (0, date_fns_1.format)(ws, "yyyy-MM-dd");
+            weekIndex.set(key, i);
+            weeks.push({ key, label: (0, date_fns_1.format)(ws, "dd MMM"), weekStart: key, byType: {}, total: 0, employees: [] });
+        }
+        const typeSet = new Set();
+        for (const lv of leaves) {
+            const key = (0, date_fns_1.format)((0, date_fns_1.startOfWeek)(new Date(lv.startDate), { weekStartsOn: 1 }), "yyyy-MM-dd");
+            const idx = weekIndex.get(key);
+            if (idx === undefined)
+                continue;
+            const type = ((_a = lv.leaveType) === null || _a === void 0 ? void 0 : _a.name) || "Other";
+            typeSet.add(type);
+            const days = lv.isHalfDay
+                ? 0.5
+                : Math.max(1, Math.round((new Date(lv.endDate).getTime() - new Date(lv.startDate).getTime()) / 86400000) + 1);
+            const w = weeks[idx];
+            w.byType[type] = (w.byType[type] || 0) + 1;
+            w.total += 1;
+            const sd = new Date(lv.startDate);
+            const ed = new Date(lv.endDate);
+            const sameDay = (0, date_fns_1.format)(sd, "yyyy-MM-dd") === (0, date_fns_1.format)(ed, "yyyy-MM-dd");
+            const dates = lv.isHalfDay
+                ? `${(0, date_fns_1.format)(sd, "dd MMM yyyy")} (half-day)`
+                : sameDay ? (0, date_fns_1.format)(sd, "dd MMM yyyy") : `${(0, date_fns_1.format)(sd, "dd MMM")} – ${(0, date_fns_1.format)(ed, "dd MMM yyyy")}`;
+            w.employees.push({
+                name: `${(_c = (_b = lv.employee) === null || _b === void 0 ? void 0 : _b.firstName) !== null && _c !== void 0 ? _c : ""} ${(_e = (_d = lv.employee) === null || _d === void 0 ? void 0 : _d.lastName) !== null && _e !== void 0 ? _e : ""}`.trim(),
+                employeeCode: (_g = (_f = lv.employee) === null || _f === void 0 ? void 0 : _f.employeeCode) !== null && _g !== void 0 ? _g : "",
+                dept: (_k = (_j = (_h = lv.employee) === null || _h === void 0 ? void 0 : _h.Department) === null || _j === void 0 ? void 0 : _j.name) !== null && _k !== void 0 ? _k : "—",
+                designation: (_o = (_m = (_l = lv.employee) === null || _l === void 0 ? void 0 : _l.designation) === null || _m === void 0 ? void 0 : _m.name) !== null && _o !== void 0 ? _o : "—",
+                type, days, dates,
+            });
+        }
+        res.json({ weeks, types: Array.from(typeSet).sort() });
+    }
+    catch (err) {
+        console.error("getLeaveByTypeWeekly error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getLeaveByTypeWeekly = getLeaveByTypeWeekly;
+// #10 Employees taking >= threshold approved leave-days in a month
+//     (productivity watch — default threshold 5 of ~25 working days).
+// GET /api/management/leave-abuse?month=YYYY-MM&min=5
+const getLeaveAbuse = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
+    try {
+        const monthParam = req.query.month;
+        const base = monthParam && /^\d{4}-\d{2}$/.test(monthParam) ? new Date(`${monthParam}-01`) : new Date();
+        const rangeStart = (0, date_fns_1.startOfMonth)(base);
+        const rangeEnd = (0, date_fns_1.endOfMonth)(base);
+        const threshold = Math.max(1, Number(req.query.min) || 5);
+        const leaves = yield prisma_1.prisma.leaveRequest.findMany({
+            where: { status: "APPROVED", startDate: { lte: rangeEnd }, endDate: { gte: rangeStart } },
+            select: {
+                employeeId: true, startDate: true, endDate: true, isHalfDay: true,
+                leaveType: { select: { name: true } },
+                employee: {
+                    select: {
+                        firstName: true, lastName: true, employeeCode: true,
+                        Department: { select: { name: true } },
+                        designation: { select: { name: true } },
+                    },
+                },
+            },
+        });
+        const map = new Map();
+        for (const lv of leaves) {
+            const s = new Date(Math.max(new Date(lv.startDate).getTime(), rangeStart.getTime()));
+            const e = new Date(Math.min(new Date(lv.endDate).getTime(), rangeEnd.getTime()));
+            let days = Math.max(0, Math.round((e.getTime() - s.getTime()) / 86400000) + 1);
+            if (lv.isHalfDay)
+                days = 0.5;
+            if (days <= 0)
+                continue;
+            if (!map.has(lv.employeeId)) {
+                map.set(lv.employeeId, {
+                    name: `${(_b = (_a = lv.employee) === null || _a === void 0 ? void 0 : _a.firstName) !== null && _b !== void 0 ? _b : ""} ${(_d = (_c = lv.employee) === null || _c === void 0 ? void 0 : _c.lastName) !== null && _d !== void 0 ? _d : ""}`.trim(),
+                    employeeCode: (_f = (_e = lv.employee) === null || _e === void 0 ? void 0 : _e.employeeCode) !== null && _f !== void 0 ? _f : "",
+                    dept: (_j = (_h = (_g = lv.employee) === null || _g === void 0 ? void 0 : _g.Department) === null || _h === void 0 ? void 0 : _h.name) !== null && _j !== void 0 ? _j : "—",
+                    designation: (_m = (_l = (_k = lv.employee) === null || _k === void 0 ? void 0 : _k.designation) === null || _l === void 0 ? void 0 : _l.name) !== null && _m !== void 0 ? _m : "—",
+                    totalDays: 0, requests: 0, byType: {},
+                });
+            }
+            const row = map.get(lv.employeeId);
+            row.totalDays += days;
+            row.requests += 1;
+            const t = ((_o = lv.leaveType) === null || _o === void 0 ? void 0 : _o.name) || "Other";
+            row.byType[t] = (row.byType[t] || 0) + days;
+        }
+        const flagged = Array.from(map.values())
+            .filter((r) => r.totalDays >= threshold)
+            .map((r) => (Object.assign(Object.assign({}, r), { totalDays: Math.round(r.totalDays * 10) / 10, types: Object.entries(r.byType).map(([k, v]) => `${k}: ${v}`).join(", ") })))
+            .sort((a, b) => b.totalDays - a.totalDays);
+        res.json({
+            month: (0, date_fns_1.format)(rangeStart, "yyyy-MM"),
+            monthLabel: (0, date_fns_1.format)(rangeStart, "MMMM yyyy"),
+            threshold, workingDaysRef: 25, flagged,
+        });
+    }
+    catch (err) {
+        console.error("getLeaveAbuse error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getLeaveAbuse = getLeaveAbuse;
+// #12 Weekly performance: filled (SUBMITTED manager ratings) vs pending,
+//     per week over the last N weeks.
+// GET /api/management/weekly-perf-status?weeks=6
+const getWeeklyPerfStatus = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const numWeeks = Math.min(Math.max(Number(req.query.weeks) || 6, 1), 16);
+        const today = new Date();
+        const thisWeekStart = (0, date_fns_1.startOfWeek)(today, { weekStartsOn: 1 });
+        const rangeStart = (0, date_fns_1.addDays)(thisWeekStart, -7 * (numWeeks - 1));
+        const totalActive = yield prisma_1.prisma.employee.count({ where: { employmentStatus: "ACTIVE" } });
+        const ratings = yield prisma_1.prisma.weeklyPerformanceRating.findMany({
+            where: { weekStartDate: { gte: rangeStart }, raterType: "MANAGER" },
+            select: { weekStartDate: true, status: true },
+        });
+        const weeks = [];
+        const idxOf = new Map();
+        for (let i = 0; i < numWeeks; i++) {
+            const ws = (0, date_fns_1.addDays)(thisWeekStart, -7 * (numWeeks - 1 - i));
+            const key = (0, date_fns_1.format)(ws, "yyyy-MM-dd");
+            idxOf.set(key, i);
+            weeks.push({ key, label: (0, date_fns_1.format)(ws, "dd MMM"), filled: 0, pending: 0, expected: totalActive });
+        }
+        for (const r of ratings) {
+            const key = (0, date_fns_1.format)((0, date_fns_1.startOfWeek)(new Date(r.weekStartDate), { weekStartsOn: 1 }), "yyyy-MM-dd");
+            const idx = idxOf.get(key);
+            if (idx === undefined)
+                continue;
+            if ((r.status || "").toUpperCase() === "SUBMITTED")
+                weeks[idx].filled += 1;
+        }
+        for (const w of weeks)
+            w.pending = Math.max(0, w.expected - w.filled);
+        res.json({ weeks, totalActive });
+    }
+    catch (err) {
+        console.error("getWeeklyPerfStatus error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getWeeklyPerfStatus = getWeeklyPerfStatus;
+// #14 Incident analytics — monthly trend, severity split, dept breakdown
+//     (with per-dept incident list for the popup) + outcome totals.
+// GET /api/management/incidents-analytics?months=6
+const getIncidentsAnalytics = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c;
+    try {
+        const numMonths = Math.min(Math.max(Number(req.query.months) || 6, 1), 24);
+        const rangeStart = (0, date_fns_1.startOfMonth)((0, date_fns_1.subMonths)(new Date(), numMonths - 1));
+        const rangeEnd = (0, date_fns_1.endOfMonth)(new Date());
+        const incidents = yield prisma_1.prisma.incident.findMany({
+            where: { incidentDate: { gte: rangeStart, lte: rangeEnd } },
+            select: {
+                title: true, severity: true, status: true, outcome: true,
+                incidentDate: true, departmentId: true,
+                category: { select: { name: true } },
+                employee: { select: { firstName: true, lastName: true, Department: { select: { name: true } } } },
+            },
+            orderBy: { incidentDate: "desc" },
+        });
+        const depts = yield prisma_1.prisma.department.findMany({ select: { id: true, name: true } });
+        const deptName = new Map(depts.map((d) => [d.id, d.name]));
+        const monthIdx = new Map();
+        const byMonth = [];
+        for (let i = 0; i < numMonths; i++) {
+            const m = (0, date_fns_1.startOfMonth)((0, date_fns_1.subMonths)(new Date(), numMonths - 1 - i));
+            const key = (0, date_fns_1.format)(m, "yyyy-MM");
+            monthIdx.set(key, i);
+            byMonth.push({ key, label: (0, date_fns_1.format)(m, "MMM yy"), count: 0, incidents: [] });
+        }
+        const sevMap = { LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 };
+        const deptMap = new Map();
+        let open = 0, closed = 0, substantiated = 0, falseReport = 0;
+        for (const inc of incidents) {
+            const view = {
+                title: inc.title,
+                severity: inc.severity,
+                status: inc.status,
+                outcome: inc.outcome || "—",
+                date: (0, date_fns_1.format)(new Date(inc.incidentDate), "dd MMM yyyy"),
+                employee: inc.employee ? `${inc.employee.firstName} ${inc.employee.lastName}` : "—",
+                category: ((_a = inc.category) === null || _a === void 0 ? void 0 : _a.name) || "—",
+            };
+            const mi = monthIdx.get((0, date_fns_1.format)(new Date(inc.incidentDate), "yyyy-MM"));
+            if (mi !== undefined) {
+                byMonth[mi].count += 1;
+                byMonth[mi].incidents.push(view);
+            }
+            sevMap[inc.severity] = (sevMap[inc.severity] || 0) + 1;
+            if (["OPEN", "ACKNOWLEDGED", "INVESTIGATING", "ESCALATED"].includes(inc.status))
+                open += 1;
+            if (["RESOLVED", "CLOSED"].includes(inc.status))
+                closed += 1;
+            if (inc.outcome === "SUBSTANTIATED")
+                substantiated += 1;
+            if (inc.outcome === "FALSE_REPORT")
+                falseReport += 1;
+            const dept = (inc.departmentId ? deptName.get(inc.departmentId) : null) || ((_c = (_b = inc.employee) === null || _b === void 0 ? void 0 : _b.Department) === null || _c === void 0 ? void 0 : _c.name) || "Unassigned";
+            if (!deptMap.has(dept))
+                deptMap.set(dept, { dept, count: 0, substantiated: 0, incidents: [] });
+            const dRow = deptMap.get(dept);
+            dRow.count += 1;
+            if (inc.outcome === "SUBSTANTIATED")
+                dRow.substantiated += 1;
+            dRow.incidents.push(view);
+        }
+        res.json({
+            months: numMonths,
+            totals: { total: incidents.length, open, closed, substantiated, falseReport },
+            byMonth,
+            bySeverity: Object.entries(sevMap).map(([severity, count]) => ({ severity, count })),
+            byDept: Array.from(deptMap.values()).sort((a, b) => b.count - a.count),
+        });
+    }
+    catch (err) {
+        console.error("getIncidentsAnalytics error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getIncidentsAnalytics = getIncidentsAnalytics;
+// #17 OT eligibility breaches — policy: max 2 OT days/week, <= 120 min each.
+//     Flags employee-weeks exceeding either, grouped by department.
+// GET /api/management/ot-eligibility?month=YYYY-MM
+const getOtEligibility = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d;
+    try {
+        const monthParam = req.query.month;
+        const base = monthParam && /^\d{4}-\d{2}$/.test(monthParam) ? new Date(`${monthParam}-01`) : new Date();
+        const rangeStart = (0, date_fns_1.startOfMonth)(base);
+        const rangeEnd = (0, date_fns_1.endOfMonth)(base);
+        const MAX_DAYS_PER_WEEK = 2;
+        const MAX_MINUTES_PER_DAY = 120;
+        const ot = yield prisma_1.prisma.overtimeApproval.findMany({
+            where: { date: { gte: rangeStart, lte: rangeEnd }, status: "APPROVE", managerStatus: "APPROVED" },
+            select: { employeeId: true, date: true, minutes: true },
+        });
+        const empIds = Array.from(new Set(ot.map((o) => o.employeeId)));
+        const employees = yield prisma_1.prisma.employee.findMany({
+            where: { id: { in: empIds } },
+            select: { id: true, firstName: true, lastName: true, employeeCode: true, Department: { select: { name: true } }, designation: { select: { name: true } } },
+        });
+        const empMap = new Map(employees.map((e) => [e.id, e]));
+        const perEmpWeek = new Map();
+        for (const o of ot) {
+            const weekKey = (0, date_fns_1.format)((0, date_fns_1.startOfWeek)(new Date(o.date), { weekStartsOn: 1 }), "yyyy-MM-dd");
+            const k = `${o.employeeId}_${weekKey}`;
+            if (!perEmpWeek.has(k))
+                perEmpWeek.set(k, { employeeId: o.employeeId, weekKey, days: 0, totalMinutes: 0, maxDay: 0 });
+            const r = perEmpWeek.get(k);
+            r.days += 1;
+            r.totalMinutes += o.minutes;
+            r.maxDay = Math.max(r.maxDay, o.minutes);
+        }
+        const breaches = [];
+        const deptMap = new Map();
+        for (const r of perEmpWeek.values()) {
+            const tooMany = r.days > MAX_DAYS_PER_WEEK;
+            const tooLong = r.maxDay > MAX_MINUTES_PER_DAY;
+            if (!tooMany && !tooLong)
+                continue;
+            const emp = empMap.get(r.employeeId);
+            const dept = ((_a = emp === null || emp === void 0 ? void 0 : emp.Department) === null || _a === void 0 ? void 0 : _a.name) || "—";
+            const reason = [
+                tooMany ? `${r.days} OT days (> ${MAX_DAYS_PER_WEEK}/wk)` : null,
+                tooLong ? `${Math.round(r.maxDay)} min in a day (> ${MAX_MINUTES_PER_DAY})` : null,
+            ].filter(Boolean).join(" · ");
+            breaches.push({
+                name: emp ? `${emp.firstName} ${emp.lastName}` : "Unknown",
+                employeeCode: (_b = emp === null || emp === void 0 ? void 0 : emp.employeeCode) !== null && _b !== void 0 ? _b : "",
+                dept, designation: (_d = (_c = emp === null || emp === void 0 ? void 0 : emp.designation) === null || _c === void 0 ? void 0 : _c.name) !== null && _d !== void 0 ? _d : "—",
+                week: (0, date_fns_1.format)(new Date(r.weekKey), "dd MMM"),
+                otDays: r.days,
+                totalMinutes: r.totalMinutes,
+                totalHours: +(r.totalMinutes / 60).toFixed(1),
+                maxDayMinutes: r.maxDay,
+                reason,
+            });
+            if (!deptMap.has(dept))
+                deptMap.set(dept, { dept, breachCount: 0, emps: new Set() });
+            const d = deptMap.get(dept);
+            d.breachCount += 1;
+            d.emps.add(r.employeeId);
+        }
+        res.json({
+            month: (0, date_fns_1.format)(rangeStart, "yyyy-MM"),
+            monthLabel: (0, date_fns_1.format)(rangeStart, "MMMM yyyy"),
+            policy: `Eligible OT: max ${MAX_DAYS_PER_WEEK} days/week, ≤ ${MAX_MINUTES_PER_DAY} min each`,
+            deptBreaches: Array.from(deptMap.values())
+                .map((d) => ({ dept: d.dept, breachCount: d.breachCount, employees: d.emps.size }))
+                .sort((a, b) => b.breachCount - a.breachCount),
+            breaches: breaches.sort((a, b) => a.dept.localeCompare(b.dept) || b.totalMinutes - a.totalMinutes),
+        });
+    }
+    catch (err) {
+        console.error("getOtEligibility error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getOtEligibility = getOtEligibility;
+// ── Shared shift resolver (mirrors dashboard.controller by-shift logic) ──
+// Sets a base date's clock to a shift-template time (local hours/minutes).
+function combineDateAndTime(baseDate, timeTemplate) {
+    const dt = new Date(baseDate);
+    const t = new Date(timeTemplate);
+    dt.setHours(t.getHours(), t.getMinutes(), 0, 0);
+    return dt;
+}
+// Resolve each employee's shift per day: ShiftAssignment(date) → fixed shift.
+function buildShiftResolver(rangeStart, rangeEnd) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const [templates, assignments, settings] = yield Promise.all([
+            prisma_1.prisma.shiftTemplate.findMany({ select: { id: true, startTime: true, endTime: true } }),
+            prisma_1.prisma.shiftAssignment.findMany({
+                where: { date: { gte: rangeStart, lte: rangeEnd } },
+                select: { employeeId: true, date: true, shiftId: true },
+            }),
+            prisma_1.prisma.employeeShiftSetting.findMany({
+                where: { mode: "FIXED", fixedShiftId: { not: null } },
+                select: { employeeId: true, fixedShiftId: true },
+            }),
+        ]);
+        const shiftMeta = new Map(templates.map((t) => [t.id, t]));
+        const assignMap = new Map();
+        for (const a of assignments)
+            assignMap.set(`${a.employeeId}_${(0, date_fns_1.format)(new Date(a.date), "yyyy-MM-dd")}`, a.shiftId);
+        const fixedMap = new Map();
+        for (const s of settings)
+            if (s.fixedShiftId)
+                fixedMap.set(s.employeeId, s.fixedShiftId);
+        // Returns { startTime, endTime } template for the employee on that day, or null.
+        return (employeeId, day) => {
+            var _a, _b;
+            const sid = (_b = (_a = assignMap.get(`${employeeId}_${(0, date_fns_1.format)(day, "yyyy-MM-dd")}`)) !== null && _a !== void 0 ? _a : fixedMap.get(employeeId)) !== null && _b !== void 0 ? _b : null;
+            if (!sid)
+                return null;
+            const m = shiftMeta.get(sid);
+            return m ? { startTime: m.startTime, endTime: m.endTime } : null;
+        };
+    });
+}
+// #9 Punctuality watch — chronic lateness + early-leaving over last N weeks,
+//    scored per employee. (Late > 15 min; left before shift end.)
+// GET /api/management/punctuality?weeks=4
+const getPunctuality = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
+    try {
+        const numWeeks = Math.min(Math.max(Number(req.query.weeks) || 4, 1), 12);
+        const rangeStart = startOfDayIST((0, date_fns_1.addDays)(new Date(), -(numWeeks * 7 - 1)));
+        const rangeEnd = endOfDayIST(new Date());
+        const att = yield prisma_1.prisma.attendance.findMany({
+            where: { date: { gte: rangeStart, lte: rangeEnd }, status: "PRESENT", checkIn: { not: null } },
+            select: {
+                employeeId: true, date: true, checkIn: true, checkOut: true,
+                employee: {
+                    select: {
+                        firstName: true, lastName: true, employeeCode: true,
+                        Department: { select: { name: true } },
+                        designation: { select: { name: true } },
+                    },
+                },
+            },
+        });
+        const resolve = yield buildShiftResolver(rangeStart, rangeEnd);
+        const map = new Map();
+        for (const a of att) {
+            if (!map.has(a.employeeId)) {
+                map.set(a.employeeId, {
+                    name: `${(_b = (_a = a.employee) === null || _a === void 0 ? void 0 : _a.firstName) !== null && _b !== void 0 ? _b : ""} ${(_d = (_c = a.employee) === null || _c === void 0 ? void 0 : _c.lastName) !== null && _d !== void 0 ? _d : ""}`.trim(),
+                    employeeCode: (_f = (_e = a.employee) === null || _e === void 0 ? void 0 : _e.employeeCode) !== null && _f !== void 0 ? _f : "",
+                    dept: (_j = (_h = (_g = a.employee) === null || _g === void 0 ? void 0 : _g.Department) === null || _h === void 0 ? void 0 : _h.name) !== null && _j !== void 0 ? _j : "—",
+                    designation: (_m = (_l = (_k = a.employee) === null || _k === void 0 ? void 0 : _k.designation) === null || _l === void 0 ? void 0 : _l.name) !== null && _m !== void 0 ? _m : "—",
+                    daysPresent: 0, lateCount: 0, lateMin: 0, earlyCount: 0, earlyMin: 0,
+                });
+            }
+            const row = map.get(a.employeeId);
+            row.daysPresent++;
+            const meta = resolve(a.employeeId, new Date(a.date));
+            if (!meta || !a.checkIn)
+                continue;
+            const shiftStart = combineDateAndTime(new Date(a.date), meta.startTime);
+            let shiftEnd = combineDateAndTime(new Date(a.date), meta.endTime);
+            if (shiftEnd.getTime() <= shiftStart.getTime())
+                shiftEnd = (0, date_fns_1.addDays)(shiftEnd, 1); // overnight
+            const lateMin = Math.round((new Date(a.checkIn).getTime() - shiftStart.getTime()) / 60000);
+            if (lateMin > 15) {
+                row.lateCount++;
+                row.lateMin += lateMin;
+            }
+            if (a.checkOut) {
+                const earlyMin = Math.round((shiftEnd.getTime() - new Date(a.checkOut).getTime()) / 60000);
+                if (earlyMin > 0) {
+                    row.earlyCount++;
+                    row.earlyMin += earlyMin;
+                }
+            }
+        }
+        const rows = Array.from(map.values())
+            .filter((r) => r.lateCount > 0 || r.earlyCount > 0)
+            .map((r) => {
+            const score = Math.max(0, Math.round(100 - r.lateCount * 5 - r.earlyCount * 4));
+            return {
+                name: r.name, employeeCode: r.employeeCode, dept: r.dept, designation: r.designation,
+                daysPresent: r.daysPresent,
+                lateCount: r.lateCount, avgLateMin: r.lateCount ? Math.round(r.lateMin / r.lateCount) : 0,
+                earlyCount: r.earlyCount, avgEarlyMin: r.earlyCount ? Math.round(r.earlyMin / r.earlyCount) : 0,
+                score,
+                rating: score >= 80 ? "Good" : score >= 60 ? "Watch" : "Poor",
+            };
+        })
+            .sort((a, b) => a.score - b.score);
+        res.json({ weeks: numWeeks, rangeStart: (0, date_fns_1.format)(rangeStart, "dd MMM"), rangeEnd: (0, date_fns_1.format)(rangeEnd, "dd MMM"), rows });
+    }
+    catch (err) {
+        console.error("getPunctuality error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getPunctuality = getPunctuality;
+// #11 Scheduled vs actual worked hours for the current week, per employee.
+//     Compares, on days present, shift duration vs (checkOut − checkIn).
+// GET /api/management/worked-hours?week=YYYY-MM-DD (week start; default current)
+const getWorkedHours = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
+    try {
+        const weekParam = req.query.week;
+        const anchor = weekParam && /^\d{4}-\d{2}-\d{2}$/.test(weekParam) ? new Date(weekParam) : new Date();
+        const weekStart = startOfDayIST((0, date_fns_1.startOfWeek)(anchor, { weekStartsOn: 1 }));
+        const rawEnd = (0, date_fns_1.endOfWeek)(anchor, { weekStartsOn: 1 });
+        const weekEnd = endOfDayIST(rawEnd.getTime() > Date.now() ? new Date() : rawEnd);
+        const att = yield prisma_1.prisma.attendance.findMany({
+            where: { date: { gte: weekStart, lte: weekEnd }, status: "PRESENT", checkIn: { not: null }, checkOut: { not: null } },
+            select: {
+                employeeId: true, date: true, checkIn: true, checkOut: true,
+                employee: {
+                    select: {
+                        firstName: true, lastName: true, employeeCode: true,
+                        Department: { select: { name: true } },
+                        designation: { select: { name: true } },
+                    },
+                },
+            },
+        });
+        const resolve = yield buildShiftResolver(weekStart, weekEnd);
+        const map = new Map();
+        for (const a of att) {
+            const meta = resolve(a.employeeId, new Date(a.date));
+            if (!meta || !a.checkIn || !a.checkOut)
+                continue; // need a shift to compare against
+            const shiftStart = combineDateAndTime(new Date(a.date), meta.startTime);
+            let shiftEnd = combineDateAndTime(new Date(a.date), meta.endTime);
+            if (shiftEnd.getTime() <= shiftStart.getTime())
+                shiftEnd = (0, date_fns_1.addDays)(shiftEnd, 1);
+            const schedMin = Math.round((shiftEnd.getTime() - shiftStart.getTime()) / 60000);
+            const actMin = Math.round((new Date(a.checkOut).getTime() - new Date(a.checkIn).getTime()) / 60000);
+            if (actMin <= 0)
+                continue;
+            if (!map.has(a.employeeId)) {
+                map.set(a.employeeId, {
+                    name: `${(_b = (_a = a.employee) === null || _a === void 0 ? void 0 : _a.firstName) !== null && _b !== void 0 ? _b : ""} ${(_d = (_c = a.employee) === null || _c === void 0 ? void 0 : _c.lastName) !== null && _d !== void 0 ? _d : ""}`.trim(),
+                    employeeCode: (_f = (_e = a.employee) === null || _e === void 0 ? void 0 : _e.employeeCode) !== null && _f !== void 0 ? _f : "",
+                    dept: (_j = (_h = (_g = a.employee) === null || _g === void 0 ? void 0 : _g.Department) === null || _h === void 0 ? void 0 : _h.name) !== null && _j !== void 0 ? _j : "—",
+                    designation: (_m = (_l = (_k = a.employee) === null || _k === void 0 ? void 0 : _k.designation) === null || _l === void 0 ? void 0 : _l.name) !== null && _m !== void 0 ? _m : "—",
+                    days: 0, scheduledMin: 0, actualMin: 0,
+                });
+            }
+            const row = map.get(a.employeeId);
+            row.days++;
+            row.scheduledMin += schedMin;
+            row.actualMin += actMin;
+        }
+        const rows = Array.from(map.values())
+            .map((r) => {
+            const scheduledHrs = +(r.scheduledMin / 60).toFixed(1);
+            const actualHrs = +(r.actualMin / 60).toFixed(1);
+            return {
+                name: r.name, employeeCode: r.employeeCode, dept: r.dept, designation: r.designation,
+                days: r.days, scheduledHrs, actualHrs,
+                diffHrs: +(actualHrs - scheduledHrs).toFixed(1),
+                matchPct: r.scheduledMin ? Math.round((r.actualMin / r.scheduledMin) * 100) : 0,
+            };
+        })
+            .sort((a, b) => a.matchPct - b.matchPct);
+        res.json({
+            weekLabel: `${(0, date_fns_1.format)(weekStart, "dd MMM")} – ${(0, date_fns_1.format)(weekEnd, "dd MMM")}`,
+            coverageNote: "Days present with a resolvable shift and both punches.",
+            rows,
+        });
+    }
+    catch (err) {
+        console.error("getWorkedHours error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getWorkedHours = getWorkedHours;
+// ═══════════════════════════════════════════════════════════
+// BATCH 2 — Recruitment ops (#6 vacancies/applications, #7 today's
+// interviews/offers/joinees, #8 designation funnel).
+// GET /api/management/recruitment-ops
+// ═══════════════════════════════════════════════════════════
+const getRecruitmentOps = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f;
+    try {
+        const todayStart = startOfDayIST();
+        const todayEnd = endOfDayIST();
+        const funnelSince = (0, date_fns_1.subMonths)(new Date(), 3);
+        const [interviewsToday, offersToday, joinedToday, openJobs, applications] = yield Promise.all([
+            // #7 — today's recruitment activity
+            prisma_1.prisma.interview.count({ where: { startTime: { gte: todayStart, lte: todayEnd } } }),
+            prisma_1.prisma.offer.count({ where: { sentAt: { gte: todayStart, lte: todayEnd }, status: { in: ["SENT", "VIEWED", "SIGNED"] } } }),
+            prisma_1.prisma.offer.count({ where: { proposedJoinAt: { gte: todayStart, lte: todayEnd }, joinOutcome: "JOINED" } }),
+            // #6 — open vacancies with application counts
+            prisma_1.prisma.job.findMany({
+                where: { status: "OPEN" },
+                select: {
+                    title: true, headcount: true, status: true,
+                    department: { select: { name: true } },
+                    _count: { select: { applications: true } },
+                },
+            }),
+            // #8 — designation (job-title) funnel over the last 3 months
+            prisma_1.prisma.application.findMany({
+                where: { createdAt: { gte: funnelSince } },
+                select: {
+                    status: true,
+                    job: { select: { title: true, department: { select: { name: true } } } },
+                    offer: { select: { joinOutcome: true } },
+                },
+            }),
+        ]);
+        const vacancies = openJobs
+            .map((j) => {
+            var _a, _b;
+            return ({
+                title: j.title,
+                dept: (_b = (_a = j.department) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : "—",
+                headcount: j.headcount,
+                applications: j._count.applications,
+                status: j.status,
+            });
+        })
+            .sort((a, b) => b.applications - a.applications);
+        const funnelMap = new Map();
+        for (const a of applications) {
+            const key = (_b = (_a = a.job) === null || _a === void 0 ? void 0 : _a.title) !== null && _b !== void 0 ? _b : "Unknown";
+            if (!funnelMap.has(key)) {
+                funnelMap.set(key, { designation: key, dept: (_e = (_d = (_c = a.job) === null || _c === void 0 ? void 0 : _c.department) === null || _d === void 0 ? void 0 : _d.name) !== null && _e !== void 0 ? _e : "—", applied: 0, selected: 0, joined: 0 });
+            }
+            const row = funnelMap.get(key);
+            row.applied++;
+            if (["OFFERED", "OFFER_ACCEPTED", "HIRED"].includes(a.status))
+                row.selected++;
+            if (a.status === "HIRED" || ((_f = a.offer) === null || _f === void 0 ? void 0 : _f.joinOutcome) === "JOINED")
+                row.joined++;
+        }
+        const byDesignation = Array.from(funnelMap.values()).sort((a, b) => b.applied - a.applied);
+        res.json({
+            today: { interviewsScheduled: interviewsToday, offersIssued: offersToday, joinees: joinedToday },
+            vacancies,
+            byDesignation,
+        });
+    }
+    catch (err) {
+        console.error("getRecruitmentOps error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getRecruitmentOps = getRecruitmentOps;
+// ═══════════════════════════════════════════════════════════
+// BATCH 3 — Capacity planning (#18 OT budget vs actual, #19 min
+// daily strength vs present). Budget/min-strength live on the
+// Department master (otBudgetHoursPerMonth, minDailyStrength).
+// Read/written via raw SQL so this works regardless of whether the
+// Prisma client has been regenerated for the new columns yet.
+// GET  /api/management/dept-planning?month=YYYY-MM
+// PUT  /api/management/dept-planning   { deptId, otBudgetHoursPerMonth, minDailyStrength }
+// ═══════════════════════════════════════════════════════════
+const getDeptPlanning = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const monthParam = req.query.month;
+        const base = monthParam && /^\d{4}-\d{2}$/.test(monthParam) ? new Date(`${monthParam}-01`) : new Date();
+        const rangeStart = (0, date_fns_1.startOfMonth)(base);
+        const rangeEnd = (0, date_fns_1.endOfMonth)(base);
+        const todayStart = startOfDayIST();
+        const todayEnd = endOfDayIST();
+        // Department masters (typed — new columns are in the regenerated client)
+        const deptMasters = yield prisma_1.prisma.department.findMany({
+            select: {
+                id: true, name: true, otBudgetHoursPerMonth: true, minDailyStrength: true,
+                appraisalCycleBasis: true, appraisalPeriodMonths: true, appraisalCalendarMonth: true,
+            },
+            orderBy: { name: "asc" },
+        });
+        // Active headcount per department
+        const activeEmps = yield prisma_1.prisma.employee.findMany({
+            where: { employmentStatus: "ACTIVE" },
+            select: { id: true, departmentId: true },
+        });
+        const headcountByDept = new Map();
+        const empDept = new Map();
+        for (const e of activeEmps) {
+            if (e.departmentId == null)
+                continue;
+            empDept.set(e.id, e.departmentId);
+            headcountByDept.set(e.departmentId, (headcountByDept.get(e.departmentId) || 0) + 1);
+        }
+        // Present today per department
+        const presentToday = yield prisma_1.prisma.attendance.findMany({
+            where: { date: { gte: todayStart, lte: todayEnd }, status: "PRESENT" },
+            select: { employeeId: true },
+        });
+        const presentByDept = new Map();
+        for (const a of presentToday) {
+            const d = empDept.get(a.employeeId);
+            if (d == null)
+                continue;
+            presentByDept.set(d, (presentByDept.get(d) || 0) + 1);
+        }
+        // Approved OT minutes this month per department
+        const otRows = yield prisma_1.prisma.overtimeApproval.groupBy({
+            by: ["employeeId"],
+            where: { date: { gte: rangeStart, lte: rangeEnd }, status: "APPROVE", managerStatus: "APPROVED" },
+            _sum: { minutes: true },
+        });
+        const otMinByDept = new Map();
+        for (const r of otRows) {
+            const d = empDept.get(r.employeeId);
+            if (d == null)
+                continue;
+            otMinByDept.set(d, (otMinByDept.get(d) || 0) + (r._sum.minutes || 0));
+        }
+        const rows = deptMasters.map((d) => {
+            var _a;
+            const otBudgetHours = Number(d.otBudgetHoursPerMonth || 0);
+            const otActualHours = +(((otMinByDept.get(d.id) || 0) / 60)).toFixed(1);
+            const minDailyStrength = Number(d.minDailyStrength || 0);
+            const headcount = headcountByDept.get(d.id) || 0;
+            const present = presentByDept.get(d.id) || 0;
+            return {
+                deptId: d.id,
+                dept: d.name,
+                otBudgetHours,
+                otActualHours,
+                otPctUsed: otBudgetHours > 0 ? Math.round((otActualHours / otBudgetHours) * 100) : null,
+                otOver: otBudgetHours > 0 && otActualHours > otBudgetHours,
+                minDailyStrength,
+                headcount,
+                presentToday: present,
+                strengthShortfall: minDailyStrength > 0 ? Math.max(0, minDailyStrength - present) : 0,
+                belowMin: minDailyStrength > 0 && present < minDailyStrength,
+                appraisalCycleBasis: d.appraisalCycleBasis || "DOJ",
+                appraisalPeriodMonths: d.appraisalPeriodMonths || 12,
+                appraisalCalendarMonth: (_a = d.appraisalCalendarMonth) !== null && _a !== void 0 ? _a : null,
+            };
+        });
+        res.json({ month: (0, date_fns_1.format)(rangeStart, "yyyy-MM"), monthLabel: (0, date_fns_1.format)(rangeStart, "MMMM yyyy"), rows });
+    }
+    catch (err) {
+        console.error("getDeptPlanning error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getDeptPlanning = getDeptPlanning;
+const setDeptPlanning = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f;
+    try {
+        const deptId = Number((_a = req.body) === null || _a === void 0 ? void 0 : _a.deptId);
+        const ot = Math.max(0, Number((_b = req.body) === null || _b === void 0 ? void 0 : _b.otBudgetHoursPerMonth) || 0);
+        const min = Math.max(0, Number((_c = req.body) === null || _c === void 0 ? void 0 : _c.minDailyStrength) || 0);
+        if (!deptId)
+            return res.status(400).json({ error: "deptId is required" });
+        const basis = ((_d = req.body) === null || _d === void 0 ? void 0 : _d.appraisalCycleBasis) === "CALENDAR" ? "CALENDAR" : "DOJ";
+        const period = [6, 12].includes(Number((_e = req.body) === null || _e === void 0 ? void 0 : _e.appraisalPeriodMonths)) ? Number(req.body.appraisalPeriodMonths) : 12;
+        const calMonth = ((_f = req.body) === null || _f === void 0 ? void 0 : _f.appraisalCalendarMonth)
+            ? Math.min(12, Math.max(1, Number(req.body.appraisalCalendarMonth)))
+            : null;
+        yield prisma_1.prisma.department.update({
+            where: { id: deptId },
+            data: {
+                otBudgetHoursPerMonth: ot, minDailyStrength: min,
+                appraisalCycleBasis: basis, appraisalPeriodMonths: period, appraisalCalendarMonth: calMonth,
+            },
+        });
+        res.json({ ok: true, deptId });
+    }
+    catch (err) {
+        console.error("setDeptPlanning error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.setDeptPlanning = setDeptPlanning;
+// ═══════════════════════════════════════════════════════════
+// #16 Appraisal scores — latest overall score per employee, dept
+// averages, and score-band distribution (with per-band employee list).
+// GET /api/management/appraisal-scores
+// ═══════════════════════════════════════════════════════════
+// Appraisal overallScore is stored on a 0–10 scale (mean of per-question
+// ratings, each 0–10), so bands are expressed out of 10.
+function scoreBand(s) {
+    if (s >= 8)
+        return { label: "Excellent (8–10)", color: "#22c55e" };
+    if (s >= 6)
+        return { label: "Good (6–7.9)", color: "#60a5fa" };
+    if (s >= 4)
+        return { label: "Average (4–5.9)", color: "#f59e0b" };
+    return { label: "Below (0–3.9)", color: "#ef4444" };
+}
+const getAppraisalScores = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g;
+    try {
+        const employees = yield prisma_1.prisma.employee.findMany({
+            where: { employmentStatus: "ACTIVE" },
+            select: {
+                id: true, firstName: true, lastName: true, employeeCode: true,
+                Department: { select: { name: true } },
+                designation: { select: { name: true } },
+            },
+        });
+        const forms = yield prisma_1.prisma.appraisalForm.findMany({
+            where: { overallScore: { not: null } },
+            orderBy: { createdAt: "desc" },
+            select: { employeeId: true, overallScore: true, cycle: true, createdAt: true, finalDecision: true },
+        });
+        const latest = new Map();
+        for (const f of forms) {
+            if (!latest.has(f.employeeId)) {
+                latest.set(f.employeeId, { score: f.overallScore, cycle: f.cycle, date: f.createdAt, decision: f.finalDecision });
+            }
+        }
+        const bandOrder = ["Excellent (8–10)", "Good (6–7.9)", "Average (4–5.9)", "Below (0–3.9)"];
+        const bandMap = new Map();
+        const deptScores = new Map();
+        let appraised = 0;
+        for (const e of employees) {
+            const dept = ((_a = e.Department) === null || _a === void 0 ? void 0 : _a.name) || "Unassigned";
+            const rec = latest.get(e.id);
+            if (!rec)
+                continue;
+            appraised++;
+            const band = scoreBand(rec.score);
+            if (!bandMap.has(band.label))
+                bandMap.set(band.label, { label: band.label, color: band.color, count: 0, employees: [] });
+            const b = bandMap.get(band.label);
+            b.count++;
+            b.employees.push({
+                name: `${(_b = e.firstName) !== null && _b !== void 0 ? _b : ""} ${(_c = e.lastName) !== null && _c !== void 0 ? _c : ""}`.trim(),
+                employeeCode: (_d = e.employeeCode) !== null && _d !== void 0 ? _d : "",
+                dept, designation: (_f = (_e = e.designation) === null || _e === void 0 ? void 0 : _e.name) !== null && _f !== void 0 ? _f : "—",
+                score: Math.round(rec.score * 10) / 10, cycle: rec.cycle,
+                appraisedOn: (0, date_fns_1.format)(new Date(rec.date), "dd MMM yyyy"),
+                finalDecision: (_g = rec.decision) !== null && _g !== void 0 ? _g : "",
+            });
+            if (!deptScores.has(dept))
+                deptScores.set(dept, []);
+            deptScores.get(dept).push(rec.score);
+        }
+        const bands = bandOrder
+            .map((label) => bandMap.get(label))
+            .filter((b) => !!b);
+        const deptAvg = Array.from(deptScores.entries())
+            .map(([dept, arr]) => ({ dept, avg: Math.round((arr.reduce((s, x) => s + x, 0) / arr.length) * 10) / 10, count: arr.length }))
+            .sort((a, b) => b.avg - a.avg);
+        res.json({
+            totalActive: employees.length,
+            appraised,
+            notAppraised: employees.length - appraised,
+            completionPct: employees.length ? Math.round((appraised / employees.length) * 100) : 0,
+            bands, deptAvg,
+        });
+    }
+    catch (err) {
+        console.error("getAppraisalScores error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getAppraisalScores = getAppraisalScores;
+// ═══════════════════════════════════════════════════════════
+// #13/#21 Employee reliability score (last N months, default 6 =
+// half-year) from attendance, leave discipline, weekly performance
+// and incidents. Each factor is shown so HR can tune the weights.
+// Eligibility (#21) = score >= cutoff (default 60).
+// Weights: Attendance 40 · Leave 20 · Weekly perf 25 · Incidents 15
+//          (convicted/substantiated incident = heavy negative).
+// GET /api/management/reliability-scores?months=6
+// ═══════════════════════════════════════════════════════════
+const getReliabilityScores = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const numMonths = Math.min(Math.max(Number(req.query.months) || 6, 1), 12);
+        const cutoff = 60;
+        const rangeStart = (0, date_fns_1.startOfMonth)((0, date_fns_1.subMonths)(new Date(), numMonths - 1));
+        const rangeEnd = (0, date_fns_1.endOfMonth)(new Date());
+        const employees = yield prisma_1.prisma.employee.findMany({
+            where: { employmentStatus: "ACTIVE" },
+            select: {
+                id: true, firstName: true, lastName: true, employeeCode: true,
+                Department: { select: { name: true } },
+                designation: { select: { name: true } },
+            },
+        });
+        // Attendance present/absent per employee
+        const attGroups = yield prisma_1.prisma.attendance.groupBy({
+            by: ["employeeId", "status"],
+            where: { date: { gte: rangeStart, lte: rangeEnd } },
+            _count: { _all: true },
+        });
+        const present = new Map();
+        const absent = new Map();
+        for (const g of attGroups) {
+            const s = (g.status || "").toUpperCase();
+            if (s === "PRESENT")
+                present.set(g.employeeId, (present.get(g.employeeId) || 0) + g._count._all);
+            else if (s === "ABSENT")
+                absent.set(g.employeeId, (absent.get(g.employeeId) || 0) + g._count._all);
+        }
+        // Approved leave days per employee (clipped to range)
+        const leaves = yield prisma_1.prisma.leaveRequest.findMany({
+            where: { status: "APPROVED", startDate: { lte: rangeEnd }, endDate: { gte: rangeStart } },
+            select: { employeeId: true, startDate: true, endDate: true, isHalfDay: true },
+        });
+        const leaveDays = new Map();
+        for (const lv of leaves) {
+            const s = new Date(Math.max(new Date(lv.startDate).getTime(), rangeStart.getTime()));
+            const e = new Date(Math.min(new Date(lv.endDate).getTime(), rangeEnd.getTime()));
+            let d = Math.max(0, Math.round((e.getTime() - s.getTime()) / 86400000) + 1);
+            if (lv.isHalfDay)
+                d = 0.5;
+            if (d > 0)
+                leaveDays.set(lv.employeeId, (leaveDays.get(lv.employeeId) || 0) + d);
+        }
+        // Weekly performance average per employee
+        const weekly = yield prisma_1.prisma.weeklyPerformanceRating.findMany({
+            where: { weekStartDate: { gte: rangeStart }, status: "SUBMITTED", overallScore: { not: null } },
+            select: { employeeId: true, overallScore: true },
+        });
+        const weeklyAgg = new Map();
+        for (const w of weekly) {
+            const a = weeklyAgg.get(w.employeeId) || { sum: 0, n: 0 };
+            a.sum += w.overallScore;
+            a.n++;
+            weeklyAgg.set(w.employeeId, a);
+        }
+        // Incidents per employee (substantiated = convicted)
+        const incidents = yield prisma_1.prisma.incident.findMany({
+            where: { incidentDate: { gte: rangeStart, lte: rangeEnd }, employeeId: { not: null } },
+            select: { employeeId: true, outcome: true },
+        });
+        const incAgg = new Map();
+        for (const i of incidents) {
+            const id = i.employeeId;
+            const a = incAgg.get(id) || { total: 0, substantiated: 0 };
+            a.total++;
+            if (i.outcome === "SUBSTANTIATED")
+                a.substantiated++;
+            incAgg.set(id, a);
+        }
+        const leaveThreshold = numMonths * 2; // ~2 leave-days/month before full penalty
+        const rows = employees.map((e) => {
+            var _a, _b, _c, _d, _e, _f;
+            const p = present.get(e.id) || 0;
+            const ab = absent.get(e.id) || 0;
+            const attDenom = p + ab;
+            const attRatio = attDenom > 0 ? p / attDenom : 0.85; // no data → assume mostly fine
+            const attendanceScore = +(40 * attRatio).toFixed(1);
+            const lv = leaveDays.get(e.id) || 0;
+            const leaveScore = +(20 * (1 - Math.min(1, lv / leaveThreshold))).toFixed(1);
+            const wa = weeklyAgg.get(e.id);
+            const weeklyAvg = wa ? Math.round(wa.sum / wa.n) : null;
+            const weeklyScore = +(25 * (weeklyAvg != null ? weeklyAvg / 100 : 0.6)).toFixed(1); // neutral 60% if no data
+            const inc = incAgg.get(e.id) || { total: 0, substantiated: 0 };
+            const incidentScore = +(15 - (inc.total - inc.substantiated) * 3 - inc.substantiated * 8).toFixed(1);
+            const score = Math.max(0, Math.min(100, Math.round(attendanceScore + leaveScore + weeklyScore + incidentScore)));
+            return {
+                name: `${(_a = e.firstName) !== null && _a !== void 0 ? _a : ""} ${(_b = e.lastName) !== null && _b !== void 0 ? _b : ""}`.trim(),
+                employeeCode: (_c = e.employeeCode) !== null && _c !== void 0 ? _c : "",
+                dept: ((_d = e.Department) === null || _d === void 0 ? void 0 : _d.name) || "Unassigned",
+                designation: (_f = (_e = e.designation) === null || _e === void 0 ? void 0 : _e.name) !== null && _f !== void 0 ? _f : "—",
+                presentDays: p, absentDays: ab, leaveDays: Math.round(lv * 10) / 10,
+                weeklyAvg, incidents: inc.total, convicted: inc.substantiated,
+                attendanceScore, leaveScore, weeklyScore, incidentScore,
+                score,
+                rating: score >= 80 ? "Good" : score >= cutoff ? "Watch" : "Risk",
+                eligible: score >= cutoff,
+            };
+        }).sort((a, b) => a.score - b.score);
+        const ready = rows.filter((r) => r.eligible).length;
+        res.json({
+            months: numMonths,
+            cutoff,
+            weights: { attendance: 40, leave: 20, weekly: 25, incidents: 15 },
+            summary: { total: rows.length, ready, notReady: rows.length - ready },
+            rows,
+        });
+    }
+    catch (err) {
+        console.error("getReliabilityScores error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getReliabilityScores = getReliabilityScores;
+// ═══════════════════════════════════════════════════════════
+// #15 PIP monitor — richer read-only view: status breakdown +
+// per-PIP detail (weekly-review trend, response status, days-in-
+// stage, extensions, nearing-termination). Actions live in /admin/pip.
+// GET /api/management/pip-monitor
+// ═══════════════════════════════════════════════════════════
+const getPipMonitor = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const pips = yield prisma_1.prisma.employeePIP.findMany({
+            include: {
+                employee: {
+                    select: {
+                        firstName: true, lastName: true, employeeCode: true,
+                        Department: { select: { name: true } },
+                        designation: { select: { name: true } },
+                    },
+                },
+                weeklyReviews: { orderBy: { weekNumber: "asc" }, select: { weekNumber: true, weeklyScore: true, status: true } },
+                responses: { select: { id: true } },
+            },
+            orderBy: { createdAt: "desc" },
+        });
+        const statusOrder = ["WARNING_ISSUED", "PIP_ACTIVE", "PIP_EXTENDED", "TERMINATION_INITIATED", "PIP_CLOSED_IMPROVED", "TERMINATED"];
+        const statusCounts = {};
+        for (const p of pips)
+            statusCounts[p.status] = (statusCounts[p.status] || 0) + 1;
+        const ACTIVE = ["WARNING_ISSUED", "PIP_ACTIVE", "PIP_EXTENDED", "TERMINATION_INITIATED"];
+        const now = Date.now();
+        const list = pips
+            .filter((p) => ACTIVE.includes(p.status))
+            .map((p) => {
+            var _a, _b, _c, _d, _e, _f, _g, _h;
+            const reviews = p.weeklyReviews;
+            const first = (_b = (_a = reviews[0]) === null || _a === void 0 ? void 0 : _a.weeklyScore) !== null && _b !== void 0 ? _b : null;
+            const last = (_d = (_c = reviews[reviews.length - 1]) === null || _c === void 0 ? void 0 : _c.weeklyScore) !== null && _d !== void 0 ? _d : null;
+            const trend = reviews.length >= 2 && first != null && last != null
+                ? (last > first ? "improving" : last < first ? "declining" : "stable")
+                : "neutral";
+            const stageStart = (_f = (_e = p.pipStartDate) !== null && _e !== void 0 ? _e : p.warningDate) !== null && _f !== void 0 ? _f : p.createdAt;
+            const daysInStage = Math.floor((now - new Date(stageStart).getTime()) / 86400000);
+            return {
+                pipNumber: p.pipNumber,
+                employeeName: `${p.employee.firstName} ${p.employee.lastName}`,
+                employeeCode: p.employee.employeeCode,
+                dept: ((_g = p.employee.Department) === null || _g === void 0 ? void 0 : _g.name) || "—",
+                designation: ((_h = p.employee.designation) === null || _h === void 0 ? void 0 : _h.name) || "—",
+                status: p.status,
+                triggerScore: p.triggerScore,
+                triggerMonth: p.triggerMonth,
+                extendedCount: p.extendedCount,
+                daysInStage,
+                reviewsDone: reviews.length,
+                latestScore: last,
+                weeklyScores: reviews.map((r) => ({ week: r.weekNumber, score: r.weeklyScore })),
+                trend,
+                responded: p.responses.length > 0,
+                responses: p.responses.length,
+                pipEndDate: p.pipEndDate ? (0, date_fns_1.format)(new Date(p.pipEndDate), "dd MMM yyyy") : null,
+                responseDeadline: p.responseDeadline ? (0, date_fns_1.format)(new Date(p.responseDeadline), "dd MMM yyyy") : null,
+                nearingTermination: p.status === "TERMINATION_INITIATED" || p.status === "PIP_EXTENDED",
+            };
+        });
+        res.json({
+            statusBreakdown: statusOrder.filter((s) => statusCounts[s]).map((s) => ({ status: s, count: statusCounts[s] })),
+            active: list.length,
+            closedImproved: statusCounts["PIP_CLOSED_IMPROVED"] || 0,
+            list,
+        });
+    }
+    catch (err) {
+        console.error("getPipMonitor error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getPipMonitor = getPipMonitor;
+// ═══════════════════════════════════════════════════════════
+// #23 OT-vs-hire — per department, value this month's approved OT
+// against the cost of one marginal junior hire. When OT ≈ a full
+// FTE-month, flag "consider hiring". Uses current SalaryStructure
+// (no revision history needed). Salary-gated on the client.
+// GET /api/management/ot-vs-hire?month=YYYY-MM
+// ═══════════════════════════════════════════════════════════
+const getOtVsHire = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c;
+    try {
+        const monthParam = req.query.month;
+        const base = monthParam && /^\d{4}-\d{2}$/.test(monthParam) ? new Date(`${monthParam}-01`) : new Date();
+        const rangeStart = (0, date_fns_1.startOfMonth)(base);
+        const rangeEnd = (0, date_fns_1.endOfMonth)(base);
+        const WORK_DAYS = 26;
+        const WORK_HRS_PER_DAY = 8;
+        // Current monthly gross per active employee, by department
+        const structures = yield prisma_1.prisma.salaryStructure.findMany({
+            select: {
+                employeeId: true, basic: true, hra: true, medicalAllowance: true,
+                travelAllowance: true, specialAllowance: true, otherAllowances: true,
+                employee: { select: { employmentStatus: true, departmentId: true, Department: { select: { name: true } } } },
+            },
+        });
+        const monthlyGross = (s) => (s.basic + s.hra + s.medicalAllowance + s.travelAllowance + s.specialAllowance + s.otherAllowances);
+        const deptSalaries = new Map();
+        const empMonthly = new Map();
+        for (const s of structures) {
+            if (((_a = s.employee) === null || _a === void 0 ? void 0 : _a.employmentStatus) !== "ACTIVE")
+                continue;
+            const dept = ((_c = (_b = s.employee) === null || _b === void 0 ? void 0 : _b.Department) === null || _c === void 0 ? void 0 : _c.name) || "Unassigned";
+            const g = monthlyGross(s);
+            empMonthly.set(s.employeeId, g);
+            if (!deptSalaries.has(dept))
+                deptSalaries.set(dept, []);
+            deptSalaries.get(dept).push(g);
+        }
+        // Approved OT minutes this month, per employee → per dept
+        const otRows = yield prisma_1.prisma.overtimeApproval.groupBy({
+            by: ["employeeId"],
+            where: { date: { gte: rangeStart, lte: rangeEnd }, status: "APPROVE", managerStatus: "APPROVED" },
+            _sum: { minutes: true },
+        });
+        const otEmps = yield prisma_1.prisma.employee.findMany({
+            where: { id: { in: otRows.map((r) => r.employeeId) } },
+            select: { id: true, Department: { select: { name: true } } },
+        });
+        const empDept = new Map(otEmps.map((e) => { var _a; return [e.id, ((_a = e.Department) === null || _a === void 0 ? void 0 : _a.name) || "Unassigned"]; }));
+        const otMinByDept = new Map();
+        for (const r of otRows) {
+            const dept = empDept.get(r.employeeId) || "Unassigned";
+            otMinByDept.set(dept, (otMinByDept.get(dept) || 0) + (r._sum.minutes || 0));
+        }
+        // Junior daily cost per dept = avg monthly gross of the lower-paid half / WORK_DAYS
+        const rows = Array.from(otMinByDept.entries()).map(([dept, otMin]) => {
+            const sals = (deptSalaries.get(dept) || []).slice().sort((a, b) => a - b);
+            const lowerHalf = sals.length ? sals.slice(0, Math.max(1, Math.ceil(sals.length / 2))) : [];
+            const juniorMonthly = lowerHalf.length ? Math.round(lowerHalf.reduce((s, x) => s + x, 0) / lowerHalf.length) : 0;
+            const juniorDailyCost = juniorMonthly / WORK_DAYS;
+            const otHours = +(otMin / 60).toFixed(1);
+            const otEquivalentDays = +(otHours / WORK_HRS_PER_DAY).toFixed(1);
+            const otCost = Math.round(otEquivalentDays * juniorDailyCost);
+            const equivalentHires = juniorMonthly > 0 ? +(otCost / juniorMonthly).toFixed(2) : 0;
+            return {
+                dept,
+                otHours,
+                otEquivalentDays,
+                juniorAvgMonthly: juniorMonthly,
+                otCost,
+                equivalentHires,
+                recommendHire: equivalentHires >= 0.8, // OT ≈ a (near) full junior FTE-month
+            };
+        }).sort((a, b) => b.equivalentHires - a.equivalentHires);
+        res.json({
+            month: (0, date_fns_1.format)(rangeStart, "yyyy-MM"),
+            monthLabel: (0, date_fns_1.format)(rangeStart, "MMMM yyyy"),
+            assumptions: `Junior cost = avg of lower-paid half per dept; ${WORK_DAYS} working days × ${WORK_HRS_PER_DAY}h. Flag when OT ≥ 0.8 FTE-month.`,
+            rows,
+        });
+    }
+    catch (err) {
+        console.error("getOtVsHire error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getOtVsHire = getOtVsHire;
+// ═══════════════════════════════════════════════════════════
+// #22 Salary increments — average increment % per department (from
+// SalaryRevision history) with per-employee drill-down. Salary-gated.
+// GET /api/management/salary-increments?months=12
+// ═══════════════════════════════════════════════════════════
+const getSalaryIncrements = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
+    try {
+        const numMonths = Math.min(Math.max(Number(req.query.months) || 12, 1), 36);
+        const since = (0, date_fns_1.startOfMonth)((0, date_fns_1.subMonths)(new Date(), numMonths - 1));
+        const revisions = yield prisma_1.prisma.salaryRevision.findMany({
+            where: { effectiveFrom: { gte: since } },
+            orderBy: { effectiveFrom: "desc" },
+            select: {
+                employeeId: true, previousCtc: true, newCtc: true, percentage: true, effectiveFrom: true,
+                employee: {
+                    select: {
+                        firstName: true, lastName: true, employeeCode: true,
+                        Department: { select: { name: true } },
+                        designation: { select: { name: true } },
+                    },
+                },
+            },
+        });
+        // Latest revision per employee within the window
+        const latest = new Map();
+        for (const r of revisions)
+            if (!latest.has(r.employeeId))
+                latest.set(r.employeeId, r);
+        const deptMap = new Map();
+        for (const r of latest.values()) {
+            const dept = ((_b = (_a = r.employee) === null || _a === void 0 ? void 0 : _a.Department) === null || _b === void 0 ? void 0 : _b.name) || "Unassigned";
+            if (!deptMap.has(dept))
+                deptMap.set(dept, { dept, pcts: [], employees: [] });
+            const d = deptMap.get(dept);
+            d.pcts.push(r.percentage);
+            d.employees.push({
+                name: `${(_d = (_c = r.employee) === null || _c === void 0 ? void 0 : _c.firstName) !== null && _d !== void 0 ? _d : ""} ${(_f = (_e = r.employee) === null || _e === void 0 ? void 0 : _e.lastName) !== null && _f !== void 0 ? _f : ""}`.trim(),
+                employeeCode: (_h = (_g = r.employee) === null || _g === void 0 ? void 0 : _g.employeeCode) !== null && _h !== void 0 ? _h : "",
+                designation: (_l = (_k = (_j = r.employee) === null || _j === void 0 ? void 0 : _j.designation) === null || _k === void 0 ? void 0 : _k.name) !== null && _l !== void 0 ? _l : "—",
+                previousCtc: Math.round(r.previousCtc),
+                newCtc: Math.round(r.newCtc),
+                percentage: r.percentage,
+                effectiveFrom: (0, date_fns_1.format)(new Date(r.effectiveFrom), "dd MMM yyyy"),
+            });
+        }
+        const deptAvg = Array.from(deptMap.values())
+            .map((d) => ({
+            dept: d.dept,
+            avgIncrementPct: +(d.pcts.reduce((s, x) => s + x, 0) / d.pcts.length).toFixed(1),
+            count: d.pcts.length,
+            employees: d.employees.sort((a, b) => b.percentage - a.percentage),
+        }))
+            .sort((a, b) => b.avgIncrementPct - a.avgIncrementPct);
+        res.json({
+            months: numMonths,
+            totalRevisions: revisions.length,
+            employeesRevised: latest.size,
+            deptAvg,
+        });
+    }
+    catch (err) {
+        console.error("getSalaryIncrements error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getSalaryIncrements = getSalaryIncrements;
+// ═══════════════════════════════════════════════════════════
+// #20 Appraisal eligibility — who is due for appraisal in the
+// selected month, per each department's configured cycle
+// (DOJ-anniversary or fixed calendar month, period 6/12).
+// GET /api/management/appraisal-eligibility?month=YYYY-MM
+// ═══════════════════════════════════════════════════════════
+const getAppraisalEligibility = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g;
+    try {
+        const monthParam = req.query.month;
+        const base = monthParam && /^\d{4}-\d{2}$/.test(monthParam) ? new Date(`${monthParam}-01`) : new Date();
+        const selYear = base.getFullYear();
+        const selMonth = base.getMonth() + 1; // 1-12
+        const depts = yield prisma_1.prisma.department.findMany({
+            select: { id: true, name: true, appraisalCycleBasis: true, appraisalPeriodMonths: true, appraisalCalendarMonth: true },
+        });
+        const deptCfg = new Map(depts.map((d) => [d.id, d]));
+        const employees = yield prisma_1.prisma.employee.findMany({
+            where: { employmentStatus: "ACTIVE" },
+            select: {
+                id: true, firstName: true, lastName: true, employeeCode: true, dateOfJoining: true,
+                departmentId: true, Department: { select: { name: true } },
+                designation: { select: { name: true } },
+            },
+        });
+        const forms = yield prisma_1.prisma.appraisalForm.findMany({
+            orderBy: { createdAt: "desc" },
+            select: { employeeId: true, createdAt: true },
+        });
+        const lastAppraisal = new Map();
+        for (const f of forms)
+            if (!lastAppraisal.has(f.employeeId))
+                lastAppraisal.set(f.employeeId, f.createdAt);
+        const due = [];
+        for (const e of employees) {
+            const cfg = e.departmentId ? deptCfg.get(e.departmentId) : undefined;
+            const basis = (cfg === null || cfg === void 0 ? void 0 : cfg.appraisalCycleBasis) || "DOJ";
+            const period = (cfg === null || cfg === void 0 ? void 0 : cfg.appraisalPeriodMonths) || 12;
+            const calMonth = (_a = cfg === null || cfg === void 0 ? void 0 : cfg.appraisalCalendarMonth) !== null && _a !== void 0 ? _a : null;
+            const doj = new Date(e.dateOfJoining);
+            const monthsSince = (selYear - doj.getFullYear()) * 12 + (selMonth - 1 - doj.getMonth());
+            let isDue = false;
+            let milestone = "";
+            if (basis === "CALENDAR") {
+                // Half-yearly calendar cycle runs in TWO months: the anchor and anchor+6.
+                const second = calMonth ? ((calMonth - 1 + 6) % 12) + 1 : null;
+                const matches = calMonth === selMonth || (period === 6 && second === selMonth);
+                if (calMonth && matches && monthsSince >= period) {
+                    isDue = true;
+                    milestone = `Calendar (${period}mo)`;
+                }
+            }
+            else {
+                if (monthsSince > 0 && monthsSince % period === 0) {
+                    isDue = true;
+                    milestone = `${monthsSince}-month`;
+                }
+            }
+            if (!isDue)
+                continue;
+            const last = lastAppraisal.get(e.id);
+            due.push({
+                name: `${(_b = e.firstName) !== null && _b !== void 0 ? _b : ""} ${(_c = e.lastName) !== null && _c !== void 0 ? _c : ""}`.trim(),
+                employeeCode: (_d = e.employeeCode) !== null && _d !== void 0 ? _d : "",
+                dept: ((_e = e.Department) === null || _e === void 0 ? void 0 : _e.name) || "Unassigned",
+                designation: (_g = (_f = e.designation) === null || _f === void 0 ? void 0 : _f.name) !== null && _g !== void 0 ? _g : "—",
+                doj: (0, date_fns_1.format)(doj, "dd MMM yyyy"),
+                tenureMonths: monthsSince,
+                basis, milestone,
+                lastAppraisal: last ? (0, date_fns_1.format)(new Date(last), "dd MMM yyyy") : "Never",
+            });
+        }
+        due.sort((a, b) => a.dept.localeCompare(b.dept) || a.name.localeCompare(b.name));
+        res.json({
+            month: (0, date_fns_1.format)(base, "yyyy-MM"),
+            monthLabel: (0, date_fns_1.format)(base, "MMMM yyyy"),
+            totalActive: employees.length,
+            dueCount: due.length,
+            due,
+            deptConfig: depts.map((d) => {
+                var _a;
+                return ({
+                    dept: d.name,
+                    basis: d.appraisalCycleBasis || "DOJ",
+                    period: d.appraisalPeriodMonths || 12,
+                    calendarMonth: (_a = d.appraisalCalendarMonth) !== null && _a !== void 0 ? _a : null,
+                });
+            }),
+        });
+    }
+    catch (err) {
+        console.error("getAppraisalEligibility error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getAppraisalEligibility = getAppraisalEligibility;
+// ═══════════════════════════════════════════════════════════
+// Probation overview — status breakdown (IN_PROGRESS / CONFIRMED /
+// EXTENDED / TERMINATED / WAIVED) for the graph, plus a list of
+// employees currently on (or extended) probation with end dates.
+// GET /api/management/probation-overview
+// ═══════════════════════════════════════════════════════════
+const getProbationOverview = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const employees = yield prisma_1.prisma.employee.findMany({
+            where: { employmentStatus: { in: ["ACTIVE", "NOTICE_PERIOD"] }, probationStatus: { not: null } },
+            select: {
+                firstName: true, lastName: true, employeeCode: true,
+                probationStatus: true, probationStartDate: true, probationEndDate: true,
+                probationRemarks: true,
+                Department: { select: { name: true } },
+                designation: { select: { name: true } },
+            },
+        });
+        const statusOrder = ["IN_PROGRESS", "EXTENDED", "CONFIRMED", "TERMINATED", "WAIVED"];
+        const statusColor = {
+            IN_PROGRESS: "#60a5fa", EXTENDED: "#f59e0b", CONFIRMED: "#22c55e", TERMINATED: "#ef4444", WAIVED: "#94a3b8",
+        };
+        const counts = {};
+        for (const e of employees)
+            if (e.probationStatus)
+                counts[e.probationStatus] = (counts[e.probationStatus] || 0) + 1;
+        const now = Date.now();
+        const list = employees
+            .filter((e) => e.probationStatus === "IN_PROGRESS" || e.probationStatus === "EXTENDED")
+            .map((e) => {
+            var _a, _b, _c, _d, _e, _f, _g;
+            const end = e.probationEndDate ? new Date(e.probationEndDate) : null;
+            const daysToEnd = end ? Math.round((end.getTime() - now) / 86400000) : null;
+            return {
+                name: `${(_a = e.firstName) !== null && _a !== void 0 ? _a : ""} ${(_b = e.lastName) !== null && _b !== void 0 ? _b : ""}`.trim(),
+                employeeCode: (_c = e.employeeCode) !== null && _c !== void 0 ? _c : "",
+                dept: ((_d = e.Department) === null || _d === void 0 ? void 0 : _d.name) || "—",
+                designation: (_f = (_e = e.designation) === null || _e === void 0 ? void 0 : _e.name) !== null && _f !== void 0 ? _f : "—",
+                status: e.probationStatus,
+                startDate: e.probationStartDate ? (0, date_fns_1.format)(new Date(e.probationStartDate), "dd MMM yyyy") : "—",
+                endDate: end ? (0, date_fns_1.format)(end, "dd MMM yyyy") : "—",
+                daysToEnd,
+                overdue: daysToEnd != null && daysToEnd < 0,
+                remarks: (_g = e.probationRemarks) !== null && _g !== void 0 ? _g : null,
+            };
+        })
+            .sort((a, b) => { var _a, _b; return ((_a = a.daysToEnd) !== null && _a !== void 0 ? _a : 1e9) - ((_b = b.daysToEnd) !== null && _b !== void 0 ? _b : 1e9); });
+        res.json({
+            statusBreakdown: statusOrder.filter((s) => counts[s]).map((s) => ({ status: s, count: counts[s], color: statusColor[s] })),
+            inProgress: counts["IN_PROGRESS"] || 0,
+            extended: counts["EXTENDED"] || 0,
+            total: employees.length,
+            list,
+        });
+    }
+    catch (err) {
+        console.error("getProbationOverview error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+exports.getProbationOverview = getProbationOverview;
 // ═══════════════════════════════════════════════════════════
 // SECTION 13 — LATE ARRIVALS ANALYSIS
 // GET /api/management/late-arrivals?days=30

@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getEmployeeInsights = exports.initAppraisalAutoDraftCron = exports.getEditHistory = exports.getAppraisalDetail = exports.respondEditRequest = exports.requestEdit = exports.hrReviewAppraisal = exports.submitManagementAppraisal = exports.submitManagerAppraisalV2 = exports.submitSelfAppraisal = exports.hrVerifyAppraisal = exports.toggleSelfAppraisalQuestion = exports.createSelfAppraisalQuestion = exports.getSelfAppraisalQuestions = void 0;
+exports.getEmployeeInsights = exports.initAppraisalAutoDraftCron = exports.submitInchargeAppraisal = exports.deleteReviewQuestion = exports.toggleReviewQuestion = exports.updateReviewQuestion = exports.createReviewQuestion = exports.listReviewQuestions = exports.reassignAppraisalManager = exports.getEditHistory = exports.getAppraisalDetail = exports.respondEditRequest = exports.requestEdit = exports.hrReviewAppraisal = exports.submitManagementAppraisal = exports.submitManagerAppraisalV2 = exports.submitSelfAppraisal = exports.hrVerifyAppraisal = exports.toggleSelfAppraisalQuestion = exports.createSelfAppraisalQuestion = exports.getSelfAppraisalQuestions = void 0;
 const prisma_1 = require("../../lib/prisma");
 const notifications_controller_1 = require("../notifications/notifications.controller");
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -79,6 +79,7 @@ exports.toggleSelfAppraisalQuestion = toggleSelfAppraisalQuestion;
 // HR: VERIFY DRAFT → SEND TO EMPLOYEE & MANAGER
 // ═══════════════════════════════════════════════════════════════════════════════
 const hrVerifyAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     try {
         const id = Number(req.params.id);
         const { appraisalStartDate, appraisalEndDate, dueDate, hrVerifiedBy } = req.body;
@@ -91,6 +92,9 @@ const hrVerifyAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, functi
         if (appraisal.status !== "AUTO_DRAFT" && appraisal.status !== "Draft") {
             return res.status(400).json({ error: "Only AUTO_DRAFT appraisals can be verified" });
         }
+        // Snapshot the employee's in-charge at verification time so the appraisal
+        // routes to the right person even if the in-charge changes later.
+        const inchargeIdSnapshot = (_b = (_a = appraisal.employee) === null || _a === void 0 ? void 0 : _a.inchargeId) !== null && _b !== void 0 ? _b : null;
         const updated = yield prisma_1.prisma.appraisalForm.update({
             where: { id },
             data: {
@@ -100,11 +104,18 @@ const hrVerifyAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, functi
                 dueDate: dueDate ? new Date(dueDate) : undefined,
                 hrVerifiedBy: hrVerifiedBy ? Number(hrVerifiedBy) : null,
                 hrVerifiedAt: new Date(),
+                inchargeId: inchargeIdSnapshot,
             },
         });
         // Notify employee
         const empName = `${appraisal.employee.firstName} ${appraisal.employee.lastName}`;
         yield (0, notifications_controller_1.createNotification)(appraisal.employeeId, `Your appraisal for cycle "${appraisal.cycle}" has been initiated. Please complete your self-appraisal.`);
+        // Notify in-charge first (when present). Manager fills only after the
+        // in-charge submits — the dynamic review form gates this client-side and
+        // the new submit endpoints enforce it server-side.
+        if (inchargeIdSnapshot) {
+            yield (0, notifications_controller_1.createNotification)(inchargeIdSnapshot, `Appraisal initiated for ${empName} (${appraisal.cycle}). Please complete your in-charge review.`);
+        }
         // Notify assigned manager and find their reporting manager (Management, role 4)
         if (appraisal.managerId) {
             yield (0, notifications_controller_1.createNotification)(appraisal.managerId, `Appraisal initiated for ${empName} (${appraisal.cycle}). Please complete your manager review.`);
@@ -144,6 +155,14 @@ const notifyHRTeam = (employeeDeptId, message) => __awaiter(void 0, void 0, void
         yield (0, notifications_controller_1.createNotification)(staff.id, message);
     }
 });
+/**
+ * Whether the appraisal needs an In-charge review at all.
+ * True when the appraisal has a snapshotted inchargeId (HR verify already ran)
+ * OR the employee currently has an in-charge assigned (pre-verification rows).
+ */
+const inchargeRequired = (a) => { var _a; return !!((a === null || a === void 0 ? void 0 : a.inchargeId) || ((_a = a === null || a === void 0 ? void 0 : a.employee) === null || _a === void 0 ? void 0 : _a.inchargeId)); };
+/** True when the In-charge step is either not required, or has been submitted. */
+const inchargeDone = (a) => !inchargeRequired(a) || !!(a === null || a === void 0 ? void 0 : a.inchargeAppraisalSubmittedAt);
 // ═══════════════════════════════════════════════════════════════════════════════
 // EMPLOYEE: SUBMIT SELF-APPRAISAL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -154,7 +173,7 @@ const submitSelfAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, func
         const { answers, achievements, goalsObjective, challenges, trainingNeeds, isDraft } = req.body;
         const appraisal = yield prisma_1.prisma.appraisalForm.findUnique({
             where: { id },
-            include: { employee: { select: { departmentId: true, firstName: true, lastName: true } } },
+            include: { employee: { select: { departmentId: true, firstName: true, lastName: true, inchargeId: true } } },
         });
         if (!appraisal)
             return res.status(404).json({ error: "Appraisal not found" });
@@ -205,10 +224,11 @@ const submitSelfAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, func
         }
         // Update status if not saving as draft
         if (!isDraft) {
-            // All three must submit → HR_REVIEW
+            // All required levels must submit → HR_REVIEW. In-charge only counts
+            // when the appraisal has an in-charge assigned.
             const managerAlreadySubmitted = !!appraisal.managerAppraisalSubmittedAt;
             const managementAlreadySubmitted = !!appraisal.managementAppraisalSubmittedAt;
-            const allSubmitted = managerAlreadySubmitted && managementAlreadySubmitted;
+            const allSubmitted = managerAlreadySubmitted && managementAlreadySubmitted && inchargeDone(appraisal);
             const newStatus = allSubmitted ? "HR_REVIEW" : "PENDING_FILL";
             yield prisma_1.prisma.appraisalForm.update({
                 where: { id },
@@ -248,19 +268,26 @@ exports.submitSelfAppraisal = submitSelfAppraisal;
 // MANAGER: SUBMIT MANAGER APPRAISAL (enhanced — status-aware)
 // ═══════════════════════════════════════════════════════════════════════════════
 const submitManagerAppraisalV2 = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     try {
         const id = Number(req.params.id);
         const { qualityOfWorkRating, qualityOfWorkComments, knowledgeOfJobRating, knowledgeOfJobComments, teamworkRating, teamworkComments, independenceRating, independenceComments, recordsRating, recordsComments, guestServiceRating, guestServiceComments, safetyRating, safetyComments, attendanceRating, attendanceComments, leadershipRating, leadershipComments, overallScore, comments, recommendations, finalDecision, finalComments, isDraft, } = req.body;
         const appraisal = yield prisma_1.prisma.appraisalForm.findUnique({
             where: { id },
-            include: { employee: { select: { departmentId: true, firstName: true, lastName: true } } },
+            include: { employee: { select: { departmentId: true, firstName: true, lastName: true, inchargeId: true } } },
         });
         if (!appraisal)
             return res.status(404).json({ error: "Appraisal not found" });
         // Allow manager to fill during PENDING_FILL (parallel) or after self-appraisal submitted
         if (!["PENDING_FILL", "SELF_APPRAISAL_SUBMITTED", "MANAGER_APPRAISAL_PENDING", "MANAGER_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
             return res.status(400).json({ error: "Manager appraisal cannot be submitted at this stage" });
+        }
+        // New dynamic form sends an `answers` array. Persist to the unified
+        // AppraisalReviewAnswer table (level=MANAGER) in addition to the legacy
+        // column upsert below, so both old and new clients work during cutover.
+        const answers = (_a = req.body) === null || _a === void 0 ? void 0 : _a.answers;
+        if (Array.isArray(answers)) {
+            yield saveReviewAnswers(id, "MANAGER", answers);
         }
         // Store previous values for audit if already exists
         const existing = yield prisma_1.prisma.managerAppraisal.findUnique({ where: { appraisalFormId: id } });
@@ -296,7 +323,8 @@ const submitManagerAppraisalV2 = (req, res) => __awaiter(void 0, void 0, void 0,
         if (!isDraft) {
             const selfAlreadySubmitted = !!appraisal.selfAppraisalSubmittedAt;
             const managementAlreadySubmitted = !!appraisal.managementAppraisalSubmittedAt;
-            const allSubmitted = selfAlreadySubmitted && managementAlreadySubmitted;
+            // In-charge only blocks when the appraisal has one assigned.
+            const allSubmitted = selfAlreadySubmitted && managementAlreadySubmitted && inchargeDone(appraisal);
             const newStatus = allSubmitted ? "HR_REVIEW" : "PENDING_FILL";
             yield prisma_1.prisma.appraisalForm.update({
                 where: { id },
@@ -320,8 +348,8 @@ const submitManagerAppraisalV2 = (req, res) => __awaiter(void 0, void 0, void 0,
                     data: { newValues: { managerAppraisal: mgrData } },
                 });
             }
-            const employeeDeptId = (_b = (_a = appraisal.employee) === null || _a === void 0 ? void 0 : _a.departmentId) !== null && _b !== void 0 ? _b : 0;
-            const empName = `${(_c = appraisal.employee) === null || _c === void 0 ? void 0 : _c.firstName} ${(_d = appraisal.employee) === null || _d === void 0 ? void 0 : _d.lastName}`;
+            const employeeDeptId = (_c = (_b = appraisal.employee) === null || _b === void 0 ? void 0 : _b.departmentId) !== null && _c !== void 0 ? _c : 0;
+            const empName = `${(_d = appraisal.employee) === null || _d === void 0 ? void 0 : _d.firstName} ${(_e = appraisal.employee) === null || _e === void 0 ? void 0 : _e.lastName}`;
             const mgrMsg = allSubmitted
                 ? `All appraisal sections submitted for ${empName} (${appraisal.cycle}). Please review.`
                 : `Manager review submitted for ${empName} (${appraisal.cycle}).`;
@@ -338,18 +366,24 @@ exports.submitManagerAppraisalV2 = submitManagerAppraisalV2;
 // MANAGEMENT: SUBMIT MANAGEMENT APPRAISAL
 // ═══════════════════════════════════════════════════════════════════════════════
 const submitManagementAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     try {
         const id = Number(req.params.id);
         const { qualityOfWorkRating, qualityOfWorkComments, knowledgeOfJobRating, knowledgeOfJobComments, teamworkRating, teamworkComments, independenceRating, independenceComments, recordsRating, recordsComments, guestServiceRating, guestServiceComments, safetyRating, safetyComments, attendanceRating, attendanceComments, leadershipRating, leadershipComments, overallScore, comments, recommendations, isDraft, } = req.body;
         const appraisal = yield prisma_1.prisma.appraisalForm.findUnique({
             where: { id },
-            include: { employee: { select: { departmentId: true, firstName: true, lastName: true } } },
+            include: { employee: { select: { departmentId: true, firstName: true, lastName: true, inchargeId: true } } },
         });
         if (!appraisal)
             return res.status(404).json({ error: "Appraisal not found" });
         if (!["PENDING_FILL", "SELF_APPRAISAL_PENDING", "MANAGER_APPRAISAL_PENDING", "MANAGER_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
             return res.status(400).json({ error: "Management appraisal cannot be submitted at this stage" });
+        }
+        // New dynamic form sends an `answers` array. Persist to AppraisalReviewAnswer
+        // (level=MANAGEMENT) in addition to the legacy column upsert below.
+        const mgmtAnswers = (_a = req.body) === null || _a === void 0 ? void 0 : _a.answers;
+        if (Array.isArray(mgmtAnswers)) {
+            yield saveReviewAnswers(id, "MANAGEMENT", mgmtAnswers);
         }
         yield prisma_1.prisma.managementAppraisal.upsert({
             where: { appraisalFormId: id },
@@ -382,7 +416,8 @@ const submitManagementAppraisal = (req, res) => __awaiter(void 0, void 0, void 0
         if (!isDraft) {
             const selfAlreadySubmitted = !!appraisal.selfAppraisalSubmittedAt;
             const managerAlreadySubmitted = !!appraisal.managerAppraisalSubmittedAt;
-            const allSubmitted = selfAlreadySubmitted && managerAlreadySubmitted;
+            // In-charge only blocks when the appraisal has one assigned.
+            const allSubmitted = selfAlreadySubmitted && managerAlreadySubmitted && inchargeDone(appraisal);
             const newStatus = allSubmitted ? "HR_REVIEW" : "PENDING_FILL";
             yield prisma_1.prisma.appraisalForm.update({
                 where: { id },
@@ -400,8 +435,8 @@ const submitManagementAppraisal = (req, res) => __awaiter(void 0, void 0, void 0
                     data: { newValues: { managementAppraisal: mgmtData } },
                 });
             }
-            const employeeDeptId = (_b = (_a = appraisal.employee) === null || _a === void 0 ? void 0 : _a.departmentId) !== null && _b !== void 0 ? _b : 0;
-            const empName = `${(_c = appraisal.employee) === null || _c === void 0 ? void 0 : _c.firstName} ${(_d = appraisal.employee) === null || _d === void 0 ? void 0 : _d.lastName}`;
+            const employeeDeptId = (_c = (_b = appraisal.employee) === null || _b === void 0 ? void 0 : _b.departmentId) !== null && _c !== void 0 ? _c : 0;
+            const empName = `${(_d = appraisal.employee) === null || _d === void 0 ? void 0 : _d.firstName} ${(_e = appraisal.employee) === null || _e === void 0 ? void 0 : _e.lastName}`;
             const mgmtMsg = allSubmitted
                 ? `All appraisal sections submitted for ${empName} (${appraisal.cycle}). Please review.`
                 : `Management review submitted for ${empName} (${appraisal.cycle}).`;
@@ -470,8 +505,9 @@ const requestEdit = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
         const { requestedBy, reason, requestType } = req.body;
         if (!(reason === null || reason === void 0 ? void 0 : reason.trim()))
             return res.status(400).json({ error: "Reason required" });
-        if (!["SELF", "MANAGER", "MANAGEMENT"].includes(requestType))
-            return res.status(400).json({ error: "requestType must be SELF, MANAGER, or MANAGEMENT" });
+        if (!["SELF", "INCHARGE", "MANAGER", "MANAGEMENT"].includes(requestType)) {
+            return res.status(400).json({ error: "requestType must be SELF, INCHARGE, MANAGER, or MANAGEMENT" });
+        }
         const appraisal = yield prisma_1.prisma.appraisalForm.findUnique({
             where: { id: appraisalId },
             include: { employee: { select: { firstName: true, lastName: true, employeeCode: true } } },
@@ -502,7 +538,10 @@ const requestEdit = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
             where: { departmentId: 1, employmentStatus: "ACTIVE" },
             select: { id: true },
         });
-        const typeLabel = requestType === "SELF" ? "self-appraisal" : "manager review";
+        const typeLabel = requestType === "SELF" ? "self-appraisal"
+            : requestType === "INCHARGE" ? "in-charge review"
+                : requestType === "MANAGEMENT" ? "management review"
+                    : "manager review";
         for (const hr of hrEmployees) {
             yield (0, notifications_controller_1.createNotification)(hr.id, `${requesterName} has requested to edit their ${typeLabel} for ${empName}'s appraisal (${appraisal.cycle}). Reason: ${reason}`);
         }
@@ -536,7 +575,10 @@ const respondEditRequest = (req, res) => __awaiter(void 0, void 0, void 0, funct
         });
         const requesterName = requester ? `${requester.firstName} ${requester.lastName}` : `Employee`;
         const empName = `${editReq.appraisalForm.employee.firstName} ${editReq.appraisalForm.employee.lastName}`;
-        const typeLabel = editReq.requestType === "SELF" ? "self-appraisal" : editReq.requestType === "MANAGER" ? "manager review" : "management review";
+        const typeLabel = editReq.requestType === "SELF" ? "self-appraisal"
+            : editReq.requestType === "INCHARGE" ? "in-charge review"
+                : editReq.requestType === "MANAGEMENT" ? "management review"
+                    : "manager review";
         if (action === "APPROVE") {
             // Save current values as edit history snapshot
             const appraisal = editReq.appraisalForm;
@@ -546,6 +588,17 @@ const respondEditRequest = (req, res) => __awaiter(void 0, void 0, void 0, funct
                 const answers = yield prisma_1.prisma.selfAppraisalAnswer.findMany({ where: { appraisalFormId: appraisal.id } });
                 previousValues = { selfAppraisal: selfData, answers };
             }
+            else if (editReq.requestType === "INCHARGE") {
+                // In-charge lives entirely on the new unified answers table.
+                const inchargeAnswers = yield prisma_1.prisma.appraisalReviewAnswer.findMany({
+                    where: { appraisalFormId: appraisal.id, level: "INCHARGE" },
+                });
+                previousValues = {
+                    inchargeAnswers,
+                    inchargeOverallScore: appraisal.inchargeOverallScore,
+                    inchargeOverallComments: appraisal.inchargeOverallComments,
+                };
+            }
             else if (editReq.requestType === "MANAGER") {
                 const managerData = yield prisma_1.prisma.managerAppraisal.findUnique({ where: { appraisalFormId: appraisal.id } });
                 previousValues = { managerAppraisal: managerData };
@@ -554,7 +607,12 @@ const respondEditRequest = (req, res) => __awaiter(void 0, void 0, void 0, funct
                 const mgmtData = yield prisma_1.prisma.managementAppraisal.findUnique({ where: { appraisalFormId: appraisal.id } });
                 previousValues = { managementAppraisal: mgmtData };
             }
-            const editTypeMap = { SELF: "SELF_APPRAISAL", MANAGER: "MANAGER_APPRAISAL", MANAGEMENT: "MANAGEMENT_APPRAISAL" };
+            const editTypeMap = {
+                SELF: "SELF_APPRAISAL",
+                INCHARGE: "INCHARGE_APPRAISAL",
+                MANAGER: "MANAGER_APPRAISAL",
+                MANAGEMENT: "MANAGEMENT_APPRAISAL",
+            };
             yield prisma_1.prisma.appraisalEditHistory.create({
                 data: {
                     appraisalFormId: appraisal.id,
@@ -569,6 +627,9 @@ const respondEditRequest = (req, res) => __awaiter(void 0, void 0, void 0, funct
             const clearData = { status: "PENDING_FILL" };
             if (editReq.requestType === "SELF") {
                 clearData.selfAppraisalSubmittedAt = null;
+            }
+            else if (editReq.requestType === "INCHARGE") {
+                clearData.inchargeAppraisalSubmittedAt = null;
             }
             else if (editReq.requestType === "MANAGER") {
                 clearData.managerAppraisalSubmittedAt = null;
@@ -623,6 +684,9 @@ const getAppraisalDetail = (req, res) => __awaiter(void 0, void 0, void 0, funct
                 selfAnswers: { include: { question: true }, orderBy: { question: { displayOrder: "asc" } } },
                 managerReview: true,
                 managementReview: true,
+                // Unified review answers from the new dynamic form (In-charge / Manager
+                // / Management). Frontend filters by `level` as needed.
+                reviewAnswers: { include: { question: true }, orderBy: { question: { displayOrder: "asc" } } },
                 hrReview: true,
                 editRequests: { orderBy: { requestedAt: "desc" } },
                 editHistory: { orderBy: { editedAt: "desc" } },
@@ -667,6 +731,330 @@ const getEditHistory = (req, res) => __awaiter(void 0, void 0, void 0, function*
     }
 });
 exports.getEditHistory = getEditHistory;
+/**
+ * POST /api/appraisals/:id/reassign-manager
+ * HR override: reassign the manager on an open appraisal. Blocked once the
+ * manager has already submitted (use the edit-request flow for that case).
+ * Body: { newManagerId: number, reason?: string }
+ */
+const reassignAppraisalManager = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const appraisalId = Number(req.params.id);
+        const { newManagerId, reason } = req.body;
+        const editedBy = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        if (!appraisalId || !newManagerId) {
+            return res.status(400).json({ error: "appraisalId and newManagerId are required" });
+        }
+        const appraisal = yield prisma_1.prisma.appraisalForm.findUnique({
+            where: { id: appraisalId },
+            include: { employee: { select: { firstName: true, lastName: true } } },
+        });
+        if (!appraisal)
+            return res.status(404).json({ error: "Appraisal not found" });
+        if (appraisal.managerAppraisalSubmittedAt) {
+            return res.status(400).json({
+                error: "Manager has already submitted this appraisal. Use the edit-request flow.",
+            });
+        }
+        if (appraisal.managerId === Number(newManagerId)) {
+            return res.status(400).json({ error: "That employee is already the appraisal's manager." });
+        }
+        const newMgr = yield prisma_1.prisma.employee.findUnique({
+            where: { id: Number(newManagerId) },
+            select: { id: true, firstName: true, lastName: true },
+        });
+        if (!newMgr)
+            return res.status(404).json({ error: "New manager not found" });
+        const oldManagerId = appraisal.managerId;
+        yield prisma_1.prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            yield tx.appraisalForm.update({
+                where: { id: appraisalId },
+                data: { managerId: Number(newManagerId) },
+            });
+            yield tx.appraisalEditHistory.create({
+                data: {
+                    appraisalFormId: appraisalId,
+                    editedBy: editedBy !== null && editedBy !== void 0 ? editedBy : Number(newManagerId), // fall back so the FK is satisfied
+                    editType: "MANAGER_REASSIGN",
+                    previousValues: { managerId: oldManagerId },
+                    newValues: { managerId: Number(newManagerId) },
+                    editReason: reason || null,
+                },
+            });
+        }));
+        const empName = `${appraisal.employee.firstName} ${appraisal.employee.lastName}`.trim();
+        const cycleLabel = appraisal.cycle ? ` (${appraisal.cycle})` : "";
+        yield (0, notifications_controller_1.createNotification)(Number(newManagerId), `You have been assigned as the appraiser for ${empName}${cycleLabel}. Please complete the manager review.`);
+        if (oldManagerId) {
+            yield (0, notifications_controller_1.createNotification)(oldManagerId, `The appraisal for ${empName}${cycleLabel} has been reassigned to another manager.`);
+        }
+        return res.json({ success: true, appraisalId, oldManagerId, newManagerId: Number(newManagerId) });
+    }
+    catch (e) {
+        console.error("reassignAppraisalManager error:", e);
+        return res.status(500).json({ error: e.message || "Failed to reassign manager" });
+    }
+});
+exports.reassignAppraisalManager = reassignAppraisalManager;
+const REVIEW_LEVELS = ["INCHARGE", "MANAGER", "MANAGEMENT"];
+const isReviewLevel = (v) => typeof v === "string" && REVIEW_LEVELS.includes(v);
+/** Normalise the `levels` field (Json) to a string array, defaulting to all. */
+const normaliseLevels = (raw) => {
+    if (Array.isArray(raw)) {
+        const arr = raw.filter(isReviewLevel);
+        return arr.length ? arr : [...REVIEW_LEVELS];
+    }
+    return [...REVIEW_LEVELS];
+};
+/**
+ * GET /review-questions?level=INCHARGE|MANAGER|MANAGEMENT&includeInactive=true
+ * Lists master review questions. When `level` is provided, only questions
+ * whose `levels` array includes that level are returned.
+ */
+const listReviewQuestions = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const level = req.query.level;
+        const includeInactive = req.query.includeInactive === "true";
+        const where = includeInactive ? {} : { isActive: true };
+        const all = yield prisma_1.prisma.appraisalReviewQuestion.findMany({
+            where,
+            orderBy: [{ displayOrder: "asc" }, { id: "asc" }],
+        });
+        const filtered = level
+            ? all.filter((q) => normaliseLevels(q.levels).includes(level))
+            : all;
+        return res.json(filtered.map((q) => (Object.assign(Object.assign({}, q), { levels: normaliseLevels(q.levels) }))));
+    }
+    catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+exports.listReviewQuestions = listReviewQuestions;
+/** POST /review-questions — create a master question. */
+const createReviewQuestion = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { title, description, prompts, aboveAverage, average, belowAverage, category, section, levels, displayOrder, isActive, } = req.body || {};
+        if (!title || typeof title !== "string" || !title.trim()) {
+            return res.status(400).json({ error: "title is required" });
+        }
+        const normalisedLevels = Array.isArray(levels) && levels.length
+            ? levels.filter(isReviewLevel)
+            : [...REVIEW_LEVELS];
+        const q = yield prisma_1.prisma.appraisalReviewQuestion.create({
+            data: {
+                title: title.trim(),
+                description: description !== null && description !== void 0 ? description : null,
+                prompts: Array.isArray(prompts) ? prompts : null,
+                aboveAverage: aboveAverage !== null && aboveAverage !== void 0 ? aboveAverage : null,
+                average: average !== null && average !== void 0 ? average : null,
+                belowAverage: belowAverage !== null && belowAverage !== void 0 ? belowAverage : null,
+                category: category !== null && category !== void 0 ? category : null,
+                section: section !== null && section !== void 0 ? section : null,
+                levels: normalisedLevels,
+                displayOrder: typeof displayOrder === "number" ? displayOrder : 0,
+                isActive: typeof isActive === "boolean" ? isActive : true,
+            },
+        });
+        return res.json(Object.assign(Object.assign({}, q), { levels: normaliseLevels(q.levels) }));
+    }
+    catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+exports.createReviewQuestion = createReviewQuestion;
+/** PATCH /review-questions/:id — update a master question. */
+const updateReviewQuestion = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const id = Number(req.params.id);
+        const { title, description, prompts, aboveAverage, average, belowAverage, category, section, levels, displayOrder, isActive, } = req.body || {};
+        const data = {};
+        if (title !== undefined)
+            data.title = String(title).trim();
+        if (description !== undefined)
+            data.description = description;
+        if (prompts !== undefined)
+            data.prompts = Array.isArray(prompts) ? prompts : null;
+        if (aboveAverage !== undefined)
+            data.aboveAverage = aboveAverage;
+        if (average !== undefined)
+            data.average = average;
+        if (belowAverage !== undefined)
+            data.belowAverage = belowAverage;
+        if (category !== undefined)
+            data.category = category;
+        if (section !== undefined)
+            data.section = section;
+        if (levels !== undefined) {
+            const arr = Array.isArray(levels) ? levels.filter(isReviewLevel) : [];
+            data.levels = (arr.length ? arr : [...REVIEW_LEVELS]);
+        }
+        if (displayOrder !== undefined)
+            data.displayOrder = Number(displayOrder);
+        if (isActive !== undefined)
+            data.isActive = !!isActive;
+        const q = yield prisma_1.prisma.appraisalReviewQuestion.update({ where: { id }, data });
+        return res.json(Object.assign(Object.assign({}, q), { levels: normaliseLevels(q.levels) }));
+    }
+    catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+exports.updateReviewQuestion = updateReviewQuestion;
+/** PATCH /review-questions/:id/toggle — flip the isActive flag. */
+const toggleReviewQuestion = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const id = Number(req.params.id);
+        const current = yield prisma_1.prisma.appraisalReviewQuestion.findUnique({ where: { id } });
+        if (!current)
+            return res.status(404).json({ error: "Question not found" });
+        const q = yield prisma_1.prisma.appraisalReviewQuestion.update({
+            where: { id },
+            data: { isActive: !current.isActive },
+        });
+        return res.json(Object.assign(Object.assign({}, q), { levels: normaliseLevels(q.levels) }));
+    }
+    catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+exports.toggleReviewQuestion = toggleReviewQuestion;
+/**
+ * DELETE /review-questions/:id — hard delete. If answers reference this
+ * question we deactivate instead, to keep the audit trail.
+ */
+const deleteReviewQuestion = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const id = Number(req.params.id);
+        const referenced = yield prisma_1.prisma.appraisalReviewAnswer.count({ where: { questionId: id } });
+        if (referenced > 0) {
+            const q = yield prisma_1.prisma.appraisalReviewQuestion.update({
+                where: { id }, data: { isActive: false },
+            });
+            return res.json({ deactivated: true, question: Object.assign(Object.assign({}, q), { levels: normaliseLevels(q.levels) }) });
+        }
+        yield prisma_1.prisma.appraisalReviewQuestion.delete({ where: { id } });
+        return res.json({ deleted: true });
+    }
+    catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+exports.deleteReviewQuestion = deleteReviewQuestion;
+// ═══════════════════════════════════════════════════════════════════════════════
+// IN-CHARGE: SUBMIT REVIEW
+// ═══════════════════════════════════════════════════════════════════════════════
+/**
+ * Persist an array of review answers for one (appraisal, level) bucket.
+ * Used by the new In-charge / Manager / Management review flow.
+ */
+const saveReviewAnswers = (appraisalId, level, answers) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d;
+    for (const a of answers || []) {
+        if (!(a === null || a === void 0 ? void 0 : a.questionId))
+            continue;
+        yield prisma_1.prisma.appraisalReviewAnswer.upsert({
+            where: {
+                appraisalFormId_questionId_level: {
+                    appraisalFormId: appraisalId,
+                    questionId: Number(a.questionId),
+                    level,
+                },
+            },
+            create: {
+                appraisalFormId: appraisalId,
+                questionId: Number(a.questionId),
+                level,
+                rating: (_a = a.rating) !== null && _a !== void 0 ? _a : null,
+                comments: (_b = a.comments) !== null && _b !== void 0 ? _b : null,
+            },
+            update: {
+                rating: (_c = a.rating) !== null && _c !== void 0 ? _c : null,
+                comments: (_d = a.comments) !== null && _d !== void 0 ? _d : null,
+            },
+        });
+    }
+});
+/**
+ * POST /:id/incharge-appraisal
+ * Body: { answers: [{questionId, rating, comments}], overallScore?, comments?, recommendations?, isDraft? }
+ * Authorized: the appraisal's in-charge only.
+ */
+const submitInchargeAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
+    try {
+        const id = Number(req.params.id);
+        const { answers, overallScore, comments, isDraft } = req.body || {};
+        const callerEmpId = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const appraisal = yield prisma_1.prisma.appraisalForm.findUnique({
+            where: { id },
+            include: { employee: { select: { departmentId: true, firstName: true, lastName: true, inchargeId: true } } },
+        });
+        if (!appraisal)
+            return res.status(404).json({ error: "Appraisal not found" });
+        // Fall back to the employee's current in-charge for appraisals created
+        // before the snapshot field existed. Snapshot it now so subsequent calls
+        // (and the table display) are consistent.
+        const effectiveInchargeId = (_e = (_c = appraisal.inchargeId) !== null && _c !== void 0 ? _c : (_d = appraisal.employee) === null || _d === void 0 ? void 0 : _d.inchargeId) !== null && _e !== void 0 ? _e : null;
+        if (!effectiveInchargeId) {
+            return res.status(400).json({ error: "This appraisal has no in-charge assigned" });
+        }
+        if (callerEmpId && Number(callerEmpId) !== effectiveInchargeId) {
+            return res.status(403).json({ error: "Only the assigned in-charge can submit this review" });
+        }
+        if (!appraisal.inchargeId) {
+            yield prisma_1.prisma.appraisalForm.update({
+                where: { id },
+                data: { inchargeId: effectiveInchargeId },
+            });
+        }
+        if (appraisal.inchargeAppraisalSubmittedAt) {
+            return res.status(400).json({ error: "In-charge review already submitted" });
+        }
+        if (!["PENDING_FILL", "SELF_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
+            return res.status(400).json({ error: "In-charge review cannot be submitted at this stage" });
+        }
+        if (!Array.isArray(answers)) {
+            return res.status(400).json({ error: "answers array is required" });
+        }
+        yield saveReviewAnswers(id, "INCHARGE", answers);
+        // Persist In-charge's supplementary summary (score + comments) on both
+        // draft and submit. We DON'T touch appraisal.overallScore — that's the
+        // final score the manager owns.
+        const inchargeOverallScore = typeof overallScore === "number" ? overallScore : null;
+        const inchargeOverallComments = typeof comments === "string" && comments.trim() ? comments : null;
+        // Save the overall fields on every call (draft + submit) so resume-from-
+        // draft works. The submittedAt timestamp is only set on the final submit.
+        yield prisma_1.prisma.appraisalForm.update({
+            where: { id },
+            data: { inchargeOverallScore, inchargeOverallComments },
+        });
+        if (!isDraft) {
+            // If self + manager + management are already done, the in-charge is the
+            // last gate → advance to HR_REVIEW. Otherwise stay PENDING_FILL.
+            const selfDone = !!appraisal.selfAppraisalSubmittedAt;
+            const managerDone = !!appraisal.managerAppraisalSubmittedAt;
+            const managementDone = !!appraisal.managementAppraisalSubmittedAt;
+            const newStatus = selfDone && managerDone && managementDone ? "HR_REVIEW" : appraisal.status;
+            yield prisma_1.prisma.appraisalForm.update({
+                where: { id },
+                data: Object.assign({ inchargeAppraisalSubmittedAt: new Date() }, (newStatus !== appraisal.status ? { status: newStatus } : {})),
+            });
+            // Notify the manager that it's their turn.
+            const empName = `${(_g = (_f = appraisal.employee) === null || _f === void 0 ? void 0 : _f.firstName) !== null && _g !== void 0 ? _g : ""} ${(_j = (_h = appraisal.employee) === null || _h === void 0 ? void 0 : _h.lastName) !== null && _j !== void 0 ? _j : ""}`.trim();
+            if (appraisal.managerId) {
+                yield (0, notifications_controller_1.createNotification)(appraisal.managerId, `In-charge review submitted for ${empName} (${appraisal.cycle}). Please complete your manager review.`);
+            }
+            yield notifyHRTeam((_l = (_k = appraisal.employee) === null || _k === void 0 ? void 0 : _k.departmentId) !== null && _l !== void 0 ? _l : 0, `In-charge review submitted for ${empName} (${appraisal.cycle}).`);
+        }
+        return res.json({ message: isDraft ? "In-charge review saved as draft" : "In-charge review submitted" });
+    }
+    catch (e) {
+        console.error("submitInchargeAppraisal error:", e);
+        return res.status(500).json({ error: e.message });
+    }
+});
+exports.submitInchargeAppraisal = submitInchargeAppraisal;
 // ═══════════════════════════════════════════════════════════════════════════════
 // CRON: AUTO-CREATE APPRAISAL AT 11 MONTHS
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -44,7 +44,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
-var _a, _b, _c, _d, _e, _f;
+var _a, _b, _c, _d, _e, _f, _g, _h, _j;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initNoticePeriodSchedular = exports.generateClearanceCertificate = void 0;
 exports.createResignation = createResignation;
@@ -1350,10 +1350,10 @@ function generateClearancePdf(input) {
     });
 }
 const FTP_CONFIG = {
-    host: "srv680.main-hosting.eu", // Your FTP hostname
-    user: "u948610439.hrproindia.in", // Your FTP username
-    password: "Bsrenuk@1993", // Your FTP password
-    secure: false // Set to true if using FTPS
+    host: (_g = process.env.FTP_HOST) !== null && _g !== void 0 ? _g : "",
+    user: (_h = process.env.FTP_USER) !== null && _h !== void 0 ? _h : "",
+    password: (_j = process.env.FTP_PASS) !== null && _j !== void 0 ? _j : "",
+    secure: process.env.FTP_SECURE === "true"
 };
 function uploadToFTP(localFilePath, remoteFilePath) {
     return __awaiter(this, void 0, void 0, function* () {

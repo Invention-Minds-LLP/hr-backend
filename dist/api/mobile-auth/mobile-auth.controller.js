@@ -19,8 +19,9 @@ const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const crypto_1 = __importDefault(require("crypto"));
 const sms_controller_1 = require("../sms/sms.controller");
 const sendEmailOtp_1 = require("../../utils/sendEmailOtp");
+const attendanceMode_1 = require("../../lib/attendanceMode");
 const mobilePhoneInit = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c;
     const { phone } = req.body;
     // ✅ PLAY STORE REVIEW AUTO LOGIN
     if (process.env.PLAY_REVIEW_MODE === 'true' &&
@@ -75,7 +76,7 @@ const mobilePhoneInit = (req, res) => __awaiter(void 0, void 0, void 0, function
             designation: ((_c = employee.designation) === null || _c === void 0 ? void 0 : _c.name) || '',
             photoUrl: employee.photoUrl || null,
             roleId: employee.roleId,
-            attendanceMode: (_e = (_d = employee.Branch) === null || _d === void 0 ? void 0 : _d.attendanceMode) !== null && _e !== void 0 ? _e : 'MOBILE'
+            attendanceMode: (0, attendanceMode_1.resolveAttendanceMode)(employee)
         });
     }
     const employee = yield prisma_1.prisma.employee.findFirst({ where: { phone } });
@@ -211,7 +212,7 @@ const mobileEmailVerify = (req, res) => __awaiter(void 0, void 0, void 0, functi
 });
 exports.mobileEmailVerify = mobileEmailVerify;
 const mobileFinalizeLogin = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d;
+    var _a, _b;
     const { sessionId, employeeCode, bloodGroup } = req.body;
     const session = yield prisma_1.prisma.mobileAuthSession.findUnique({
         where: { id: sessionId },
@@ -266,7 +267,7 @@ const mobileFinalizeLogin = (req, res) => __awaiter(void 0, void 0, void 0, func
         photoUrl: employee.photoUrl || null,
         roleId: employee.roleId,
         gender: employee.gender || '',
-        attendanceMode: (_d = (_c = employee.Branch) === null || _c === void 0 ? void 0 : _c.attendanceMode) !== null && _d !== void 0 ? _d : 'MOBILE'
+        attendanceMode: (0, attendanceMode_1.resolveAttendanceMode)(employee)
     });
 });
 exports.mobileFinalizeLogin = mobileFinalizeLogin;

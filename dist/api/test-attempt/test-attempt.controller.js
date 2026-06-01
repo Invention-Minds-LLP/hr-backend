@@ -11,6 +11,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
+var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.evaluateAttempt = exports.reviewAttempt = exports.getAllAttempts = exports.submitAttemptDescriptive = void 0;
 exports.getAssignedTest = getAssignedTest;
@@ -25,10 +26,10 @@ const basic_ftp_1 = require("basic-ftp");
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
 const FTP_CONFIG = {
-    host: "srv680.main-hosting.eu", // Your FTP hostname
-    user: "u948610439.hrproindia.in", // Your FTP username
-    password: "Bsrenuk@1993", // Your FTP password
-    secure: false // Set to true if using FTPS
+    host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
+    user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
+    password: (_c = process.env.FTP_PASS) !== null && _c !== void 0 ? _c : "",
+    secure: process.env.FTP_SECURE === "true"
 };
 const TEMP_FOLDER = path_1.default.join(__dirname, '../temp'); // absolute path
 if (!fs_1.default.existsSync(TEMP_FOLDER)) {

@@ -13,6 +13,7 @@ exports.getPunchHistory = exports.getTodayPunches = exports.recordPunch = void 0
 const prisma_1 = require("../../lib/prisma");
 const comOff_service_1 = require("../../services/comOff.service");
 const biometric_controller_1 = require("../biometric/biometric.controller");
+const attendanceMode_1 = require("../../lib/attendanceMode");
 /**
  * POST /api/mobile-attendance/punch
  * Record a check-in or check-out punch with photo + GPS
@@ -28,6 +29,12 @@ const recordPunch = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
         }
         if (!["OFFICE", "CLIENT_VISIT", "FIELD_WORK"].includes(activityType)) {
             return res.status(400).json({ message: "activityType must be OFFICE, CLIENT_VISIT, or FIELD_WORK" });
+        }
+        // Mobile attendance is only allowed when the employee's effective mode is
+        // MOBILE or BOTH. BIOMETRIC-only employees cannot punch from the app.
+        const mode = yield (0, attendanceMode_1.getEffectiveAttendanceMode)(Number(employeeId));
+        if (mode === "BIOMETRIC") {
+            return res.status(403).json({ message: "Mobile attendance is not enabled for this employee." });
         }
         const now = new Date();
         // Create the punch record
@@ -57,9 +64,12 @@ const recordPunch = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                         date: todayStart,
                         status: "Present",
                         checkIn: now,
+                        source: "MOBILE",
                     },
                 });
             }
+            // If the day already exists and was written by biometric, leave it —
+            // biometric wins for BOTH-mode employees.
             // Mirror biometric: cancel any approved/pending leave for today
             try {
                 yield (0, biometric_controller_1.autoCancelLeaveIfPresent)(Number(employeeId), todayStart);
@@ -75,10 +85,15 @@ const recordPunch = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 console.error("[mobile-punch] runOtAndLateLoginForDate (CHECK_IN) failed", e);
             }
         }
-        // If this is a CHECK_OUT, update the daily Attendance record's checkOut
+        // If this is a CHECK_OUT, update the daily Attendance record's checkOut.
+        // Skip when biometric owns the day (biometric wins for BOTH-mode employees).
         if (type === "CHECK_OUT") {
             yield prisma_1.prisma.attendance.updateMany({
-                where: { employeeId: Number(employeeId), date: todayStart },
+                where: {
+                    employeeId: Number(employeeId),
+                    date: todayStart,
+                    NOT: { source: "BIOMETRIC" },
+                },
                 data: { checkOut: now },
             });
             // Mirror biometric downstream: comp-off + late/OT (TEMP_DEPT_SHIFT path)

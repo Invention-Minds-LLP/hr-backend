@@ -18,10 +18,21 @@ exports.submitSurvey = submitSurvey;
 exports.getSurveyResults = getSurveyResults;
 exports.getAllSurveys = getAllSurveys;
 exports.getDraftSurveys = getDraftSurveys;
+exports.getAnalyticsSummary = getAnalyticsSummary;
+exports.getAnalyticsBySection = getAnalyticsBySection;
+exports.getAnalyticsByQuestion = getAnalyticsByQuestion;
+exports.getAnalyticsByDepartment = getAnalyticsByDepartment;
+exports.getAnalyticsQuestionDrilldown = getAnalyticsQuestionDrilldown;
+exports.getAnalyticsAtRisk = getAnalyticsAtRisk;
+exports.getAnalyticsDemographics = getAnalyticsDemographics;
+exports.getAnalyticsScatter = getAnalyticsScatter;
+exports.getAnalyticsPending = getAnalyticsPending;
+exports.sendPendingReminders = sendPendingReminders;
 // import { PrismaClient } from "@prisma/client";
 const node_cron_1 = __importDefault(require("node-cron"));
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+const notifications_controller_1 = require("../notifications/notifications.controller");
 // ================== GET QUESTIONS ==================
 function getSurveyQuestions(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
@@ -74,10 +85,15 @@ function getSurveyQuestions(req, res) {
 // }
 function submitSurvey(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b;
         try {
-            const { surveyId, employeeId, answers } = req.body;
-            if (!surveyId || !employeeId || !Array.isArray(answers) || !answers.length) {
-                return res.status(400).json({ error: "surveyId, employeeId and answers[] are required" });
+            const { surveyId, answers } = req.body;
+            const tokenEmpId = Number((_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : 0);
+            if (!tokenEmpId) {
+                return res.status(401).json({ error: "Unauthorized" });
+            }
+            if (!surveyId || !Array.isArray(answers) || !answers.length) {
+                return res.status(400).json({ error: "surveyId and answers[] are required" });
             }
             // 1️⃣ Check if survey exists and is still DRAFT
             const survey = yield prisma_1.prisma.employeeSurvey.findUnique({
@@ -85,6 +101,10 @@ function submitSurvey(req, res) {
             });
             if (!survey) {
                 return res.status(404).json({ error: "Survey not found" });
+            }
+            // Ownership: only the survey's own employee may submit it.
+            if (survey.employeeId !== tokenEmpId) {
+                return res.status(403).json({ error: "Forbidden: survey does not belong to you" });
             }
             if (survey.status !== "DRAFT") {
                 return res.status(400).json({ error: "Survey already submitted" });
@@ -107,7 +127,7 @@ function submitSurvey(req, res) {
             try {
                 // get employee details
                 const emp = yield prisma_1.prisma.employee.findUnique({
-                    where: { id: Number(employeeId) },
+                    where: { id: tokenEmpId },
                     select: {
                         firstName: true,
                         lastName: true,
@@ -118,9 +138,9 @@ function submitSurvey(req, res) {
                     const hrIds = yield getHRIds();
                     const empName = `${emp.firstName} ${emp.lastName}`;
                     const message = `Survey submitted by ${empName} (${emp.employeeCode}).`;
-                    // for (const hrId of hrIds) {
-                    //   await createNotification(hrId, message);
-                    // }
+                    for (const hrId of hrIds) {
+                        yield (0, notifications_controller_1.createNotification)(hrId, message);
+                    }
                 }
             }
             catch (err) {
@@ -236,8 +256,11 @@ const initSurveyScheduler = () => {
                 const nextSurveyDate = new Date(referenceDate);
                 nextSurveyDate.setMonth(nextSurveyDate.getMonth() + 6);
                 const nextSurveyStr = nextSurveyDate.toISOString().split("T")[0];
-                // 4️⃣ If today == nextSurveyDate (by date only, not time)
-                if (todayStr === nextSurveyStr) {
+                // 4️⃣ If the next survey date is today or already past (catch-up for
+                //    missed cron runs). Safe against duplicates: once a DRAFT exists,
+                //    lastSurvey.date is that DRAFT's date, so the next due is 6 months
+                //    out and the condition won't re-fire.
+                if (nextSurveyStr <= todayStr) {
                     yield prisma_1.prisma.employeeSurvey.create({
                         data: {
                             employeeId: emp.id,
@@ -250,7 +273,7 @@ const initSurveyScheduler = () => {
                     try {
                         const empName = `${emp.firstName} ${emp.lastName}`;
                         const message = `${empName}, your 6-month employee survey is now available. Please complete it at your earliest convenience.`;
-                        // await createNotification(emp.id, message);
+                        yield (0, notifications_controller_1.createNotification)(emp.id, message);
                     }
                     catch (err) {
                         console.error(`Notification failed for employee ${emp.id}:`, err);
@@ -314,5 +337,660 @@ function getHRIds() {
             select: { id: true }
         });
         return hrs.map(h => h.id);
+    });
+}
+const SECTION_TITLES = {
+    A: "Job Satisfaction",
+    B: "Satisfaction with the Work",
+    C: "Coworker Performance / Cooperation",
+    D: "Pay and Benefits Satisfaction",
+    E: "Promotions / Career Advancement",
+    F: "Supervisory Consideration",
+    G: "Supervisory Promotion of Team Work",
+    H: "Communication",
+    I: "Productivity / Efficiency",
+    J: "Training & Development",
+    K: "Concern for Patient Care / Customer Service",
+    L: "Strategy / Mission",
+};
+function scoreOf(answer) {
+    switch (answer) {
+        case "Fully Agree": return 4;
+        case "Mostly Agree": return 3;
+        case "Mostly Disagree": return 2;
+        case "Strongly Disagree": return 1;
+        default: return 0;
+    }
+}
+function emptyCounts() {
+    return { fullyAgree: 0, mostlyAgree: 0, mostlyDisagree: 0, stronglyDisagree: 0 };
+}
+function bump(c, answer) {
+    switch (answer) {
+        case "Fully Agree":
+            c.fullyAgree++;
+            break;
+        case "Mostly Agree":
+            c.mostlyAgree++;
+            break;
+        case "Mostly Disagree":
+            c.mostlyDisagree++;
+            break;
+        case "Strongly Disagree":
+            c.stronglyDisagree++;
+            break;
+    }
+}
+function totalsFrom(c) {
+    const total = c.fullyAgree + c.mostlyAgree + c.mostlyDisagree + c.stronglyDisagree;
+    const positive = c.fullyAgree + c.mostlyAgree;
+    const negative = c.mostlyDisagree + c.stronglyDisagree;
+    const sum = c.fullyAgree * 4 + c.mostlyAgree * 3 + c.mostlyDisagree * 2 + c.stronglyDisagree * 1;
+    const avgScore = total ? +(sum / total).toFixed(2) : 0;
+    const pctPositive = total ? +((positive / total) * 100).toFixed(1) : 0;
+    const pctNegative = total ? +((negative / total) * 100).toFixed(1) : 0;
+    return { total, positive, negative, avgScore, pctPositive, pctNegative };
+}
+/**
+ * Parse the shared filter query string. All filters are optional.
+ * Filters apply to surveys joined through their employee.
+ */
+function parseFilters(req) {
+    const q = req.query;
+    const from = q.from ? new Date(String(q.from)) : undefined;
+    const to = q.to ? new Date(String(q.to)) : undefined;
+    const departmentId = q.departmentId ? Number(q.departmentId) : undefined;
+    const departmentIds = q.departmentIds
+        ? String(q.departmentIds).split(",").map((s) => Number(s.trim())).filter(Boolean)
+        : undefined;
+    const gender = q.gender ? String(q.gender).toUpperCase() : undefined;
+    const designationId = q.designationId ? Number(q.designationId) : undefined;
+    const sections = q.sections
+        ? String(q.sections).split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+    return { from, to, departmentId, departmentIds, gender, designationId, sections };
+}
+function buildSurveyWhere(f) {
+    var _a;
+    const employeeWhere = {};
+    if (f.departmentId)
+        employeeWhere.departmentId = f.departmentId;
+    if ((_a = f.departmentIds) === null || _a === void 0 ? void 0 : _a.length)
+        employeeWhere.departmentId = { in: f.departmentIds };
+    if (f.gender)
+        employeeWhere.gender = f.gender;
+    if (f.designationId)
+        employeeWhere.designationId = f.designationId;
+    const where = { status: "SUBMITTED" };
+    if (f.from || f.to) {
+        where.submittedAt = {};
+        if (f.from)
+            where.submittedAt.gte = f.from;
+        if (f.to)
+            where.submittedAt.lte = f.to;
+    }
+    if (Object.keys(employeeWhere).length)
+        where.employee = employeeWhere;
+    return where;
+}
+/**
+ * Master fetch: pulls submitted responses in the filter window, joined to
+ * question + employee + department + designation. Every analytics endpoint
+ * below derives its numbers from this slice. Trade-off: simpler code, one
+ * round-trip per endpoint; not suitable for very large orgs without paging.
+ */
+function fetchResponses(req) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        const filters = parseFilters(req);
+        const surveyWhere = buildSurveyWhere(filters);
+        const responses = yield prisma_1.prisma.surveyResponse.findMany({
+            where: Object.assign({ survey: surveyWhere }, (((_a = filters.sections) === null || _a === void 0 ? void 0 : _a.length) ? { question: { section: { in: filters.sections } } } : {})),
+            include: {
+                question: true,
+                survey: {
+                    include: {
+                        employee: {
+                            include: {
+                                Department: { select: { id: true, name: true } },
+                                designation: { select: { id: true, name: true } },
+                            },
+                        },
+                    },
+                },
+            },
+        });
+        return { responses, filters };
+    });
+}
+// ==================== SUMMARY ====================
+function getAnalyticsSummary(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const filters = parseFilters(req);
+            const surveyWhere = buildSurveyWhere(filters);
+            const [submitted, drafts, responses] = yield Promise.all([
+                prisma_1.prisma.employeeSurvey.count({ where: surveyWhere }),
+                prisma_1.prisma.employeeSurvey.count({ where: Object.assign(Object.assign({}, surveyWhere), { status: "DRAFT" }) }),
+                prisma_1.prisma.surveyResponse.findMany({
+                    where: { survey: surveyWhere },
+                    select: { answer: true },
+                }),
+            ]);
+            const counts = emptyCounts();
+            for (const r of responses)
+                bump(counts, r.answer);
+            const totals = totalsFrom(counts);
+            // Previous-cycle delta: compare to the prior equal-length window.
+            let prevAvgScore = null;
+            let scoreDelta = null;
+            if (filters.from && filters.to) {
+                const span = filters.to.getTime() - filters.from.getTime();
+                const prevTo = new Date(filters.from.getTime() - 1);
+                const prevFrom = new Date(prevTo.getTime() - span);
+                const prevResponses = yield prisma_1.prisma.surveyResponse.findMany({
+                    where: {
+                        survey: Object.assign({ status: "SUBMITTED", submittedAt: { gte: prevFrom, lte: prevTo } }, (surveyWhere.employee ? { employee: surveyWhere.employee } : {})),
+                    },
+                    select: { answer: true },
+                });
+                const pc = emptyCounts();
+                for (const r of prevResponses)
+                    bump(pc, r.answer);
+                const pt = totalsFrom(pc);
+                prevAvgScore = pt.avgScore;
+                scoreDelta = +(totals.avgScore - pt.avgScore).toFixed(2);
+            }
+            const totalSurveys = submitted + drafts;
+            const completionPct = totalSurveys ? +((submitted / totalSurveys) * 100).toFixed(1) : 0;
+            return res.json({
+                totalSubmitted: submitted,
+                totalDrafts: drafts,
+                completionPct,
+                avgScore: totals.avgScore,
+                pctPositive: totals.pctPositive,
+                pctNegative: totals.pctNegative,
+                distribution: counts,
+                prevAvgScore,
+                scoreDelta,
+            });
+        }
+        catch (e) {
+            console.error("getAnalyticsSummary error:", e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || "Failed to compute summary" });
+        }
+    });
+}
+// ==================== BY SECTION ====================
+function getAnalyticsBySection(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const { responses } = yield fetchResponses(req);
+            const bySection = {};
+            for (const r of responses) {
+                const sec = r.question.section;
+                if (!bySection[sec])
+                    bySection[sec] = emptyCounts();
+                bump(bySection[sec], r.answer);
+            }
+            const out = Object.keys(bySection)
+                .sort()
+                .map((section) => {
+                var _a;
+                const t = totalsFrom(bySection[section]);
+                return Object.assign({ section, title: (_a = SECTION_TITLES[section]) !== null && _a !== void 0 ? _a : section, counts: bySection[section] }, t);
+            });
+            return res.json(out);
+        }
+        catch (e) {
+            console.error("getAnalyticsBySection error:", e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || "Failed to compute sections" });
+        }
+    });
+}
+// ==================== BY QUESTION ====================
+function getAnalyticsByQuestion(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const { responses } = yield fetchResponses(req);
+            const byQ = {};
+            for (const r of responses) {
+                const id = r.questionId;
+                if (!byQ[id])
+                    byQ[id] = { question: r.question, counts: emptyCounts() };
+                bump(byQ[id].counts, r.answer);
+            }
+            const out = Object.values(byQ)
+                .map(({ question, counts }) => {
+                var _a;
+                const t = totalsFrom(counts);
+                return Object.assign({ id: question.id, section: question.section, sectionTitle: (_a = SECTION_TITLES[question.section]) !== null && _a !== void 0 ? _a : question.section, questionText: question.questionText, orderNo: question.orderNo, counts }, t);
+            })
+                .sort((a, b) => a.section === b.section ? a.orderNo - b.orderNo : a.section.localeCompare(b.section));
+            return res.json(out);
+        }
+        catch (e) {
+            console.error("getAnalyticsByQuestion error:", e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || "Failed to compute questions" });
+        }
+    });
+}
+// ==================== BY DEPARTMENT ====================
+function getAnalyticsByDepartment(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c, _d, _e;
+        try {
+            const { responses, filters } = yield fetchResponses(req);
+            const byDept = new Map();
+            for (const r of responses) {
+                const emp = r.survey.employee;
+                const deptId = (_b = (_a = emp.Department) === null || _a === void 0 ? void 0 : _a.id) !== null && _b !== void 0 ? _b : emp.departmentId;
+                const deptName = (_d = (_c = emp.Department) === null || _c === void 0 ? void 0 : _c.name) !== null && _d !== void 0 ? _d : "—";
+                if (!byDept.has(deptId)) {
+                    byDept.set(deptId, {
+                        departmentId: deptId,
+                        name: deptName,
+                        counts: emptyCounts(),
+                        perQuestion: new Map(),
+                        perSection: {},
+                        submittedEmployees: new Set(),
+                    });
+                }
+                const b = byDept.get(deptId);
+                bump(b.counts, r.answer);
+                if (!b.perQuestion.has(r.questionId)) {
+                    b.perQuestion.set(r.questionId, { question: r.question, counts: emptyCounts() });
+                }
+                bump(b.perQuestion.get(r.questionId).counts, r.answer);
+                const sec = r.question.section;
+                if (!b.perSection[sec])
+                    b.perSection[sec] = emptyCounts();
+                bump(b.perSection[sec], r.answer);
+                b.submittedEmployees.add(emp.id);
+            }
+            // Department headcounts for response rate. Honour the same employee filters.
+            const empWhere = { employmentStatus: "ACTIVE" };
+            if (filters.gender)
+                empWhere.gender = filters.gender;
+            if (filters.designationId)
+                empWhere.designationId = filters.designationId;
+            if (filters.departmentId)
+                empWhere.departmentId = filters.departmentId;
+            if ((_e = filters.departmentIds) === null || _e === void 0 ? void 0 : _e.length)
+                empWhere.departmentId = { in: filters.departmentIds };
+            const headcounts = yield prisma_1.prisma.employee.groupBy({
+                by: ["departmentId"],
+                where: empWhere,
+                _count: { _all: true },
+            });
+            const headMap = new Map(headcounts.map((h) => [h.departmentId, h._count._all]));
+            const departments = Array.from(byDept.values()).map((b) => {
+                var _a;
+                const t = totalsFrom(b.counts);
+                const topConcerns = Array.from(b.perQuestion.values())
+                    .map(({ question, counts }) => (Object.assign({ question, counts }, totalsFrom(counts))))
+                    .filter((q) => q.total > 0)
+                    .sort((a, b) => a.avgScore - b.avgScore)
+                    .slice(0, 3)
+                    .map((q) => ({
+                    questionId: q.question.id,
+                    section: q.question.section,
+                    questionText: q.question.questionText,
+                    avgScore: q.avgScore,
+                    pctNegative: q.pctNegative,
+                }));
+                const headcount = (_a = headMap.get(b.departmentId)) !== null && _a !== void 0 ? _a : 0;
+                const responseRate = headcount
+                    ? +((b.submittedEmployees.size / headcount) * 100).toFixed(1)
+                    : 0;
+                return Object.assign(Object.assign({ departmentId: b.departmentId, name: b.name, headcount, submittedEmployees: b.submittedEmployees.size, responseRate }, t), { topConcerns });
+            });
+            // Heatmap rows: dept × section avg score
+            const heatmap = Array.from(byDept.values()).map((b) => {
+                const sectionScores = {};
+                for (const sec of Object.keys(b.perSection)) {
+                    sectionScores[sec] = totalsFrom(b.perSection[sec]).avgScore;
+                }
+                return { departmentId: b.departmentId, name: b.name, sectionScores };
+            });
+            return res.json({
+                departments: departments.sort((a, b) => b.avgScore - a.avgScore),
+                heatmap,
+                sections: Object.keys(SECTION_TITLES).map((k) => ({ section: k, title: SECTION_TITLES[k] })),
+            });
+        }
+        catch (e) {
+            console.error("getAnalyticsByDepartment error:", e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || "Failed to compute departments" });
+        }
+    });
+}
+// ==================== QUESTION DRILL-DOWN ====================
+function getAnalyticsQuestionDrilldown(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j;
+        try {
+            const questionId = Number(req.params.questionId);
+            if (Number.isNaN(questionId)) {
+                return res.status(400).json({ error: "Invalid questionId" });
+            }
+            const filters = parseFilters(req);
+            const surveyWhere = buildSurveyWhere(filters);
+            const question = yield prisma_1.prisma.surveyQuestion.findUnique({ where: { id: questionId } });
+            if (!question)
+                return res.status(404).json({ error: "Question not found" });
+            const rows = yield prisma_1.prisma.surveyResponse.findMany({
+                where: { questionId, survey: surveyWhere },
+                include: {
+                    survey: {
+                        include: {
+                            employee: {
+                                select: {
+                                    id: true,
+                                    firstName: true,
+                                    lastName: true,
+                                    employeeCode: true,
+                                    photoUrl: true,
+                                    gender: true,
+                                    Department: { select: { id: true, name: true } },
+                                    designation: { select: { id: true, name: true } },
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+            const counts = emptyCounts();
+            const byOption = {
+                "Fully Agree": [],
+                "Mostly Agree": [],
+                "Mostly Disagree": [],
+                "Strongly Disagree": [],
+            };
+            const deptMap = new Map();
+            for (const r of rows) {
+                bump(counts, r.answer);
+                const emp = r.survey.employee;
+                if (byOption[r.answer]) {
+                    byOption[r.answer].push({
+                        id: emp.id,
+                        name: `${emp.firstName} ${emp.lastName}`,
+                        employeeCode: emp.employeeCode,
+                        photoUrl: emp.photoUrl,
+                        gender: emp.gender,
+                        department: (_b = (_a = emp.Department) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : "—",
+                        designation: (_d = (_c = emp.designation) === null || _c === void 0 ? void 0 : _c.name) !== null && _d !== void 0 ? _d : "—",
+                    });
+                }
+                const did = (_f = (_e = emp.Department) === null || _e === void 0 ? void 0 : _e.id) !== null && _f !== void 0 ? _f : -1;
+                if (!deptMap.has(did)) {
+                    deptMap.set(did, { name: (_h = (_g = emp.Department) === null || _g === void 0 ? void 0 : _g.name) !== null && _h !== void 0 ? _h : "—", counts: emptyCounts() });
+                }
+                bump(deptMap.get(did).counts, r.answer);
+            }
+            const byDepartment = Array.from(deptMap.entries()).map(([id, v]) => (Object.assign({ departmentId: id, name: v.name, counts: v.counts }, totalsFrom(v.counts))));
+            return res.json(Object.assign(Object.assign({ question: {
+                    id: question.id,
+                    section: question.section,
+                    sectionTitle: (_j = SECTION_TITLES[question.section]) !== null && _j !== void 0 ? _j : question.section,
+                    questionText: question.questionText,
+                }, counts }, totalsFrom(counts)), { byOption, byDepartment: byDepartment.sort((a, b) => a.avgScore - b.avgScore) }));
+        }
+        catch (e) {
+            console.error("getAnalyticsQuestionDrilldown error:", e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || "Failed to compute drilldown" });
+        }
+    });
+}
+// ==================== AT-RISK EMPLOYEES ====================
+function getAnalyticsAtRisk(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const { responses } = yield fetchResponses(req);
+            const byEmp = new Map();
+            for (const r of responses) {
+                const emp = r.survey.employee;
+                if (!byEmp.has(emp.id))
+                    byEmp.set(emp.id, { employee: emp, sum: 0, n: 0, answers: [] });
+                const b = byEmp.get(emp.id);
+                const s = scoreOf(r.answer);
+                b.sum += s;
+                b.n += 1;
+                b.answers.push({
+                    questionText: r.question.questionText,
+                    section: r.question.section,
+                    answer: r.answer,
+                    score: s,
+                });
+            }
+            const result = Array.from(byEmp.values())
+                .map(({ employee, sum, n, answers }) => {
+                var _a, _b, _c, _d;
+                return ({
+                    employeeId: employee.id,
+                    name: `${employee.firstName} ${employee.lastName}`,
+                    employeeCode: employee.employeeCode,
+                    photoUrl: employee.photoUrl,
+                    gender: employee.gender,
+                    department: (_b = (_a = employee.Department) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : "—",
+                    designation: (_d = (_c = employee.designation) === null || _c === void 0 ? void 0 : _c.name) !== null && _d !== void 0 ? _d : "—",
+                    avgScore: n ? +(sum / n).toFixed(2) : 0,
+                    responses: n,
+                    lowestAnswers: answers.sort((a, b) => a.score - b.score).slice(0, 3),
+                });
+            })
+                .filter((e) => e.avgScore > 0 && e.avgScore <= 2)
+                .sort((a, b) => a.avgScore - b.avgScore);
+            return res.json(result);
+        }
+        catch (e) {
+            console.error("getAnalyticsAtRisk error:", e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || "Failed to compute at-risk" });
+        }
+    });
+}
+// ==================== DEMOGRAPHIC CUTS ====================
+function getAnalyticsDemographics(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        try {
+            const { responses } = yield fetchResponses(req);
+            const byGender = {};
+            const byDesignation = {};
+            const tenureBuckets = {
+                "<1y": { sum: 0, n: 0, employees: new Set() },
+                "1-3y": { sum: 0, n: 0, employees: new Set() },
+                "3-5y": { sum: 0, n: 0, employees: new Set() },
+                ">5y": { sum: 0, n: 0, employees: new Set() },
+            };
+            const now = new Date();
+            for (const r of responses) {
+                const emp = r.survey.employee;
+                const s = scoreOf(r.answer);
+                const g = emp.gender || "OTHER";
+                if (!byGender[g])
+                    byGender[g] = { sum: 0, n: 0, employees: new Set() };
+                byGender[g].sum += s;
+                byGender[g].n += 1;
+                byGender[g].employees.add(emp.id);
+                const d = ((_a = emp.designation) === null || _a === void 0 ? void 0 : _a.name) || "—";
+                if (!byDesignation[d])
+                    byDesignation[d] = { sum: 0, n: 0, employees: new Set() };
+                byDesignation[d].sum += s;
+                byDesignation[d].n += 1;
+                byDesignation[d].employees.add(emp.id);
+                const years = emp.dateOfJoining
+                    ? (now.getTime() - new Date(emp.dateOfJoining).getTime()) / (365.25 * 24 * 3600 * 1000)
+                    : 0;
+                const bucket = years < 1 ? "<1y" : years < 3 ? "1-3y" : years < 5 ? "3-5y" : ">5y";
+                tenureBuckets[bucket].sum += s;
+                tenureBuckets[bucket].n += 1;
+                tenureBuckets[bucket].employees.add(emp.id);
+            }
+            const flat = (rec) => Object.entries(rec).map(([key, v]) => ({
+                key,
+                employees: v.employees.size,
+                responses: v.n,
+                avgScore: v.n ? +(v.sum / v.n).toFixed(2) : 0,
+            }));
+            return res.json({
+                byGender: flat(byGender),
+                byDesignation: flat(byDesignation).sort((a, b) => b.employees - a.employees),
+                byTenure: ["<1y", "1-3y", "3-5y", ">5y"].map((k) => ({
+                    key: k,
+                    employees: tenureBuckets[k].employees.size,
+                    responses: tenureBuckets[k].n,
+                    avgScore: tenureBuckets[k].n
+                        ? +(tenureBuckets[k].sum / tenureBuckets[k].n).toFixed(2)
+                        : 0,
+                })),
+            });
+        }
+        catch (e) {
+            console.error("getAnalyticsDemographics error:", e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || "Failed to compute demographics" });
+        }
+    });
+}
+// ==================== SCATTER: TENURE vs SCORE ====================
+function getAnalyticsScatter(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const { responses } = yield fetchResponses(req);
+            const byEmp = new Map();
+            for (const r of responses) {
+                const emp = r.survey.employee;
+                if (!byEmp.has(emp.id))
+                    byEmp.set(emp.id, { employee: emp, sum: 0, n: 0 });
+                const b = byEmp.get(emp.id);
+                b.sum += scoreOf(r.answer);
+                b.n += 1;
+            }
+            const now = new Date();
+            const points = Array.from(byEmp.values()).map(({ employee, sum, n }) => {
+                var _a, _b, _c, _d;
+                const years = employee.dateOfJoining
+                    ? +((now.getTime() - new Date(employee.dateOfJoining).getTime()) /
+                        (365.25 * 24 * 3600 * 1000)).toFixed(2)
+                    : 0;
+                return {
+                    employeeId: employee.id,
+                    name: `${employee.firstName} ${employee.lastName}`,
+                    employeeCode: employee.employeeCode,
+                    department: (_b = (_a = employee.Department) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : "—",
+                    departmentId: (_d = (_c = employee.Department) === null || _c === void 0 ? void 0 : _c.id) !== null && _d !== void 0 ? _d : null,
+                    tenureYears: years,
+                    avgScore: n ? +(sum / n).toFixed(2) : 0,
+                };
+            });
+            return res.json(points);
+        }
+        catch (e) {
+            console.error("getAnalyticsScatter error:", e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || "Failed to compute scatter" });
+        }
+    });
+}
+// ==================== PENDING DRAFTS ====================
+function getAnalyticsPending(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b;
+        try {
+            const filters = parseFilters(req);
+            const employeeWhere = {};
+            if (filters.departmentId)
+                employeeWhere.departmentId = filters.departmentId;
+            if ((_a = filters.departmentIds) === null || _a === void 0 ? void 0 : _a.length)
+                employeeWhere.departmentId = { in: filters.departmentIds };
+            if (filters.gender)
+                employeeWhere.gender = filters.gender;
+            if (filters.designationId)
+                employeeWhere.designationId = filters.designationId;
+            const drafts = yield prisma_1.prisma.employeeSurvey.findMany({
+                where: Object.assign({ status: "DRAFT" }, (Object.keys(employeeWhere).length ? { employee: employeeWhere } : {})),
+                include: {
+                    employee: {
+                        select: {
+                            id: true,
+                            firstName: true,
+                            lastName: true,
+                            employeeCode: true,
+                            photoUrl: true,
+                            gender: true,
+                            Department: { select: { id: true, name: true } },
+                            designation: { select: { id: true, name: true } },
+                        },
+                    },
+                },
+                orderBy: { date: "asc" },
+            });
+            const now = Date.now();
+            const items = drafts.map((d) => {
+                var _a, _b, _c, _d, _e, _f;
+                const created = new Date(d.date).getTime();
+                const daysOverdue = Math.max(0, Math.floor((now - created) / (24 * 3600 * 1000)));
+                return {
+                    surveyId: d.id,
+                    employeeId: d.employee.id,
+                    name: `${d.employee.firstName} ${d.employee.lastName}`,
+                    employeeCode: d.employee.employeeCode,
+                    photoUrl: d.employee.photoUrl,
+                    gender: d.employee.gender,
+                    department: (_b = (_a = d.employee.Department) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : "—",
+                    departmentId: (_d = (_c = d.employee.Department) === null || _c === void 0 ? void 0 : _c.id) !== null && _d !== void 0 ? _d : null,
+                    designation: (_f = (_e = d.employee.designation) === null || _e === void 0 ? void 0 : _e.name) !== null && _f !== void 0 ? _f : "—",
+                    createdAt: d.date,
+                    daysOverdue,
+                };
+            });
+            const byDept = new Map();
+            for (const it of items)
+                byDept.set(it.department, ((_b = byDept.get(it.department)) !== null && _b !== void 0 ? _b : 0) + 1);
+            const perDepartment = Array.from(byDept.entries())
+                .map(([name, count]) => ({ name, count }))
+                .sort((a, b) => b.count - a.count);
+            return res.json({ items, perDepartment, total: items.length });
+        }
+        catch (e) {
+            console.error("getAnalyticsPending error:", e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || "Failed to fetch pending" });
+        }
+    });
+}
+// ==================== SEND REMINDERS ====================
+function sendPendingReminders(req, res) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        try {
+            const surveyIds = Array.isArray((_a = req.body) === null || _a === void 0 ? void 0 : _a.surveyIds)
+                ? req.body.surveyIds.map((n) => Number(n)).filter(Boolean)
+                : [];
+            if (!surveyIds.length) {
+                return res.status(400).json({ error: "surveyIds[] required" });
+            }
+            const drafts = yield prisma_1.prisma.employeeSurvey.findMany({
+                where: { id: { in: surveyIds }, status: "DRAFT" },
+                include: {
+                    employee: { select: { id: true, firstName: true, lastName: true } },
+                },
+            });
+            let notified = 0;
+            for (const d of drafts) {
+                const empName = `${d.employee.firstName} ${d.employee.lastName}`;
+                const msg = `${empName}, reminder: your employee survey is still pending. Please complete it at your earliest convenience.`;
+                try {
+                    yield (0, notifications_controller_1.createNotification)(d.employee.id, msg);
+                    notified++;
+                }
+                catch (err) {
+                    console.error(`Reminder notify failed for ${d.employee.id}:`, err);
+                }
+            }
+            return res.json({ requested: surveyIds.length, notified });
+        }
+        catch (e) {
+            console.error("sendPendingReminders error:", e);
+            return res.status(500).json({ error: (e === null || e === void 0 ? void 0 : e.message) || "Failed to send reminders" });
+        }
     });
 }

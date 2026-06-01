@@ -13,12 +13,27 @@ exports.deleteDepartment = exports.updateDepartment = exports.getDepartmentById 
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+// Whitelist the planning/appraisal master fields a Department write may set.
+const planningData = (body) => {
+    const data = {};
+    if (body.otBudgetHoursPerMonth !== undefined)
+        data.otBudgetHoursPerMonth = Math.max(0, Number(body.otBudgetHoursPerMonth) || 0);
+    if (body.minDailyStrength !== undefined)
+        data.minDailyStrength = Math.max(0, Number(body.minDailyStrength) || 0);
+    if (body.appraisalCycleBasis !== undefined)
+        data.appraisalCycleBasis = body.appraisalCycleBasis === "CALENDAR" ? "CALENDAR" : "DOJ";
+    if (body.appraisalPeriodMonths !== undefined)
+        data.appraisalPeriodMonths = [6, 12].includes(Number(body.appraisalPeriodMonths)) ? Number(body.appraisalPeriodMonths) : 12;
+    if (body.appraisalCalendarMonth !== undefined)
+        data.appraisalCalendarMonth = body.appraisalCalendarMonth ? Math.min(12, Math.max(1, Number(body.appraisalCalendarMonth))) : null;
+    return data;
+};
 // CREATE Department
 const createDepartment = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { name } = req.body;
         const department = yield prisma_1.prisma.department.create({
-            data: { name }
+            data: Object.assign({ name }, planningData(req.body))
         });
         res.status(201).json(department);
     }
@@ -62,7 +77,7 @@ const updateDepartment = (req, res) => __awaiter(void 0, void 0, void 0, functio
         const { name } = req.body;
         const updatedDepartment = yield prisma_1.prisma.department.update({
             where: { id: Number(id) },
-            data: { name }
+            data: Object.assign(Object.assign({}, (name !== undefined ? { name } : {})), planningData(req.body))
         });
         res.json(updatedDepartment);
     }

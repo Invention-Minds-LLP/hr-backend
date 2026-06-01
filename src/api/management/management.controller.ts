@@ -987,7 +987,7 @@ export const getActivePIPs = async (_req: Request, res: Response) => {
 };
 
 // ═══════════════════════════════════════════════════════════
-// SECTION 5 — ATTRITION TREND (last 12 months)
+// SECTION 5 — ATTRITION TREND (last 3 months)
 // GET /api/management/attrition-trend
 // ═══════════════════════════════════════════════════════════
 export const getAttritionTrend = async (_req: Request, res: Response) => {
@@ -999,7 +999,7 @@ export const getAttritionTrend = async (_req: Request, res: Response) => {
       resignations: any[];   // employees who resigned this month (for drill-down)
     }[] = [];
 
-    for (let i = 11; i >= 0; i--) {
+    for (let i = 2; i >= 0; i--) {
       const d = subMonths(new Date(), i);
       const mStart = startOfMonth(d);
       const mEnd = endOfMonth(d);
@@ -1563,7 +1563,7 @@ export const getDeptSnapshot = async (_req: Request, res: Response) => {
         headcount: v.headcount,
         present: v.present,
         attendancePct: v.headcount > 0 ? Math.round((v.present / v.headcount) * 100) : 0,
-        avgScore: v.scores.length > 0 ? Math.round(v.scores.reduce((s, x) => s + x, 0) / v.scores.length) : null,
+        avgScore: v.scores.length > 0 ? Math.round((v.scores.reduce((s, x) => s + x, 0) / v.scores.length) * 10) / 10 : null,
         pips: v.pips,
       }))
       .sort((a, b) => b.headcount - a.headcount);
@@ -1785,6 +1785,7 @@ export const getPerformanceDistribution = async (_req: Request, res: Response) =
         overallScore: true,
         status: true,
         cycle: true,
+        finalDecision: true,
         employee: {
           select: {
             firstName: true,
@@ -1805,12 +1806,12 @@ export const getPerformanceDistribution = async (_req: Request, res: Response) =
       }
     }
 
-    // Score bands
+    // Score bands — overallScore is on a 0–10 scale (mean of 0–10 ratings).
     const bands = [
-      { label: "Excellent (80–100)", min: 80, max: 100, color: "#22c55e" },
-      { label: "Good (60–79)", min: 60, max: 79, color: "#60a5fa" },
-      { label: "Average (40–59)", min: 40, max: 59, color: "#f59e0b" },
-      { label: "Below Avg (<40)", min: 0, max: 39, color: "#ef4444" },
+      { label: "Excellent (8–10)", min: 8, max: 10, color: "#22c55e" },
+      { label: "Good (6–7.9)", min: 6, max: 7.9, color: "#60a5fa" },
+      { label: "Average (4–5.9)", min: 4, max: 5.9, color: "#f59e0b" },
+      { label: "Below Avg (<4)", min: 0, max: 3.9, color: "#ef4444" },
     ];
 
     const distribution = bands.map((b) => ({
@@ -1829,6 +1830,7 @@ export const getPerformanceDistribution = async (_req: Request, res: Response) =
       designation: a.employee?.designation?.name || "—",
       score: a.overallScore,
       band: bandFor(a.overallScore ?? 0),
+      finalDecision: a.finalDecision ?? "",
     }));
 
     // Appraisal completion: employees with a submitted/completed appraisal vs total active
@@ -1846,7 +1848,7 @@ export const getPerformanceDistribution = async (_req: Request, res: Response) =
     const deptAvg = Array.from(deptScores.entries())
       .map(([dept, scores]) => ({
         dept,
-        avg: Math.round(scores.reduce((s, x) => s + x, 0) / scores.length),
+        avg: Math.round((scores.reduce((s, x) => s + x, 0) / scores.length) * 10) / 10,
         count: scores.length,
       }))
       .sort((a, b) => b.avg - a.avg);
@@ -2609,7 +2611,7 @@ export const getRecruitmentOps = async (_req: Request, res: Response) => {
   try {
     const todayStart = startOfDayIST();
     const todayEnd = endOfDayIST();
-    const funnelSince = subMonths(new Date(), 12);
+    const funnelSince = subMonths(new Date(), 3);
 
     const [interviewsToday, offersToday, joinedToday, openJobs, applications] = await Promise.all([
       // #7 — today's recruitment activity
@@ -2625,7 +2627,7 @@ export const getRecruitmentOps = async (_req: Request, res: Response) => {
           _count: { select: { applications: true } },
         },
       }),
-      // #8 — designation (job-title) funnel over the last 12 months
+      // #8 — designation (job-title) funnel over the last 3 months
       prisma.application.findMany({
         where: { createdAt: { gte: funnelSince } },
         select: {
@@ -2799,11 +2801,13 @@ export const setDeptPlanning = async (req: Request, res: Response) => {
 // averages, and score-band distribution (with per-band employee list).
 // GET /api/management/appraisal-scores
 // ═══════════════════════════════════════════════════════════
+// Appraisal overallScore is stored on a 0–10 scale (mean of per-question
+// ratings, each 0–10), so bands are expressed out of 10.
 function scoreBand(s: number): { label: string; color: string } {
-  if (s >= 80) return { label: "Excellent (80–100)", color: "#22c55e" };
-  if (s >= 60) return { label: "Good (60–79)", color: "#60a5fa" };
-  if (s >= 40) return { label: "Average (40–59)", color: "#f59e0b" };
-  return { label: "Below (0–39)", color: "#ef4444" };
+  if (s >= 8) return { label: "Excellent (8–10)", color: "#22c55e" };
+  if (s >= 6) return { label: "Good (6–7.9)", color: "#60a5fa" };
+  if (s >= 4) return { label: "Average (4–5.9)", color: "#f59e0b" };
+  return { label: "Below (0–3.9)", color: "#ef4444" };
 }
 export const getAppraisalScores = async (_req: Request, res: Response) => {
   try {
@@ -2828,7 +2832,7 @@ export const getAppraisalScores = async (_req: Request, res: Response) => {
       }
     }
 
-    const bandOrder = ["Excellent (80–100)", "Good (60–79)", "Average (40–59)", "Below (0–39)"];
+    const bandOrder = ["Excellent (8–10)", "Good (6–7.9)", "Average (4–5.9)", "Below (0–3.9)"];
     const bandMap = new Map<string, { label: string; color: string; count: number; employees: any[] }>();
     const deptScores = new Map<string, number[]>();
     let appraised = 0;
@@ -2846,8 +2850,9 @@ export const getAppraisalScores = async (_req: Request, res: Response) => {
         name: `${e.firstName ?? ""} ${e.lastName ?? ""}`.trim(),
         employeeCode: e.employeeCode ?? "",
         dept, designation: e.designation?.name ?? "—",
-        score: Math.round(rec.score), cycle: rec.cycle,
+        score: Math.round(rec.score * 10) / 10, cycle: rec.cycle,
         appraisedOn: format(new Date(rec.date), "dd MMM yyyy"),
+        finalDecision: rec.decision ?? "",
       });
       if (!deptScores.has(dept)) deptScores.set(dept, []);
       deptScores.get(dept)!.push(rec.score);
@@ -2857,7 +2862,7 @@ export const getAppraisalScores = async (_req: Request, res: Response) => {
       .map((label) => bandMap.get(label))
       .filter((b): b is NonNullable<typeof b> => !!b);
     const deptAvg = Array.from(deptScores.entries())
-      .map(([dept, arr]) => ({ dept, avg: Math.round(arr.reduce((s, x) => s + x, 0) / arr.length), count: arr.length }))
+      .map(([dept, arr]) => ({ dept, avg: Math.round((arr.reduce((s, x) => s + x, 0) / arr.length) * 10) / 10, count: arr.length }))
       .sort((a, b) => b.avg - a.avg);
 
     res.json({

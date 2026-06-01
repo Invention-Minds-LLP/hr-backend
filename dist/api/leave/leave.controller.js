@@ -76,7 +76,7 @@ const path_1 = __importDefault(require("path"));
 const FTP_CONFIG = {
     host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
     user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
-    password: (_c = process.env.FTP_PASSWORD) !== null && _c !== void 0 ? _c : "",
+    password: (_c = process.env.FTP_PASS) !== null && _c !== void 0 ? _c : "",
     secure: false,
 };
 const LEAVE_APPLY_TEMPLATE_ID = "890321";

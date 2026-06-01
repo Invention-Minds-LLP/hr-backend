@@ -35,6 +35,7 @@ router.post('/request', authMiddleware_1.authenticateToken, shift_controller_1.r
 router.post('/monthly-request', authMiddleware_1.authenticateToken, shift_controller_1.requestMonthlyShift);
 router.post('/monthly/status', authMiddleware_1.authenticateToken, shift_controller_1.getMonthlyShiftStatus);
 router.get('/daily-range', authMiddleware_1.authenticateToken, shift_controller_1.getEmployeeDailyShiftsForRange);
+router.post('/generate-fixed-month', authMiddleware_1.authenticateToken, shift_controller_1.generateFixedShiftsForMonthHandler);
 router.post('/approve/:id', authMiddleware_1.authenticateToken, shift_controller_1.approveShiftChange);
 router.get('/approvals/inbox', authMiddleware_1.authenticateToken, shift_controller_1.listApprovalsInbox);
 router.get('/approvals/mine', authMiddleware_1.authenticateToken, shift_controller_1.listMyShiftRequests);

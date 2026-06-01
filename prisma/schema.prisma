@@ -1696,12 +1696,14 @@ model PerformanceFormTemplate {
   id           Int                   @id @default(autoincrement())
   departmentId Int
   cycle        String
+  title        String                @default("Default")
   createdAt    DateTime              @default(now())
   updatedAt    DateTime              @default(now()) @updatedAt
   department   Department            @relation(fields: [departmentId], references: [id])
   questions    PerformanceQuestion[]
+  summaries    PerformanceSummary[]
 
-  @@unique([departmentId, cycle])
+  @@index([departmentId, cycle])
 }
 
 model PerformanceQuestion {
@@ -1735,6 +1737,7 @@ model PerformanceResponse {
   employee     Employee            @relation(fields: [employeeId], references: [id])
   question     PerformanceQuestion @relation(fields: [questionId], references: [id])
 
+  @@unique([employeeId, cycle, period, questionId])
   @@index([employeeId])
   @@index([departmentId])
   @@index([cycle])
@@ -1742,23 +1745,27 @@ model PerformanceResponse {
 }
 
 model PerformanceSummary {
-  id            Int              @id @default(autoincrement())
+  id            Int                      @id @default(autoincrement())
   employeeId    Int
   departmentId  Int
   cycle         String
   period        EvaluationPeriod
+  templateId    Int?
   marksScored   Int?
   overallPerf   String?
-  employeeSig   String?          @db.Text
-  supervisorSig String?          @db.Text
-  hodSig        String?          @db.Text
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @default(now()) @updatedAt
-  department    Department       @relation(fields: [departmentId], references: [id])
-  employee      Employee         @relation(fields: [employeeId], references: [id])
+  employeeSig   String?                  @db.Text
+  supervisorSig String?                  @db.Text
+  hodSig        String?                  @db.Text
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @default(now()) @updatedAt
+  department    Department               @relation(fields: [departmentId], references: [id])
+  employee      Employee                 @relation(fields: [employeeId], references: [id])
+  template      PerformanceFormTemplate? @relation(fields: [templateId], references: [id])
 
+  @@unique([employeeId, cycle, period, templateId])
   @@index([employeeId, cycle])
   @@index([departmentId])
+  @@index([templateId])
 }
 
 model PerformanceFinalReview {

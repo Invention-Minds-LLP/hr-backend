@@ -44,6 +44,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
+var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createInternship = createInternship;
 exports.listInternships = listInternships;
@@ -68,10 +69,10 @@ const COMPANY_NAME = 'RASHTROTTHANA HOSPITAL'; // <- put your real company name
 const COMPANY_LOGO_URL = 'https://hrproindia.in/documents/Rashtrotthana-logo.jpeg'; // <- put your real logo URL
 const COMPANY_TAGLINE = 'People • Process • Performance';
 const FTP_CONFIG = {
-    host: "srv680.main-hosting.eu", // Your FTP hostname
-    user: "u948610439.hrproindia.in", // Your FTP username
-    password: "Bsrenuk@1993", // Your FTP password
-    secure: false // Set to true if using FTPS
+    host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
+    user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
+    password: (_c = process.env.FTP_PASS) !== null && _c !== void 0 ? _c : "",
+    secure: process.env.FTP_SECURE === "true"
 };
 const prisma = new client_1.PrismaClient();
 const toDate = (v) => (v ? new Date(v) : undefined);

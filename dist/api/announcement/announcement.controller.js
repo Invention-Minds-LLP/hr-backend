@@ -11,6 +11,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
+var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createAnnouncement = createAnnouncement;
 exports.ackAnnouncement = ackAnnouncement;
@@ -24,10 +25,10 @@ const multer_1 = __importDefault(require("multer"));
 const notifications_controller_1 = require("../notifications/notifications.controller");
 const prisma = new client_1.PrismaClient();
 const FTP_CONFIG = {
-    host: "srv680.main-hosting.eu",
-    user: "u948610439.hrproindia.in",
-    password: "Bsrenuk@1993",
-    secure: false
+    host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
+    user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
+    password: (_c = process.env.FTP_PASS) !== null && _c !== void 0 ? _c : "",
+    secure: process.env.FTP_SECURE === "true"
 };
 const upload = (0, multer_1.default)({ dest: 'uploads/' }); // temp folder
 function uploadToFTP(localFilePath, remoteFilePath) {

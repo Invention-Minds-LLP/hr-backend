@@ -21,6 +21,7 @@ const axios_1 = __importDefault(require("axios"));
 const client_1 = require("@prisma/client");
 const notifications_controller_1 = require("../notifications/notifications.controller");
 const comOff_service_1 = require("../../services/comOff.service");
+const attendanceMode_1 = require("../../lib/attendanceMode");
 const prisma = new client_1.PrismaClient();
 /* ---------------------------------
    COSEC CONFIG
@@ -242,11 +243,16 @@ function runBiometricSync(isFinalRun) {
             select: {
                 id: true,
                 employeeCode: true,
+                attendanceMode: true,
+                Branch: { select: { attendanceMode: true } },
             },
         });
         // Normalize employeeCode to uppercase so biometric userid matches regardless of case
-        // (e.g. DB "JMRH234" vs device sending "jmrh234")
-        const empMap = new Map(employees.map(e => [String(e.employeeCode).toUpperCase().trim(), e.id]));
+        // (e.g. DB "JMRH234" vs device sending "jmrh234").
+        // Skip MOBILE-only employees — their attendance comes from the app, not the device.
+        const empMap = new Map(employees
+            .filter(e => (0, attendanceMode_1.resolveAttendanceMode)(e) !== 'MOBILE')
+            .map(e => [String(e.employeeCode).toUpperCase().trim(), e.id]));
         // console.log(empMap)
         /* ======================================================
            PART 1: PROCESS TODAY'S BIOMETRIC (CHECK-IN)
@@ -316,11 +322,13 @@ function runBiometricSync(isFinalRun) {
                     checkIn,
                     checkOut,
                     status: finalStatus,
+                    source: 'BIOMETRIC',
                 },
                 update: {
                     checkIn,
                     checkOut,
                     status: finalStatus,
+                    source: 'BIOMETRIC',
                 },
             });
             // 🔑 Generate comp-off after attendance is finalized
@@ -828,8 +836,8 @@ function backfillEmployeeAttendance(employeeCode, fromDate, toDate) {
                 console.log(`   💾 Upserting attendance: status=${finalStatus}`);
                 const attendance = yield prisma.attendance.upsert({
                     where: { employeeId_date: { employeeId: employee.id, date: day } },
-                    create: { employeeId: employee.id, date: day, checkIn, checkOut, status: finalStatus },
-                    update: { checkIn, checkOut, status: finalStatus },
+                    create: { employeeId: employee.id, date: day, checkIn, checkOut, status: finalStatus, source: 'BIOMETRIC' },
+                    update: { checkIn, checkOut, status: finalStatus, source: 'BIOMETRIC' },
                 });
                 console.log(`   ✅ Attendance upserted id=${attendance.id}`);
                 yield (0, comOff_service_1.generateCompOffIfEligible)(attendance);
@@ -938,6 +946,64 @@ function notifyHRShiftSummary() {
         }
     });
 }
+/**
+ * For a SINGLE-DAY half-day leave, decide whether the employee's actual punch
+ * overlaps the half they took off. The day's shift is split at its midpoint
+ * (an 8-hour shift → 4 h + 4 h), giving a FIRST_HALF and a SECOND_HALF window.
+ *
+ *   true  → punch overlaps the leave half  → they worked when they should've
+ *           been on leave → the half-day leave should be auto-cancelled.
+ *   false → punch falls only in the OTHER half (e.g. applied SECOND_HALF but
+ *           logged in for the first half) → the half-day leave is legitimate
+ *           and must be kept.
+ *
+ * Shift times are stored as UTC instants and converted to IST wall-clock
+ * minutes (+5:30) so they line up with punch times, which are already IST
+ * wall-clock — making the comparison independent of the server timezone.
+ *
+ * If no shift is assigned for the day (or there's no check-in) we can't tell
+ * which half was worked, so we return `false` → DON'T cancel; the half-day
+ * leave is left untouched.
+ */
+function presentDuringLeaveHalf(employeeId, dayStart, dayEnd, session) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const assignment = yield prisma.shiftAssignment.findFirst({
+            where: { employeeId, date: { gte: dayStart, lte: dayEnd } },
+            include: { shift: true },
+        });
+        const shift = assignment === null || assignment === void 0 ? void 0 : assignment.shift;
+        const attendance = yield prisma.attendance.findFirst({
+            where: { employeeId, date: { gte: dayStart, lte: dayEnd } },
+            select: { checkIn: true, checkOut: true },
+        });
+        // No shift assigned for the day, or no check-in → we can't tell which half
+        // the employee actually worked, so DON'T cancel the half-day leave — ignore
+        // it and leave the leave untouched.
+        if (!shift || !(attendance === null || attendance === void 0 ? void 0 : attendance.checkIn))
+            return false;
+        const shiftStart = new Date(shift.startTime);
+        const shiftEnd = new Date(shift.endTime);
+        // Shift times are stored as UTC instants; convert to IST wall-clock minutes
+        // (+5:30) so they line up with punch times, which are already IST wall-clock.
+        const IST_OFFSET = 330;
+        const toIstMin = (d) => (((d.getUTCHours() * 60 + d.getUTCMinutes() + IST_OFFSET) % 1440) + 1440) % 1440;
+        const startMin = toIstMin(shiftStart);
+        let endMin = toIstMin(shiftEnd);
+        if (endMin <= startMin)
+            endMin += 1440; // overnight shift wraps past midnight
+        const midMin = (startMin + endMin) / 2;
+        const leaveStart = session === 'FIRST_HALF' ? startMin : midMin;
+        const leaveEnd = session === 'FIRST_HALF' ? midMin : endMin;
+        // Normalise punch minutes onto the same axis as the shift (handle wrap).
+        const norm = (m) => (m < startMin ? m + 1440 : m);
+        const workedStart = norm(attendance.checkIn.getHours() * 60 + attendance.checkIn.getMinutes());
+        const workedEnd = attendance.checkOut
+            ? norm(attendance.checkOut.getHours() * 60 + attendance.checkOut.getMinutes())
+            : workedStart;
+        // Half-open overlap between the worked window and the leave half.
+        return workedStart < leaveEnd && workedEnd > leaveStart;
+    });
+}
 /* ---------------------------------
    AUTO-CANCEL LEAVE IF PRESENT
 ---------------------------------- */
@@ -967,6 +1033,16 @@ function autoCancelLeaveIfPresent(employeeId, date) {
             });
             if (pendingLeave) {
                 const isSingle = isSameDay(pendingLeave.startDate, pendingLeave.endDate);
+                // Half-day leave: only cancel if the punch actually overlaps the half
+                // they took off. If they applied SECOND_HALF but logged in for the first
+                // half (or vice-versa), the leave is legitimate — leave it untouched.
+                if (isSingle && pendingLeave.isHalfDay && pendingLeave.halfDaySession) {
+                    const present = yield presentDuringLeaveHalf(employeeId, targetDate, dayEnd, pendingLeave.halfDaySession);
+                    if (!present) {
+                        console.log(`↩️  Kept PENDING half-day leave #${pendingLeave.id} — present only in the other half`);
+                        return;
+                    }
+                }
                 if (isSingle) {
                     yield prisma.leaveRequest.update({
                         where: { id: pendingLeave.id },
@@ -1036,6 +1112,17 @@ function autoCancelLeaveIfPresent(employeeId, date) {
             const isRH = leave.leaveType.name === 'RH';
             const isFirstDay = isSameDay(targetDate, leave.startDate);
             const isLastDay = isSameDay(targetDate, leave.endDate);
+            // Half-day leave: only auto-cancel (and restore balance) if the punch
+            // overlaps the half they took off. If they were present only in the other
+            // half — e.g. applied SECOND_HALF and logged in for the first half — the
+            // half-day leave stays valid and the balance is left as-is.
+            if (isHalfDay && leave.halfDaySession) {
+                const present = yield presentDuringLeaveHalf(employeeId, targetDate, dayEnd, leave.halfDaySession);
+                if (!present) {
+                    console.log(`↩️  Kept APPROVED half-day leave #${leave.id} — present only in the other half`);
+                    return;
+                }
+            }
             yield prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
                 var _a;
                 // ── Cancel / shrink / split the leave ──────────────────────────

@@ -12,9 +12,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getEmployeeWeeklyShiftsForMonth = exports.getApprovedWeekOffs = exports.getEmployeeDailyShiftsForRange = exports.getMonthlyShiftStatus = exports.requestMonthlyShift = exports.listEmployeeShiftRequests = exports.listMyShiftRequests = exports.listApprovalsInbox = exports.approveShiftChange = exports.requestShiftChange = exports.listManagerPatterns = exports.getManagerShiftTemplates = exports.getManagerEmployees = exports.assignFixed = exports.updateEmployeeShift = exports.listEmployeeShifts = exports.listShiftTemplates = exports.assignRotational = exports.addRotationItemsBulk = exports.addRotationItem = exports.createRotationPattern = exports.listRotationPatterns = exports.deleteShiftAssignment = exports.updateShiftAssignment = exports.getShiftAssignmentsByEmployee = exports.getShiftAssignments = exports.assignShift = exports.deleteShiftTemplate = exports.updateShiftTemplate = exports.getShiftTemplateById = exports.getShiftTemplates = exports.createShiftTemplate = void 0;
+exports.getEmployeeWeeklyShiftsForMonth = exports.getApprovedWeekOffs = exports.getEmployeeDailyShiftsForRange = exports.getMonthlyShiftStatus = exports.requestMonthlyShift = exports.listEmployeeShiftRequests = exports.listMyShiftRequests = exports.listApprovalsInbox = exports.approveShiftChange = exports.requestShiftChange = exports.listManagerPatterns = exports.getManagerShiftTemplates = exports.getManagerEmployees = exports.assignFixed = exports.updateEmployeeShift = exports.listEmployeeShifts = exports.generateFixedShiftsForMonthHandler = exports.listShiftTemplates = exports.assignRotational = exports.addRotationItemsBulk = exports.addRotationItem = exports.createRotationPattern = exports.listRotationPatterns = exports.deleteShiftAssignment = exports.updateShiftAssignment = exports.getShiftAssignmentsByEmployee = exports.getShiftAssignments = exports.assignShift = exports.deleteShiftTemplate = exports.updateShiftTemplate = exports.getShiftTemplateById = exports.getShiftTemplates = exports.createShiftTemplate = void 0;
 exports.startOfWeek = startOfWeek;
 exports.startShiftCron = startShiftCron;
+exports.generateFixedShiftsForMonth = generateFixedShiftsForMonth;
 exports.getRotationalShiftId = getRotationalShiftId;
 exports.getHRManagerId = getHRManagerId;
 exports.fmtDate = fmtDate;
@@ -598,7 +599,132 @@ function startShiftCron() {
             });
         }
     }));
+    /* =====================================================
+       MONTHLY — generate the WHOLE month for FIXED employees
+       Runs at 00:05 on the 1st so future dates in the month
+       already have ShiftAssignment rows (used by the leave
+       popup, calendars, etc.). Idempotent: existing rows
+       (manual overrides / today) are skipped.
+       ===================================================== */
+    node_cron_1.default.schedule('5 0 1 * *', () => __awaiter(this, void 0, void 0, function* () {
+        console.log('🗓️  Running monthly fixed-shift generation');
+        try {
+            const count = yield generateFixedShiftsForMonth(new Date());
+            console.log(`🗓️  Monthly fixed-shift generation created ${count} assignments`);
+        }
+        catch (e) {
+            console.error('Monthly fixed-shift generation failed:', e);
+        }
+    }));
+    // Also fill the current month immediately on boot (idempotent), so we don't
+    // have to wait until the 1st for future-date rows to exist.
+    generateFixedShiftsForMonth(new Date())
+        .then((n) => n && console.log(`🗓️  Startup fixed-shift fill created ${n} assignments`))
+        .catch((e) => console.error('Startup fixed-shift fill failed:', e));
 }
+/**
+ * Generate ShiftAssignment rows for every day of `baseDate`'s month for all
+ * ACTIVE / NOTICE_PERIOD employees on a FIXED shift. Existing rows (manual
+ * overrides or already-generated days) are left untouched via skipDuplicates.
+ * Returns the number of rows created.
+ */
+function generateFixedShiftsForMonth(baseDate) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        const year = baseDate.getFullYear();
+        const monthIdx = baseDate.getMonth(); // 0-based
+        const monthStart = new Date(year, monthIdx, 1);
+        monthStart.setHours(0, 0, 0, 0);
+        const nextMonthStart = new Date(year, monthIdx + 1, 1);
+        nextMonthStart.setHours(0, 0, 0, 0);
+        const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
+        const employees = yield prisma.employee.findMany({
+            where: {
+                employmentStatus: { in: ['ACTIVE', 'NOTICE_PERIOD'] },
+                EmployeeShiftSetting: { is: { mode: 'FIXED' } },
+            },
+            include: { EmployeeShiftSetting: true },
+        });
+        if (!employees.length)
+            return 0;
+        const empIds = employees.map((e) => e.id);
+        // There's no unique (employeeId, date) constraint, so skip existing rows
+        // manually to avoid duplicating today's row or any manual override.
+        const existing = yield prisma.shiftAssignment.findMany({
+            where: { employeeId: { in: empIds }, date: { gte: monthStart, lt: nextMonthStart } },
+            select: { employeeId: true, date: true },
+        });
+        const seen = new Set(existing.map((r) => `${r.employeeId}|${startOfDay(r.date).getTime()}`));
+        const rows = [];
+        for (const emp of employees) {
+            const shiftId = (_a = emp.EmployeeShiftSetting) === null || _a === void 0 ? void 0 : _a.fixedShiftId;
+            if (!shiftId)
+                continue;
+            for (let d = 1; d <= daysInMonth; d++) {
+                const date = new Date(year, monthIdx, d);
+                if (seen.has(`${emp.id}|${date.getTime()}`))
+                    continue;
+                rows.push({ employeeId: emp.id, shiftId, date });
+            }
+        }
+        if (!rows.length)
+            return 0;
+        const result = yield prisma.shiftAssignment.createMany({ data: rows });
+        return result.count;
+    });
+}
+/**
+ * POST /shifts/generate-fixed-month  (optional body/query: month 1-12, year)
+ * Manually generate the whole month's fixed-shift assignments on demand —
+ * useful for filling the remaining days of the current month without waiting
+ * for the 1st-of-month cron or a server restart. Idempotent (skips existing).
+ */
+const generateFixedShiftsForMonthHandler = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f;
+    try {
+        const month = Number((_b = (_a = req.body) === null || _a === void 0 ? void 0 : _a.month) !== null && _b !== void 0 ? _b : (_c = req.query) === null || _c === void 0 ? void 0 : _c.month); // 1-12
+        const year = Number((_e = (_d = req.body) === null || _d === void 0 ? void 0 : _d.year) !== null && _e !== void 0 ? _e : (_f = req.query) === null || _f === void 0 ? void 0 : _f.year);
+        let base;
+        if (month >= 1 && month <= 12 && year) {
+            base = new Date(year, month - 1, 1);
+        }
+        else {
+            base = new Date(); // current month
+        }
+        const created = yield generateFixedShiftsForMonth(base);
+        // Diagnostics — explains a `created: 0` result.
+        const fixedEmployees = yield prisma.employee.count({
+            where: {
+                employmentStatus: { in: ['ACTIVE', 'NOTICE_PERIOD'] },
+                EmployeeShiftSetting: { is: { mode: 'FIXED' } },
+            },
+        });
+        const fixedWithShift = yield prisma.employee.count({
+            where: {
+                employmentStatus: { in: ['ACTIVE', 'NOTICE_PERIOD'] },
+                EmployeeShiftSetting: { is: { mode: 'FIXED', fixedShiftId: { not: null } } },
+            },
+        });
+        const rotationalEmployees = yield prisma.employee.count({
+            where: {
+                employmentStatus: { in: ['ACTIVE', 'NOTICE_PERIOD'] },
+                EmployeeShiftSetting: { is: { mode: 'ROTATIONAL' } },
+            },
+        });
+        return res.json({
+            month: base.getMonth() + 1,
+            year: base.getFullYear(),
+            created,
+            diagnostics: { fixedEmployees, fixedWithShift, rotationalEmployees },
+            message: `Generated ${created} fixed-shift assignment(s) for ${base.getMonth() + 1}/${base.getFullYear()}.`,
+        });
+    }
+    catch (error) {
+        console.error('generateFixedShiftsForMonthHandler error:', error);
+        return res.status(500).json({ error: 'Failed to generate fixed-shift assignments' });
+    }
+});
+exports.generateFixedShiftsForMonthHandler = generateFixedShiftsForMonthHandler;
 // const DAY_MS = 24 * 60 * 60 * 1000;
 function getRotationalShiftId(patternId, startDate, targetDate) {
     return __awaiter(this, void 0, void 0, function* () {
@@ -1244,6 +1370,24 @@ function applyApprovedShift(approval) {
                 date: { gte: startOfDay(approval.startDate) }
             }
         });
+        // For FIXED changes, re-fill the rest of the start date's month so future
+        // dates keep their rows (the monthly cron will cover subsequent months).
+        if (approval.requestedMode === 'FIXED' && approval.fixedShiftId) {
+            const from = startOfDay(approval.startDate);
+            const daysInMonth = new Date(from.getFullYear(), from.getMonth() + 1, 0).getDate();
+            const rows = [];
+            for (let d = from.getDate(); d <= daysInMonth; d++) {
+                rows.push({
+                    employeeId: approval.employeeId,
+                    shiftId: approval.fixedShiftId,
+                    date: new Date(from.getFullYear(), from.getMonth(), d),
+                });
+            }
+            if (rows.length) {
+                // Rows in this range were just deleted above, so a plain insert is safe.
+                yield prisma.shiftAssignment.createMany({ data: rows });
+            }
+        }
     });
 }
 const listApprovalsInbox = (req, res) => __awaiter(void 0, void 0, void 0, function* () {

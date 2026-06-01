@@ -3832,6 +3832,41 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
             });
         }
 
+        // ── 2b. Week-off employees for the day ─────────────────────────────
+        // Approved monthly shift config (weekOffConfig.weeks) plus a Sunday
+        // fallback for anyone without an approved config. Mirrors
+        // getDeptAttendanceToday so a week-off is NOT counted as absent.
+        const dayStr = localYMD(dayStart);
+        const [yy, mm, dd] = dayStr.split('-').map(Number);
+        const weekOffSet = new Set<number>();
+        {
+            const approvals = await prisma.shiftApproval.findMany({
+                where: { status: 'APPROVED', month: mm, year: yy },
+                select: { employeeId: true, weekOffConfig: true },
+            });
+            const approvedEmps = new Set<number>();
+            const monthStart = new Date(yy, mm - 1, 1);
+            const firstWeekStart = new Date(monthStart);
+            firstWeekStart.setDate(monthStart.getDate() - monthStart.getDay());
+            firstWeekStart.setHours(0, 0, 0, 0);
+            for (const ap of approvals) {
+                approvedEmps.add(ap.employeeId);
+                const cfg = ap.weekOffConfig as { weeks?: Record<string, number> } | null;
+                if (!cfg?.weeks) continue;
+                for (const [wkStr, dow] of Object.entries(cfg.weeks)) {
+                    const wk = Number(wkStr);
+                    if (Number.isNaN(wk) || typeof dow !== 'number') continue;
+                    const wo = new Date(firstWeekStart);
+                    wo.setDate(firstWeekStart.getDate() + wk * 7 + dow);
+                    if (localYMD(wo) === dayStr) weekOffSet.add(ap.employeeId);
+                }
+            }
+            // Sunday fallback for employees with no approved shift config.
+            if (new Date(yy, mm - 1, dd).getDay() === 0) {
+                for (const e of employees) if (!approvedEmps.has(e.id)) weekOffSet.add(e.id);
+            }
+        }
+
         // ── 3. Bucket each employee under their shift ──────────────────────
         const shiftMeta = new Map(shiftTemplates.map((s) => [s.id, s]));
 
@@ -3846,6 +3881,7 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
             late: number;
             earlyCheckout: number;
             onLeave: number;
+            weekOff: number;
             absent: number;
             attendancePct: number;
             employees: any[];   // populated only when drilldown=1
@@ -3861,7 +3897,7 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
                     startTime: meta ? toHHMM(meta.startTime) : null,
                     endTime:   meta ? toHHMM(meta.endTime)   : null,
                     assigned: 0, present: 0, late: 0, earlyCheckout: 0,
-                    onLeave: 0, absent: 0, attendancePct: 0,
+                    onLeave: 0, weekOff: 0, absent: 0, attendancePct: 0,
                     employees: [],
                 });
             }
@@ -3876,8 +3912,10 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
             const meta = sid ? shiftMeta.get(sid) : null;
             const att  = attMap.get(e.id);
 
-            // Status precedence: leave > absent > present (with late/early flags)
-            let category: 'present' | 'late' | 'earlyCheckout' | 'onLeave' | 'absent' = 'absent';
+            // Status precedence: leave > present > week-off > absent.
+            // A check-in on a week-off still counts as present (they worked);
+            // only a week-off with no check-in is treated as week-off (not absent).
+            let category: 'present' | 'late' | 'earlyCheckout' | 'onLeave' | 'weekOff' | 'absent' = 'absent';
             let lateBy: number | null = null;
             let leftEarlyBy: number | null = null;
 
@@ -3907,6 +3945,9 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
                         }
                     }
                 }
+            } else if (weekOffSet.has(e.id)) {
+                category = 'weekOff';
+                bucket.weekOff++;
             } else {
                 bucket.absent++;
             }
@@ -3931,10 +3972,13 @@ export const getAttendanceByShift = async (req: Request, res: Response) => {
             }
         }
 
-        // Compute attendance % per bucket (present + late) / assigned
+        // Compute attendance % per bucket: present / (assigned − week-off).
+        // Week-off employees aren't expected in, so they're excluded from the
+        // denominator instead of dragging the percentage down as "absent".
         for (const b of buckets.values()) {
-            b.attendancePct = b.assigned > 0
-                ? Math.round(((b.present) / b.assigned) * 100)
+            const expected = b.assigned - b.weekOff;
+            b.attendancePct = expected > 0
+                ? Math.round((b.present / expected) * 100)
                 : 0;
         }
 

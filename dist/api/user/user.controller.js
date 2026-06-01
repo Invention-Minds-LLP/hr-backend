@@ -167,19 +167,23 @@ const resetMyPassword = (req, res) => __awaiter(void 0, void 0, void 0, function
     var _a;
     try {
         const authUserId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.userId; // set by auth middleware
-        const { userId, confirmPassword, newPassword } = req.body;
-        // if (!authUserId) return res.status(401).json({ error: "Unauthorized" });
+        const { confirmPassword, newPassword } = req.body;
+        if (!authUserId)
+            return res.status(401).json({ error: "Unauthorized" });
         if (!confirmPassword || !newPassword) {
             return res.status(400).json({ error: "currentPassword and newPassword are required" });
         }
-        const user = yield prisma_1.prisma.user.findUnique({ where: { id: userId } });
+        // Always operate on the authenticated user's own account — never trust a
+        // userId supplied in the request body (that allowed resetting anyone's password).
+        const user = yield prisma_1.prisma.user.findUnique({ where: { id: authUserId } });
         if (!user)
             return res.status(404).json({ error: "User not found" });
-        // const ok = await bcrypt.compare( confirmPassword, user.passwordHash);
-        // if (!ok) return res.status(401).json({ error: "Current password is incorrect" });
+        const ok = yield bcryptjs_1.default.compare(confirmPassword, user.passwordHash);
+        if (!ok)
+            return res.status(401).json({ error: "Current password is incorrect" });
         const newHash = yield bcryptjs_1.default.hash(newPassword, 10);
         yield prisma_1.prisma.user.update({
-            where: { id: userId },
+            where: { id: user.id },
             data: { passwordHash: newHash }
         });
         res.json({ message: "Password updated successfully" });
@@ -192,10 +196,10 @@ const resetMyPassword = (req, res) => __awaiter(void 0, void 0, void 0, function
 exports.resetMyPassword = resetMyPassword;
 // ADMIN RESET (requires admin role)
 const adminResetPassword = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a;
+    var _a, _b;
     try {
-        const requesterRole = (_a = req.user) === null || _a === void 0 ? void 0 : _a.role;
-        if (requesterRole !== "admin")
+        const requesterRole = String((_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.role) !== null && _b !== void 0 ? _b : "").toUpperCase();
+        if (requesterRole !== "ADMIN")
             return res.status(403).json({ error: "Forbidden" });
         const { userId, newPassword } = req.body;
         if (!userId || !newPassword) {

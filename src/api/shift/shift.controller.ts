@@ -740,10 +740,32 @@ export const generateFixedShiftsForMonthHandler = async (req: Request, res: Resp
     }
 
     const created = await generateFixedShiftsForMonth(base);
+
+    // Diagnostics — explains a `created: 0` result.
+    const fixedEmployees = await prisma.employee.count({
+      where: {
+        employmentStatus: { in: ['ACTIVE', 'NOTICE_PERIOD'] },
+        EmployeeShiftSetting: { is: { mode: 'FIXED' } },
+      },
+    });
+    const fixedWithShift = await prisma.employee.count({
+      where: {
+        employmentStatus: { in: ['ACTIVE', 'NOTICE_PERIOD'] },
+        EmployeeShiftSetting: { is: { mode: 'FIXED', fixedShiftId: { not: null } } },
+      },
+    });
+    const rotationalEmployees = await prisma.employee.count({
+      where: {
+        employmentStatus: { in: ['ACTIVE', 'NOTICE_PERIOD'] },
+        EmployeeShiftSetting: { is: { mode: 'ROTATIONAL' } },
+      },
+    });
+
     return res.json({
       month: base.getMonth() + 1,
       year: base.getFullYear(),
       created,
+      diagnostics: { fixedEmployees, fixedWithShift, rotationalEmployees },
       message: `Generated ${created} fixed-shift assignment(s) for ${base.getMonth() + 1}/${base.getFullYear()}.`,
     });
   } catch (error) {
