@@ -204,8 +204,12 @@ export const resetMyPassword = async (req: Request, res: Response) => {
 // ADMIN RESET (requires admin role)
 export const adminResetPassword = async (req: Request, res: Response) => {
   try {
+    // Authorised to reset OTHER users' passwords: HR department (deptId 1) or ADMIN.
     const requesterRole = String((req as any).user?.role ?? "").toUpperCase();
-    if (requesterRole !== "ADMIN") return res.status(403).json({ error: "Forbidden" });
+    const requesterDeptId = Number((req as any).user?.deptId ?? (req as any).user?.departmentId ?? 0);
+    if (requesterDeptId !== 1) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
 
     const { userId, newPassword } = req.body;
     if (!userId || !newPassword) {
