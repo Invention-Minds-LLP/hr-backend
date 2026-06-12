@@ -3384,8 +3384,78 @@ async function getWorkedDaysOptimized(
   return finalCount;
 }
 
+export type LeaveStartMode = "DOJ" | "PROBATION_END";
+
+/**
+ * Controls when a new employee's CL/SL is credited:
+ *  - "DOJ" (default): pro-rata from the Date of Joining, at employee creation.
+ *    The probation period is ignored for leave accrual — matches the leave
+ *    policy ("1 CL & 1 SL per month from DOJ").
+ *  - "PROBATION_END": pro-rata from the probation end date, via the daily cron
+ *    below (legacy behavior).
+ * Set LEAVE_BALANCE_START_MODE=PROBATION_END in .env to use the legacy behavior.
+ */
+export function getLeaveStartMode(): LeaveStartMode {
+  return process.env.LEAVE_BALANCE_START_MODE === "PROBATION_END"
+    ? "PROBATION_END"
+    : "DOJ";
+}
+
+/**
+ * Pro-rata CL/SL entitlement counting from `baseDate` to the end of that
+ * financial year. Half-month rule: if `baseDate` is after the 15th, that month
+ * is not counted (start shifts to the 1st of the next month).
+ */
+export function getNewJoineeEntitlement(baseDate: Date) {
+  const fy = getFinancialYearBounds(baseDate);
+
+  // ✅ APPLY HALF-MONTH RULE
+  let effectiveStart = new Date(baseDate);
+  if (baseDate.getDate() > 15) {
+    // skip current month → move to next month 1st
+    effectiveStart = new Date(
+      baseDate.getFullYear(),
+      baseDate.getMonth() + 1,
+      1
+    );
+  }
+
+  const months = getRemainingMonths(effectiveStart, fy.end);
+
+  const CL_ANNUAL = 12;
+  const SL_ANNUAL = 12;
+
+  return {
+    fyYear: fy.fyYear,
+    effectiveStart,
+    months,
+    cl: (CL_ANNUAL / 12) * months,
+    sl: (SL_ANNUAL / 12) * months,
+  };
+}
+
+/**
+ * Allocate pro-rata CL & SL for a new joinee, counting from `baseDate`.
+ * Idempotent per (employee, leaveType, FY) via the OPENING_BALANCE guard in
+ * allocateLeave, so re-running it will not double-credit.
+ */
+export async function allocateNewJoineeLeave(employeeId: number, baseDate: Date) {
+  const { cl, sl, fyYear, effectiveStart } = getNewJoineeEntitlement(baseDate);
+
+  await prisma.$transaction(async (tx) => {
+    await allocateLeave(tx, employeeId, "CL", cl, fyYear, effectiveStart);
+    await allocateLeave(tx, employeeId, "SL", sl, fyYear, effectiveStart);
+  });
+
+  return { cl, sl, fyYear };
+}
+
 export const initNewJoineeLeaveAllocationCron = () => {
   cron.schedule("0 2 * * *", async () => {
+    // In DOJ mode, CL/SL is credited at employee creation (createEmployee),
+    // not at probation end — so this cron is a no-op.
+    if (getLeaveStartMode() !== "PROBATION_END") return;
+
     console.log("Running New Joinee Leave Allocation Cron...");
 
     const today = new Date();
@@ -3403,37 +3473,11 @@ export const initNewJoineeLeaveAllocationCron = () => {
       if (!emp.probationEndDate) continue;
 
       const eligibleDate = new Date(emp.probationEndDate as Date);
-      // const eligibleDate = new Date(emp.probationEndDate);
 
-      // 👉 Only trigger ONCE
+      // 👉 Only trigger ONCE, on the probation end date
       if (!isSameDate(eligibleDate, today)) continue;
 
-      const fy = getFinancialYearBounds(eligibleDate);
-
-      // ✅ APPLY HALF-MONTH RULE
-      let effectiveStart = new Date(eligibleDate);
-
-      if (eligibleDate.getDate() > 15) {
-        // skip current month → move to next month 1st
-        effectiveStart = new Date(
-          eligibleDate.getFullYear(),
-          eligibleDate.getMonth() + 1,
-          1
-        );
-      }
-
-      const months = getRemainingMonths(effectiveStart, fy.end);
-
-      const CL_ANNUAL = 12;
-      const SL_ANNUAL = 12;
-
-      const cl = (CL_ANNUAL / 12) * months;
-      const sl = (SL_ANNUAL / 12) * months;
-
-      await prisma.$transaction(async (tx) => {
-        await allocateLeave(tx, emp.id, "CL", cl, fy.fyYear, effectiveStart);
-        await allocateLeave(tx, emp.id, "SL", sl, fy.fyYear, effectiveStart);
-      });
+      const { cl, sl } = await allocateNewJoineeLeave(emp.id, eligibleDate);
 
       console.log(`✅ Leave allocated for emp ${emp.id}: CL=${cl}, SL=${sl}`);
     }
@@ -3478,6 +3522,20 @@ async function allocateLeave(
   });
 
   if (!lt) return;
+
+  // Idempotency: don't re-allocate if a system opening balance already exists
+  // for this employee + leave type + financial year (e.g. cron + DOJ paths, or
+  // a re-run). Prevents double-crediting.
+  const alreadyAllocated = await tx.leaveLedger.findFirst({
+    where: {
+      employeeId,
+      leaveTypeId: lt.id,
+      year,
+      action: "OPENING_BALANCE",
+      source: "SYSTEM",
+    },
+  });
+  if (alreadyAllocated) return;
 
   const prevBalance = await getLastLedgerBalanceTx(tx, employeeId, lt.id, year);
   const newBalance = prevBalance + amount;

@@ -17,6 +17,7 @@ import { Employee } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import cron from 'node-cron';
 import { syncEmployeeToDirectory, deactivateEmployeeInDirectory } from "../../lib/directory";
+import { allocateNewJoineeLeave, getLeaveStartMode } from "../leave/leave.controller";
 
 
 const FTP_CONFIG = {
@@ -483,6 +484,24 @@ export const createEmployee = async (req: Request, res: Response) => {
           where: { id: newEmployee.id },
           data: { probationStatus: 'IN_PROGRESS' },
         });
+      }
+    }
+
+    // DOJ-mode leave accrual: credit pro-rata CL & SL from the Date of Joining
+    // (probation period is ignored). In PROBATION_END mode the new-joinee cron
+    // credits these on the probation end date instead, so we skip it here.
+    if (getLeaveStartMode() === "DOJ" && newEmployee.dateOfJoining) {
+      try {
+        await allocateNewJoineeLeave(
+          newEmployee.id,
+          new Date(newEmployee.dateOfJoining)
+        );
+      } catch (err) {
+        // Non-fatal: don't fail employee creation if leave seeding fails.
+        console.error(
+          `DOJ leave allocation failed for emp ${newEmployee.id}:`,
+          err
+        );
       }
     }
 
