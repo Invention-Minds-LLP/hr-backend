@@ -45,6 +45,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const appraisal_controller_1 = require("./appraisal.controller");
 const appraisal_v2_controller_1 = require("./appraisal-v2.controller");
+const appraisal_pause_controller_1 = require("./appraisal-pause.controller");
 const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = (0, express_1.Router)();
 // Existing routes
@@ -75,6 +76,13 @@ router.post('/:id/edit-request', authMiddleware_1.authenticateToken, appraisal_v
 router.patch('/edit-request/:requestId', authMiddleware_1.authenticateToken, appraisal_v2_controller_1.respondEditRequest);
 router.get('/:id/edit-history', authMiddleware_1.authenticateToken, appraisal_v2_controller_1.getEditHistory);
 router.get('/:id/insights', authMiddleware_1.authenticateToken, appraisal_v2_controller_1.getEmployeeInsights);
+// Appraisal pause / resume (maternity, long medical leave, sabbatical).
+// Pausing applies to BOTH managerial appraisal and dept-performance clocks.
+router.get('/employees/:empId/pauses', authMiddleware_1.authenticateToken, appraisal_pause_controller_1.listEmployeePauses);
+router.get('/employees/:empId/pauses/active', authMiddleware_1.authenticateToken, appraisal_pause_controller_1.getActivePause);
+router.post('/employees/:empId/pauses', authMiddleware_1.authenticateToken, appraisal_pause_controller_1.createPause);
+router.patch('/pauses/:pauseId', authMiddleware_1.authenticateToken, appraisal_pause_controller_1.updatePause);
+router.delete('/pauses/:pauseId', authMiddleware_1.authenticateToken, appraisal_pause_controller_1.deletePause);
 // Test/Admin endpoints
 router.post('/admin/test-auto-draft', (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {

@@ -18,17 +18,17 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
-var _a;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initDirectorySyncCron = initDirectorySyncCron;
 exports.runDirectoryBackfillNow = runDirectoryBackfillNow;
 const node_cron_1 = __importDefault(require("node-cron"));
 const client_1 = require("@prisma/client");
 const directory_1 = require("../lib/directory");
+const config_1 = require("../config");
 const prisma = new client_1.PrismaClient();
-const SCHEDULE = (_a = process.env.DIRECTORY_SYNC_CRON) !== null && _a !== void 0 ? _a : '30 2 * * *';
+const SCHEDULE = config_1.config.directory.syncCron || '30 2 * * *';
 function initDirectorySyncCron() {
-    if (!process.env.DIRECTORY_URL || !process.env.DIRECTORY_API_KEY) {
+    if (!config_1.config.directory.url || !config_1.config.directory.apiKey) {
         console.log('[directory-sync] DIRECTORY_URL or DIRECTORY_API_KEY not set — nightly cron disabled');
         return;
     }

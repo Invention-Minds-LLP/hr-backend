@@ -25,6 +25,8 @@ const appraisal_v2_controller_1 = require("../api/appraisal/appraisal-v2.control
 const directory_sync_scheduler_1 = require("./directory-sync.scheduler");
 const recruiting_controller_1 = require("../api/recruiting/recruiting.controller");
 const incident_controller_1 = require("../api/incident/incident.controller");
+const weekly_tracker_controller_1 = require("../api/weekly-tracker/weekly-tracker.controller");
+const attendance_reminders_scheduler_1 = require("./attendance-reminders.scheduler");
 function startSchedulers() {
     return __awaiter(this, void 0, void 0, function* () {
         (0, survery_controller_1.initSurveyScheduler)();
@@ -40,6 +42,7 @@ function startSchedulers() {
         (0, leave_controller_2.initFinancialYearRolloverCron)();
         (0, leave_controller_2.initNewJoineeLeaveAllocationCron)();
         (0, directory_sync_scheduler_1.initDirectorySyncCron)();
+        (0, attendance_reminders_scheduler_1.initAttendanceReminderCrons)();
         // Daily at 02:00 — flip any unsigned offers past their proposedJoinAt to EXPIRED
         node_cron_1.default.schedule("0 2 * * *", () => __awaiter(this, void 0, void 0, function* () {
             try {
@@ -62,6 +65,18 @@ function startSchedulers() {
             }
             catch (e) {
                 console.error("[CRON] processReferralBonusEligibility failed", e);
+            }
+        }));
+        // Daily at 09:00 — remind employees (and their incharge/manager + HR digest)
+        // about pending NOT_STARTED / IN_PROGRESS weekly tasks (overdue flagged).
+        node_cron_1.default.schedule("0 9 * * *", () => __awaiter(this, void 0, void 0, function* () {
+            try {
+                const r = yield (0, weekly_tracker_controller_1.sendPendingWorkReminders)();
+                if (r.employees > 0)
+                    console.log(`[CRON] weekly-tracker reminders: ${r.employees} employee(s), ${r.tasks} pending task(s)`);
+            }
+            catch (e) {
+                console.error("[CRON] sendPendingWorkReminders failed", e);
             }
         }));
         // Daily at 03:00 — incident SLA escalation + mandatory-reporting nudges.

@@ -6,15 +6,16 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Client } from 'basic-ftp';
+import { config } from '../../config';
 
-const COMPANY_NAME = 'RASHTROTTHANA HOSPITAL'; // <- put your real company name
-const COMPANY_LOGO_URL = 'https://hrproindia.in/documents/Rashtrotthana-logo.jpeg'; // <- put your real logo URL
-const COMPANY_TAGLINE = 'People • Process • Performance'; 
+const COMPANY_NAME = config.branding.companyName || 'RASHTROTTHANA HOSPITAL';
+const COMPANY_LOGO_URL = config.branding.companyLogoUrl || '';
+const COMPANY_TAGLINE = config.branding.companyTagline || '';
 const FTP_CONFIG = {
-    host: process.env.FTP_HOST ?? "",
-    user: process.env.FTP_USER ?? "",
-    password: process.env.FTP_PASS ?? "",
-    secure: process.env.FTP_SECURE === "true"
+    host: config.ftp.host,
+    user: config.ftp.user,
+    password: config.ftp.pass,
+    secure: config.ftp.secure,
   }
 
 

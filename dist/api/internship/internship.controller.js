@@ -44,7 +44,6 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
-var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createInternship = createInternship;
 exports.listInternships = listInternships;
@@ -65,14 +64,15 @@ const fs = __importStar(require("fs"));
 const os = __importStar(require("os"));
 const path = __importStar(require("path"));
 const basic_ftp_1 = require("basic-ftp");
-const COMPANY_NAME = 'RASHTROTTHANA HOSPITAL'; // <- put your real company name
-const COMPANY_LOGO_URL = 'https://hrproindia.in/documents/Rashtrotthana-logo.jpeg'; // <- put your real logo URL
-const COMPANY_TAGLINE = 'People • Process • Performance';
+const config_1 = require("../../config");
+const COMPANY_NAME = config_1.config.branding.companyName || 'RASHTROTTHANA HOSPITAL';
+const COMPANY_LOGO_URL = config_1.config.branding.companyLogoUrl || 'https://hrproindia.in/documents/Rashtrotthana-logo.jpeg';
+const COMPANY_TAGLINE = config_1.config.branding.companyTagline || 'People • Process • Performance';
 const FTP_CONFIG = {
-    host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
-    user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
-    password: (_c = process.env.FTP_PASS) !== null && _c !== void 0 ? _c : "",
-    secure: process.env.FTP_SECURE === "true"
+    host: config_1.config.ftp.host,
+    user: config_1.config.ftp.user,
+    password: config_1.config.ftp.pass,
+    secure: config_1.config.ftp.secure,
 };
 const prisma = new client_1.PrismaClient();
 const toDate = (v) => (v ? new Date(v) : undefined);

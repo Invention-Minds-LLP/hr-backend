@@ -22,7 +22,6 @@ var __rest = (this && this.__rest) || function (s, e) {
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
-var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.queryAuditLog = exports.getEmployeeAuditLog = exports.getProbationHistory = exports.terminateProbation = exports.confirmProbation = exports.extendProbation = exports.bulkUploadLeaveBalance = exports.bulkUpdateEmployeeExtras = exports.getEmployeesByManager = exports.initSabbaticalReminderScheduler = exports.terminateFromSabbatical = exports.endSabbatical = exports.extendSabbatical = exports.startSabbatical = exports.getEmployeeProfile = exports.updateEmployeeProfile = exports.deleteEmployeeDocument = exports.getInchargeEmployees = exports.bulkUpdateReportingManager = exports.getBulkUploadProgress = exports.bulkUploadEmployees = exports.downloadEmployeeTemplate = exports.getUnreportedAbsentees = exports.sendHealthCheckReminders = exports.getEmployeesByDepartments = exports.uploadVaccineProof = exports.getEmployeeRequests = exports.getActiveEmployees = exports.getEmployeesByRole = exports.getSpecificRoles = exports.uploadEmployeeDisabilityProof = exports.uploadEmployeePhoto = exports.uploadEmployeeDocuments = exports.deleteEmployee = exports.updateEmployee = exports.getEmployeeById = exports.getEmployees = exports.createEmployee = void 0;
 exports.getAccruals = getAccruals;
@@ -44,11 +43,13 @@ const notifications_controller_1 = require("../notifications/notifications.contr
 const xlsx_1 = __importDefault(require("xlsx"));
 const node_cron_1 = __importDefault(require("node-cron"));
 const directory_1 = require("../../lib/directory");
+const leave_controller_1 = require("../leave/leave.controller");
+const config_1 = require("../../config");
 const FTP_CONFIG = {
-    host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
-    user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
-    password: (_c = process.env.FTP_PASS) !== null && _c !== void 0 ? _c : "",
-    secure: process.env.FTP_SECURE === "true"
+    host: config_1.config.ftp.host,
+    user: config_1.config.ftp.user,
+    password: config_1.config.ftp.pass,
+    secure: config_1.config.ftp.secure,
 };
 const TEMP_FOLDER = path_1.default.join(__dirname, '../temp'); // absolute path
 if (!fs_1.default.existsSync(TEMP_FOLDER)) {
@@ -109,10 +110,10 @@ const EMPLOYEE_PREFIX_MAP = {
 function generateEmployeeCode(employmentType) {
     return __awaiter(this, void 0, void 0, function* () {
         var _a;
-        const basePrefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+        const basePrefix = config_1.config.employeeCode.prefix || 'EMP';
         const suffix = (_a = EMPLOYEE_PREFIX_MAP[employmentType === null || employmentType === void 0 ? void 0 : employmentType.toUpperCase()]) !== null && _a !== void 0 ? _a : '';
         const prefix = `${basePrefix}${suffix}`;
-        const startNumber = process.env.EMPLOYEE_CODE_START || '001';
+        const startNumber = config_1.config.employeeCode.start || '001';
         const lastEmployee = yield prisma.employee.findFirst({
             where: {
                 employeeCode: {
@@ -416,6 +417,18 @@ const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function*
                     where: { id: newEmployee.id },
                     data: { probationStatus: 'IN_PROGRESS' },
                 });
+            }
+        }
+        // DOJ-mode leave accrual: credit pro-rata CL & SL from the Date of Joining
+        // (probation period is ignored). In PROBATION_END mode the new-joinee cron
+        // credits these on the probation end date instead, so we skip it here.
+        if ((0, leave_controller_1.getLeaveStartMode)() === "DOJ" && newEmployee.dateOfJoining) {
+            try {
+                yield (0, leave_controller_1.allocateNewJoineeLeave)(newEmployee.id, new Date(newEmployee.dateOfJoining));
+            }
+            catch (err) {
+                // Non-fatal: don't fail employee creation if leave seeding fails.
+                console.error(`DOJ leave allocation failed for emp ${newEmployee.id}:`, err);
             }
         }
         // Push to central directory so the unified mobile app can resolve this phone

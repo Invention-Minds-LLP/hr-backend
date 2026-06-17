@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import expressListRoutes from 'express-list-routes';
+import { config, validateConfig } from "./config";
 
 import employeeRoutes from "./api/employee/employee.routes";
 import userRoutes from "./api/user/user.routes";
@@ -66,10 +67,15 @@ import { authenticateToken } from "./middleware/authMiddleware";
 
 
 
-const port = 3002;
+const port = config.port;
 
 
 dotenv.config();
+
+// Fail fast if this client's .env is missing required keys (JWT_SECRET,
+// DATABASE_URL, CLIENT_ID). Logs warnings for recommended-but-missing keys.
+validateConfig();
+
 const app = express();
 // Behind a single reverse proxy (nginx). Lets express-rate-limit / req.ip use
 // the real client IP from X-Forwarded-For without trusting arbitrary hops.
@@ -112,22 +118,7 @@ app.use(["/api/users/login", "/api/users/login-init", "/api/users/verify-otp",
 //   ],// Allow your Angular app
 //   credentials: true               // Optional: if you plan to send cookies
 // }));
-const allowedOrigins = [
-  'http://localhost:4300',     // Angular web
-  'http://192.168.3.25:4300',  // LAN testing
-  'https://demo.hrproindia.in',
-  'http://localhost',          // Capacitor Android
-  'https://localhost',
-  'capacitor://localhost',     // Capacitor iOS
-  'http://localhost:8100',
-  'http://localhost:8101',
-  'https://hrminds.imapps.in',
-  'https://hrmindsjmrh.imapps.in',
-  'http://localhost:4200',
-  'https://rashtrotthanahospital.com',
-  'http://192.168.8.189:4300',
-  'https://www.rashtrotthanahospital.com'
-];
+const allowedOrigins = config.cors.allowedOrigins;
 
 app.use(cors({
   origin: function (origin, callback) {

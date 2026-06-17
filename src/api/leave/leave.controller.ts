@@ -15,12 +15,13 @@ import fs from "fs";
 import { Client } from "basic-ftp";
 import path from "path";
 import { max } from "date-fns";
+import { config } from "../../config";
 
 const FTP_CONFIG = {
-  host: process.env.FTP_HOST ?? "",
-  user: process.env.FTP_USER ?? "",
-  password: process.env.FTP_PASS ?? "",
-  secure: false,
+  host: config.ftp.host,
+  user: config.ftp.user,
+  password: config.ftp.pass,
+  secure: config.ftp.secure,
 };
 
 type Tx = Prisma.TransactionClient;
@@ -2439,25 +2440,33 @@ export async function sendWhatsAppTemplate({
   templateId: string;
   placeholders: (string | number)[];
 }) {
-  const payload = {
-    from: process.env.WHATSAPP_FROM_PHONE_NUMBER,
-    to: formatPhoneNumber(to),
-    type: "template",
-    message: {
-      templateid: templateId,
-      placeholders: placeholders.map(String),
-    },
-  };
-  const headers = {
-    "Content-Type": "application/json",
-    apikey: process.env.WHATSAPP_AUTH_TOKEN,
-  };
-  const url = process.env.WHATSAPP_API_URL!;
-  const resp = await axios.post(url, payload, { headers });
-  if (resp?.data?.code !== "200") {
-    throw new Error(`WhatsApp send failed: ${JSON.stringify(resp.data)}`);
-  }
-  return resp.data;
+  // ── WhatsApp sending DISABLED for now ──────────────────────────────────────
+  // We don't want any WhatsApp messages going out at the moment. Every WhatsApp
+  // send in the app routes through this function (leave/wfh/appraisal/permission/
+  // test-assign notifications + mobile-login OTP), so disabling it here turns
+  // them all off. To re-enable, delete the two lines below and uncomment block.
+  console.log(`[whatsapp] disabled — skipping send to ${to} (template ${templateId}, ${placeholders.length} placeholders)`);
+  return null;
+
+  // const payload = {
+  //   from: config.whatsapp.fromPhoneNumber,
+  //   to: formatPhoneNumber(to),
+  //   type: "template",
+  //   message: {
+  //     templateid: templateId,
+  //     placeholders: placeholders.map(String),
+  //   },
+  // };
+  // const headers = {
+  //   "Content-Type": "application/json",
+  //   apikey: config.whatsapp.authToken,
+  // };
+  // const url = config.whatsapp.apiUrl;
+  // const resp = await axios.post(url, payload, { headers });
+  // if (resp?.data?.code !== "200") {
+  //   throw new Error(`WhatsApp send failed: ${JSON.stringify(resp.data)}`);
+  // }
+  // return resp.data;
 }
 export const getBlockedDates = async (req: Request, res: Response) => {
   const employeeId = Number(req.params.employeeId);
@@ -3396,7 +3405,7 @@ export type LeaveStartMode = "DOJ" | "PROBATION_END";
  * Set LEAVE_BALANCE_START_MODE=PROBATION_END in .env to use the legacy behavior.
  */
 export function getLeaveStartMode(): LeaveStartMode {
-  return process.env.LEAVE_BALANCE_START_MODE === "PROBATION_END"
+  return config.leave.balanceStartMode === "PROBATION_END"
     ? "PROBATION_END"
     : "DOJ";
 }

@@ -4,18 +4,19 @@ import { createNotification } from '../notifications/notifications.controller';
 import { ShiftType } from '@prisma/client';
 import { generateCompOffIfEligible } from '../../services/comOff.service';
 import { resolveAttendanceMode } from '../../lib/attendanceMode';
+import { config } from '../../config';
 
 const prisma = new PrismaClient();
 
 /* ---------------------------------
    COSEC CONFIG
+   Per-client biometric device — set COSEC_BASE_URL / COSEC_USERNAME /
+   COSEC_PASSWORD in this client's .env (see src/config).
 ---------------------------------- */
 
-const COSEC_BASE_URL = 'http://192.168.14.114:83/COSEC/api.svc/v2';
-
-// const COSEC_BASE_URL = 'http://14.194.12.229:83/COSEC/api.svc/v2';
-const COSEC_USERNAME = 'api';
-const COSEC_PASSWORD = 'Api@123';
+const COSEC_BASE_URL = config.cosec.baseUrl;
+const COSEC_USERNAME = config.cosec.username;
+const COSEC_PASSWORD = config.cosec.password;
 
 /* ---------------------------------
    DATE HELPERS

@@ -16,6 +16,7 @@ exports.UserAuthService = void 0;
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const prisma_1 = require("../lib/prisma");
+const config_1 = require("../config");
 class UserAuthService {
     constructor() {
         this.finalizeLogin = (userId, ipAddress, userAgent) => __awaiter(this, void 0, void 0, function* () {
@@ -54,7 +55,7 @@ class UserAuthService {
                 employeeCode: user.employeeCode,
                 username: user.username,
             };
-            const token = jsonwebtoken_1.default.sign(payload, process.env.JWT_SECRET, { expiresIn: '12h' });
+            const token = jsonwebtoken_1.default.sign(payload, config_1.config.jwtSecret, { expiresIn: '12h' });
             // Update last login
             yield prisma_1.prisma.user.update({
                 where: { id: user.id },

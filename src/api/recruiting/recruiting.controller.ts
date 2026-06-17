@@ -8,38 +8,32 @@ import bcrypt from "bcryptjs";
 import nodemailer from "nodemailer";
 import { createNotification } from '../notifications/notifications.controller';
 import { generateOfferLetterPdf, OfferLetterData } from './offerLetterPdf';
+import { config } from '../../config';
 
 
 const prisma = new PrismaClient();
 
-// FTP credentials are loaded from environment variables. Add the following to your `.env`:
-//   FTP_HOST=srv680.main-hosting.eu
-//   FTP_USER=u948610439.hrproindia.in
-//   FTP_PASSWORD=*****
-//   FTP_SECURE=false
+// FTP credentials come from this client's .env via src/config (FTP_HOST /
+// FTP_USER / FTP_PASS / FTP_SECURE).
 const FTP_CONFIG = {
-  host: process.env.FTP_HOST ?? "",
-  user: process.env.FTP_USER ?? "",
-  password: process.env.FTP_PASS ?? "",
-  secure: process.env.FTP_SECURE === "true",
+  host: config.ftp.host,
+  user: config.ftp.user,
+  password: config.ftp.pass,
+  secure: config.ftp.secure,
 };
 if (!FTP_CONFIG.host || !FTP_CONFIG.user || !FTP_CONFIG.password) {
   console.warn(
-    "⚠️  [recruiting] FTP_HOST / FTP_USER / FTP_PASSWORD not set in env — file uploads will fail",
+    "⚠️  [recruiting] FTP_HOST / FTP_USER / FTP_PASS not set in env — file uploads will fail",
   );
 }
 
 // Default IDs that used to be hard-coded throughout this file. Override per
-// environment by adding these to your `.env`:
-//   HR_DEPARTMENT_ID=1
-//   DEFAULT_BRANCH_ID=1
-//   DEFAULT_EMPLOYEE_ROLE_ID=3
-//   DEFAULT_HR_ROLE_ID=1
+// client by setting these in the .env (see src/config).
 const RECRUITING_DEFAULTS = {
-  hrDepartmentId:     Number(process.env.HR_DEPARTMENT_ID) || 1,
-  defaultBranchId:    Number(process.env.DEFAULT_BRANCH_ID) || 1,
-  defaultEmployeeRoleId: Number(process.env.DEFAULT_EMPLOYEE_ROLE_ID) || 3,
-  defaultHrRoleId:    Number(process.env.DEFAULT_HR_ROLE_ID) || 1,
+  hrDepartmentId:     config.recruiting.hrDepartmentId,
+  defaultBranchId:    config.recruiting.defaultBranchId,
+  defaultEmployeeRoleId: config.recruiting.defaultEmployeeRoleId,
+  defaultHrRoleId:    config.recruiting.defaultHrRoleId,
 };
 
 /**
@@ -93,13 +87,12 @@ async function logApplicationAction(
   }
 }
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
+  host: config.smtp.host,
+  port: config.smtp.port,
+  secure: config.smtp.secure,
   auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
+    user: config.smtp.user,
+    pass: config.smtp.pass
   }
 });
 
@@ -766,9 +759,9 @@ export class RecruitingController {
    *   RECRUIT_HOT_INTERVIEW_AVG=8
    */
   getRecruiterInsights = asyncHandler(async (_req, res) => {
-    const STALE_DAYS         = Number(process.env.RECRUIT_STALE_DAYS) || 7;
-    const HOT_TEST_SCORE     = Number(process.env.RECRUIT_HOT_TEST_SCORE) || 80;
-    const HOT_INTERVIEW_AVG  = Number(process.env.RECRUIT_HOT_INTERVIEW_AVG) || 8;
+    const STALE_DAYS         = config.recruiting.staleDays;
+    const HOT_TEST_SCORE     = config.recruiting.hotTestScore;
+    const HOT_INTERVIEW_AVG  = config.recruiting.hotInterviewAvg;
 
     const now = new Date();
     const staleCutoff   = new Date(now.getTime() - STALE_DAYS * 86400000);
@@ -1478,9 +1471,9 @@ export class RecruitingController {
           startTime: start.toLocaleString(),
           endTime: end.toLocaleString(),
           panelNames,
-          hospitalName: process.env.HOSPITAL_NAME ?? "",
-          hospitalAddress: process.env.HOSPITAL_ADDRESS ?? "",
-          googleLocationUrl: process.env.HOSPITAL_GOOGLE_MAP ?? "",
+          hospitalName: config.branding.hospitalName,
+          hospitalAddress: config.branding.hospitalAddress,
+          googleLocationUrl: config.branding.hospitalGoogleMap,
         });
         mailStatus = "sent";
       } catch (e: any) {
@@ -1523,9 +1516,9 @@ export class RecruitingController {
               startTime: start.toLocaleString(),
               endTime: end.toLocaleString(),
               panelNames,
-              hospitalName: process.env.HOSPITAL_NAME ?? "",
-              hospitalAddress: process.env.HOSPITAL_ADDRESS ?? "",
-              googleLocationUrl: process.env.HOSPITAL_GOOGLE_MAP ?? "",
+              hospitalName: config.branding.hospitalName,
+              hospitalAddress: config.branding.hospitalAddress,
+              googleLocationUrl: config.branding.hospitalGoogleMap,
               // Hint to the email helper that this is the panelist copy. Helper
               // can use it to re-write the salutation if needed; if it ignores
               // the field, the candidate-facing text still reads OK.
@@ -1695,10 +1688,10 @@ export class RecruitingController {
         workMode:       updated.workMode,
         proposedJoinAt: updated.proposedJoinAt,
         customNotes:    updated.customNotes,
-        companyName:    process.env.COMPANY_NAME    || undefined,
-        companyAddress: process.env.COMPANY_ADDRESS || undefined,
-        hrName:         process.env.HR_SIGNATORY_NAME  || undefined,
-        hrTitle:        process.env.HR_SIGNATORY_TITLE || undefined,
+        companyName:    config.branding.companyName    || undefined,
+        companyAddress: config.branding.companyAddress || undefined,
+        hrName:         config.branding.hrSignatoryName  || undefined,
+        hrTitle:        config.branding.hrSignatoryTitle || undefined,
       };
       const pdfBuffer = await generateOfferLetterPdf(letterData);
 
@@ -1829,10 +1822,10 @@ export class RecruitingController {
       workMode:       offer.workMode ?? null,
       proposedJoinAt: offer.proposedJoinAt ?? null,
       customNotes:    offer.customNotes ?? null,
-      companyName:    process.env.COMPANY_NAME    || undefined,
-      companyAddress: process.env.COMPANY_ADDRESS || undefined,
-      hrName:         process.env.HR_SIGNATORY_NAME  || undefined,
-      hrTitle:        process.env.HR_SIGNATORY_TITLE || undefined,
+      companyName:    config.branding.companyName    || undefined,
+      companyAddress: config.branding.companyAddress || undefined,
+      hrName:         config.branding.hrSignatoryName  || undefined,
+      hrTitle:        config.branding.hrSignatoryTitle || undefined,
     });
 
     const safeName = offer.application.candidate.name.replace(/\s+/g, '_');
@@ -2228,7 +2221,7 @@ export class RecruitingController {
           loginEmail: app.candidate.email,
           // Only sent on first-time assign — null on subsequent assigns
           firstTimePassword: plainPasswordForEmail,
-          portalUrl: process.env.CANDIDATE_PORTAL_URL ?? '',
+          portalUrl: config.candidatePortalUrl,
         });
         mailStatus = "sent";
       } catch (e: any) {
@@ -3013,7 +3006,7 @@ export const deleteBgvDocument = asyncHandler(async (req: Request, res: Response
  * Idempotent — safe to call multiple times.
  */
 export async function processReferralBonusEligibility(): Promise<{ joined: number; eligible: number }> {
-  const probationDays = parseInt(process.env.REFERRAL_PROBATION_DAYS || '90', 10);
+  const probationDays = config.recruiting.referralProbationDays;
 
   // Pot 1: candidate joined → start probation clock
   const pendingJoin: any[] = await (prisma as any).application.findMany({
@@ -3086,8 +3079,8 @@ export const updateReferralBonus = asyncHandler(async (req: Request, res: Respon
 });
 
 async function generateEmployeeCode(tx: any = prisma): Promise<string> {
-  const prefix      = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
-  const startNumber = parseInt(process.env.EMPLOYEE_CODE_START || '1', 10);
+  const prefix      = config.employeeCode.prefix || 'EMP';
+  const startNumber = parseInt(config.employeeCode.start || '1', 10);
 
   // Find the highest existing numeric suffix among employee codes that
   // start with our prefix. Doing this inside the same `tx` ensures we
@@ -3482,7 +3475,7 @@ HR Team
   `;
 
   await transporter.sendMail({
-    from: process.env.SMTP_USER,
+    from: config.smtp.from,
     to: recipients,
     subject: `Interview Scheduled – ${jobTitle}`,
     text,
@@ -3587,7 +3580,7 @@ ${credsHtml}
 `;
 
   await transporter.sendMail({
-    from: process.env.SMTP_USER,
+    from: config.smtp.from,
     to,
     subject: `Assessment Assigned – ${testName}`,
     text,
@@ -3670,7 +3663,7 @@ and confirm your acceptance through the candidate portal at the earliest.</p>
 `;
 
   await transporter.sendMail({
-    from: process.env.SMTP_USER,
+    from: config.smtp.from,
     to,
     cc:  cc  && cc.length  ? cc  : undefined,
     bcc: bcc && bcc.length ? bcc : undefined,

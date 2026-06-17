@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { addDays, startOfDay, endOfDay, startOfMonth, endOfMonth, subMonths, startOfWeek, endOfWeek, format } from "date-fns";
+import { config } from "../../config";
 
 function startOfDayIST(d = new Date()): Date {
   const ist = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
@@ -216,18 +217,18 @@ export const getPulse = async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════
 
 const ATTENTION_THRESHOLDS = {
-  attendancePctRed:    Number(process.env.ATTN_ATTENDANCE_RED)    || 80,   // <80% → red
-  attendancePctYellow: Number(process.env.ATTN_ATTENDANCE_YELLOW) || 90,   // 80-89% → yellow
-  pendingLeavesYellow: Number(process.env.ATTN_PENDING_LEAVES)    || 20,
-  pendingPermsYellow:  Number(process.env.ATTN_PENDING_PERMS)     || 20,
-  pipRed:              Number(process.env.ATTN_PIP_RED)           || 5,
-  pipYellow:           Number(process.env.ATTN_PIP_YELLOW)        || 2,
-  attritionMtdRed:     Number(process.env.ATTN_ATTRITION_RED)     || 5,
-  attritionMtdYellow:  Number(process.env.ATTN_ATTRITION_YELLOW)  || 2,
-  otPendingYellow:     Number(process.env.ATTN_OT_PENDING)        || 30,
-  openJobsYellow:      Number(process.env.ATTN_OPEN_JOBS)         || 10,
-  trainingPctRed:      Number(process.env.ATTN_TRAINING_RED)      || 50,
-  trainingPctYellow:   Number(process.env.ATTN_TRAINING_YELLOW)   || 70,
+  attendancePctRed:    config.attn.attendanceRed,     // <80% → red
+  attendancePctYellow: config.attn.attendanceYellow,  // 80-89% → yellow
+  pendingLeavesYellow: config.attn.pendingLeaves,
+  pendingPermsYellow:  config.attn.pendingPerms,
+  pipRed:              config.attn.pipRed,
+  pipYellow:           config.attn.pipYellow,
+  attritionMtdRed:     config.attn.attritionRed,
+  attritionMtdYellow:  config.attn.attritionYellow,
+  otPendingYellow:     config.attn.otPending,
+  openJobsYellow:      config.attn.openJobs,
+  trainingPctRed:      config.attn.trainingRed,
+  trainingPctYellow:   config.attn.trainingYellow,
 };
 
 type AttentionItem = {

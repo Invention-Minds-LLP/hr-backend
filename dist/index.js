@@ -49,6 +49,7 @@ require("dotenv/config"); // must run before any module that reads process.env a
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const dotenv_1 = __importDefault(require("dotenv"));
+const config_1 = require("./config");
 const employee_routes_1 = __importDefault(require("./api/employee/employee.routes"));
 const user_routes_1 = __importDefault(require("./api/user/user.routes"));
 const department_routes_1 = __importDefault(require("./api/department/department.routes"));
@@ -102,8 +103,11 @@ const weekly_rating_routes_1 = __importDefault(require("./api/weekly-rating/week
 const pip_routes_1 = __importStar(require("./api/pip/pip.routes"));
 const management_routes_1 = __importDefault(require("./api/management/management.routes"));
 const authMiddleware_1 = require("./middleware/authMiddleware");
-const port = 3002;
+const port = config_1.config.port;
 dotenv_1.default.config();
+// Fail fast if this client's .env is missing required keys (JWT_SECRET,
+// DATABASE_URL, CLIENT_ID). Logs warnings for recommended-but-missing keys.
+(0, config_1.validateConfig)();
 const app = (0, express_1.default)();
 // Behind a single reverse proxy (nginx). Lets express-rate-limit / req.ip use
 // the real client IP from X-Forwarded-For without trusting arbitrary hops.
@@ -140,22 +144,7 @@ app.use(["/api/users/login", "/api/users/login-init", "/api/users/verify-otp",
 //   ],// Allow your Angular app
 //   credentials: true               // Optional: if you plan to send cookies
 // }));
-const allowedOrigins = [
-    'http://localhost:4300', // Angular web
-    'http://192.168.3.25:4300', // LAN testing
-    'https://demo.hrproindia.in',
-    'http://localhost', // Capacitor Android
-    'https://localhost',
-    'capacitor://localhost', // Capacitor iOS
-    'http://localhost:8100',
-    'http://localhost:8101',
-    'https://hrminds.imapps.in',
-    'https://hrmindsjmrh.imapps.in',
-    'http://localhost:4200',
-    'https://rashtrotthanahospital.com',
-    'http://192.168.8.189:4300',
-    'https://www.rashtrotthanahospital.com'
-];
+const allowedOrigins = config_1.config.cors.allowedOrigins;
 app.use((0, cors_1.default)({
     origin: function (origin, callback) {
         // Allow mobile apps, Postman, curl (no origin)

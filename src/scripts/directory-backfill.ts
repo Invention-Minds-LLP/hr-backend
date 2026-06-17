@@ -14,10 +14,11 @@
  */
 
 import 'dotenv/config';
+import { config } from '../config';
 import { runDirectoryBackfillNow } from '../schedulers/directory-sync.scheduler';
 
 async function main() {
-  if (!process.env.DIRECTORY_URL || !process.env.DIRECTORY_API_KEY) {
+  if (!config.directory.url || !config.directory.apiKey) {
     console.error('❌ DIRECTORY_URL and DIRECTORY_API_KEY must be set in .env');
     process.exit(1);
   }

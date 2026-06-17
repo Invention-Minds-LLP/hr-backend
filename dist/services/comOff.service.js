@@ -9,6 +9,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.isWeeklyOff = isWeeklyOff;
 exports.generateCompOffIfEligible = generateCompOffIfEligible;
 const prisma_1 = require("../lib/prisma");
 function stripTime(d) {

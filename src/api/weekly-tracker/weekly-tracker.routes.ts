@@ -11,6 +11,7 @@ import {
   updateTaskEntry,
   deleteTaskEntry,
   carryForwardTasks,
+  getTaskHistory,
   getTrackerDashboard,
 } from "./weekly-tracker.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
@@ -30,5 +31,6 @@ router.post("/:id/tasks", authenticateToken, addTaskEntry);
 router.post("/:id/carry-forward", authenticateToken, carryForwardTasks);
 router.put("/tasks/:taskId", authenticateToken, updateTaskEntry);
 router.delete("/tasks/:taskId", authenticateToken, deleteTaskEntry);
+router.get("/tasks/:taskId/history", authenticateToken, getTaskHistory);
 
 export default router;

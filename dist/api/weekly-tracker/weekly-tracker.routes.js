@@ -16,4 +16,5 @@ router.post("/:id/tasks", authMiddleware_1.authenticateToken, weekly_tracker_con
 router.post("/:id/carry-forward", authMiddleware_1.authenticateToken, weekly_tracker_controller_1.carryForwardTasks);
 router.put("/tasks/:taskId", authMiddleware_1.authenticateToken, weekly_tracker_controller_1.updateTaskEntry);
 router.delete("/tasks/:taskId", authMiddleware_1.authenticateToken, weekly_tracker_controller_1.deleteTaskEntry);
+router.get("/tasks/:taskId/history", authMiddleware_1.authenticateToken, weekly_tracker_controller_1.getTaskHistory);
 exports.default = router;

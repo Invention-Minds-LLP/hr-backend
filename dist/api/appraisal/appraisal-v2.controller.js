@@ -15,6 +15,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getEmployeeInsights = exports.initAppraisalAutoDraftCron = exports.submitInchargeAppraisal = exports.deleteReviewQuestion = exports.toggleReviewQuestion = exports.updateReviewQuestion = exports.createReviewQuestion = exports.listReviewQuestions = exports.reassignAppraisalManager = exports.getEditHistory = exports.getAppraisalDetail = exports.respondEditRequest = exports.requestEdit = exports.hrReviewAppraisal = exports.submitManagementAppraisal = exports.submitManagerAppraisalV2 = exports.submitSelfAppraisal = exports.hrVerifyAppraisal = exports.toggleSelfAppraisalQuestion = exports.createSelfAppraisalQuestion = exports.getSelfAppraisalQuestions = void 0;
 const prisma_1 = require("../../lib/prisma");
 const notifications_controller_1 = require("../notifications/notifications.controller");
+const appraisal_pause_controller_1 = require("./appraisal-pause.controller");
 // ═══════════════════════════════════════════════════════════════════════════════
 // SELF-APPRAISAL QUESTIONS (Master)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -167,7 +168,7 @@ const inchargeDone = (a) => !inchargeRequired(a) || !!(a === null || a === void 
 // EMPLOYEE: SUBMIT SELF-APPRAISAL
 // ═══════════════════════════════════════════════════════════════════════════════
 const submitSelfAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f;
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     try {
         const id = Number(req.params.id);
         const { answers, achievements, goalsObjective, challenges, trainingNeeds, isDraft } = req.body;
@@ -177,6 +178,12 @@ const submitSelfAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, func
         });
         if (!appraisal)
             return res.status(404).json({ error: "Appraisal not found" });
+        // Pause guard — block when the employee is in an open pause window.
+        // HR (roleId 1 or dept 1 + roleId 2) overrides.
+        const callerEmpId = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const guard = yield (0, appraisal_pause_controller_1.assertNotPausedOrHR)(appraisal.employeeId, callerEmpId);
+        if (guard.blocked)
+            return res.status(423).json({ error: guard.message });
         // Allow self-appraisal during PENDING_FILL or if already submitted (edit after approval)
         if (!["PENDING_FILL", "SELF_APPRAISAL_PENDING", "HR_VERIFIED"].includes(appraisal.status)) {
             return res.status(400).json({ error: "Self-appraisal cannot be submitted at this stage" });
@@ -212,11 +219,11 @@ const submitSelfAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, func
                     create: {
                         appraisalFormId: id,
                         questionId: a.questionId,
-                        rating: (_a = a.rating) !== null && _a !== void 0 ? _a : null,
+                        rating: (_c = a.rating) !== null && _c !== void 0 ? _c : null,
                         comments: a.comments || null,
                     },
                     update: {
-                        rating: (_b = a.rating) !== null && _b !== void 0 ? _b : null,
+                        rating: (_d = a.rating) !== null && _d !== void 0 ? _d : null,
                         comments: a.comments || null,
                     },
                 });
@@ -250,8 +257,8 @@ const submitSelfAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, func
                     data: { newValues: { selfAppraisal: selfData, answers: answerData } },
                 });
             }
-            const employeeDeptId = (_d = (_c = appraisal.employee) === null || _c === void 0 ? void 0 : _c.departmentId) !== null && _d !== void 0 ? _d : 0;
-            const empName = `${(_e = appraisal.employee) === null || _e === void 0 ? void 0 : _e.firstName} ${(_f = appraisal.employee) === null || _f === void 0 ? void 0 : _f.lastName}`;
+            const employeeDeptId = (_f = (_e = appraisal.employee) === null || _e === void 0 ? void 0 : _e.departmentId) !== null && _f !== void 0 ? _f : 0;
+            const empName = `${(_g = appraisal.employee) === null || _g === void 0 ? void 0 : _g.firstName} ${(_h = appraisal.employee) === null || _h === void 0 ? void 0 : _h.lastName}`;
             const selfMsg = allSubmitted
                 ? `All appraisal sections submitted for ${empName} (${appraisal.cycle}). Please review.`
                 : `Self-appraisal submitted by ${empName} (${appraisal.cycle}).`;
@@ -268,7 +275,7 @@ exports.submitSelfAppraisal = submitSelfAppraisal;
 // MANAGER: SUBMIT MANAGER APPRAISAL (enhanced — status-aware)
 // ═══════════════════════════════════════════════════════════════════════════════
 const submitManagerAppraisalV2 = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f, _g;
     try {
         const id = Number(req.params.id);
         const { qualityOfWorkRating, qualityOfWorkComments, knowledgeOfJobRating, knowledgeOfJobComments, teamworkRating, teamworkComments, independenceRating, independenceComments, recordsRating, recordsComments, guestServiceRating, guestServiceComments, safetyRating, safetyComments, attendanceRating, attendanceComments, leadershipRating, leadershipComments, overallScore, comments, recommendations, finalDecision, finalComments, isDraft, } = req.body;
@@ -278,6 +285,10 @@ const submitManagerAppraisalV2 = (req, res) => __awaiter(void 0, void 0, void 0,
         });
         if (!appraisal)
             return res.status(404).json({ error: "Appraisal not found" });
+        const callerEmpId = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const guard = yield (0, appraisal_pause_controller_1.assertNotPausedOrHR)(appraisal.employeeId, callerEmpId);
+        if (guard.blocked)
+            return res.status(423).json({ error: guard.message });
         // Allow manager to fill during PENDING_FILL (parallel) or after self-appraisal submitted
         if (!["PENDING_FILL", "SELF_APPRAISAL_SUBMITTED", "MANAGER_APPRAISAL_PENDING", "MANAGER_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
             return res.status(400).json({ error: "Manager appraisal cannot be submitted at this stage" });
@@ -285,7 +296,7 @@ const submitManagerAppraisalV2 = (req, res) => __awaiter(void 0, void 0, void 0,
         // New dynamic form sends an `answers` array. Persist to the unified
         // AppraisalReviewAnswer table (level=MANAGER) in addition to the legacy
         // column upsert below, so both old and new clients work during cutover.
-        const answers = (_a = req.body) === null || _a === void 0 ? void 0 : _a.answers;
+        const answers = (_c = req.body) === null || _c === void 0 ? void 0 : _c.answers;
         if (Array.isArray(answers)) {
             yield saveReviewAnswers(id, "MANAGER", answers);
         }
@@ -348,8 +359,8 @@ const submitManagerAppraisalV2 = (req, res) => __awaiter(void 0, void 0, void 0,
                     data: { newValues: { managerAppraisal: mgrData } },
                 });
             }
-            const employeeDeptId = (_c = (_b = appraisal.employee) === null || _b === void 0 ? void 0 : _b.departmentId) !== null && _c !== void 0 ? _c : 0;
-            const empName = `${(_d = appraisal.employee) === null || _d === void 0 ? void 0 : _d.firstName} ${(_e = appraisal.employee) === null || _e === void 0 ? void 0 : _e.lastName}`;
+            const employeeDeptId = (_e = (_d = appraisal.employee) === null || _d === void 0 ? void 0 : _d.departmentId) !== null && _e !== void 0 ? _e : 0;
+            const empName = `${(_f = appraisal.employee) === null || _f === void 0 ? void 0 : _f.firstName} ${(_g = appraisal.employee) === null || _g === void 0 ? void 0 : _g.lastName}`;
             const mgrMsg = allSubmitted
                 ? `All appraisal sections submitted for ${empName} (${appraisal.cycle}). Please review.`
                 : `Manager review submitted for ${empName} (${appraisal.cycle}).`;
@@ -366,7 +377,7 @@ exports.submitManagerAppraisalV2 = submitManagerAppraisalV2;
 // MANAGEMENT: SUBMIT MANAGEMENT APPRAISAL
 // ═══════════════════════════════════════════════════════════════════════════════
 const submitManagementAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f, _g;
     try {
         const id = Number(req.params.id);
         const { qualityOfWorkRating, qualityOfWorkComments, knowledgeOfJobRating, knowledgeOfJobComments, teamworkRating, teamworkComments, independenceRating, independenceComments, recordsRating, recordsComments, guestServiceRating, guestServiceComments, safetyRating, safetyComments, attendanceRating, attendanceComments, leadershipRating, leadershipComments, overallScore, comments, recommendations, isDraft, } = req.body;
@@ -376,12 +387,16 @@ const submitManagementAppraisal = (req, res) => __awaiter(void 0, void 0, void 0
         });
         if (!appraisal)
             return res.status(404).json({ error: "Appraisal not found" });
+        const callerEmpId = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const guard = yield (0, appraisal_pause_controller_1.assertNotPausedOrHR)(appraisal.employeeId, callerEmpId);
+        if (guard.blocked)
+            return res.status(423).json({ error: guard.message });
         if (!["PENDING_FILL", "SELF_APPRAISAL_PENDING", "MANAGER_APPRAISAL_PENDING", "MANAGER_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
             return res.status(400).json({ error: "Management appraisal cannot be submitted at this stage" });
         }
         // New dynamic form sends an `answers` array. Persist to AppraisalReviewAnswer
         // (level=MANAGEMENT) in addition to the legacy column upsert below.
-        const mgmtAnswers = (_a = req.body) === null || _a === void 0 ? void 0 : _a.answers;
+        const mgmtAnswers = (_c = req.body) === null || _c === void 0 ? void 0 : _c.answers;
         if (Array.isArray(mgmtAnswers)) {
             yield saveReviewAnswers(id, "MANAGEMENT", mgmtAnswers);
         }
@@ -435,8 +450,8 @@ const submitManagementAppraisal = (req, res) => __awaiter(void 0, void 0, void 0
                     data: { newValues: { managementAppraisal: mgmtData } },
                 });
             }
-            const employeeDeptId = (_c = (_b = appraisal.employee) === null || _b === void 0 ? void 0 : _b.departmentId) !== null && _c !== void 0 ? _c : 0;
-            const empName = `${(_d = appraisal.employee) === null || _d === void 0 ? void 0 : _d.firstName} ${(_e = appraisal.employee) === null || _e === void 0 ? void 0 : _e.lastName}`;
+            const employeeDeptId = (_e = (_d = appraisal.employee) === null || _d === void 0 ? void 0 : _d.departmentId) !== null && _e !== void 0 ? _e : 0;
+            const empName = `${(_f = appraisal.employee) === null || _f === void 0 ? void 0 : _f.firstName} ${(_g = appraisal.employee) === null || _g === void 0 ? void 0 : _g.lastName}`;
             const mgmtMsg = allSubmitted
                 ? `All appraisal sections submitted for ${empName} (${appraisal.cycle}). Please review.`
                 : `Management review submitted for ${empName} (${appraisal.cycle}).`;
@@ -992,6 +1007,9 @@ const submitInchargeAppraisal = (req, res) => __awaiter(void 0, void 0, void 0, 
         });
         if (!appraisal)
             return res.status(404).json({ error: "Appraisal not found" });
+        const guard = yield (0, appraisal_pause_controller_1.assertNotPausedOrHR)(appraisal.employeeId, callerEmpId);
+        if (guard.blocked)
+            return res.status(423).json({ error: guard.message });
         // Fall back to the employee's current in-charge for appraisals created
         // before the snapshot field existed. Snapshot it now so subsequent calls
         // (and the table display) are consistent.
@@ -1070,10 +1088,18 @@ const initAppraisalAutoDraftCron = () => {
             let created = 0;
             for (const emp of employees) {
                 const doj = new Date(emp.dateOfJoining);
-                const monthsSinceJoining = (today.getFullYear() - doj.getFullYear()) * 12 + (today.getMonth() - doj.getMonth());
-                // Create appraisal at 11 months, 23 months, 35 months, etc.
-                if (monthsSinceJoining >= 11 && monthsSinceJoining % 12 === 11) {
-                    const yearNum = Math.floor(monthsSinceJoining / 12) + 1;
+                // EFFECTIVE months = calendar months elapsed minus the sum of any
+                // EmployeeAppraisalPause windows (maternity, long medical leave …).
+                // A 6-month pause delays the annual draft by 6 calendar months — the
+                // cycle name still matches the employee's effective year.
+                const effectiveMonths = yield (0, appraisal_pause_controller_1.getEffectiveMonthsSinceJoining)(emp.id, doj, today);
+                // Eligible from 11 effective months. yearNum keeps the original
+                // semantics: 11→Y1, 23→Y2, 35→Y3. The `existing` check below
+                // prevents duplicates while we're inside an eligibility window.
+                if (effectiveMonths >= 11) {
+                    const yearNum = Math.floor((effectiveMonths + 1) / 12);
+                    if (yearNum < 1)
+                        continue;
                     const cycle = `Year ${yearNum} - Annual Review`;
                     // Check if already exists
                     const existing = yield prisma_1.prisma.appraisalForm.findFirst({
@@ -1128,8 +1154,20 @@ const getEmployeeInsights = (req, res) => __awaiter(void 0, void 0, void 0, func
             return res.status(404).json({ error: "Appraisal not found" });
         const startDate = appraisal.appraisalStartDate || new Date(new Date().setFullYear(new Date().getFullYear() - 1));
         const endDate = appraisal.appraisalEndDate || new Date();
-        // Incidents during the period
-        const incidents = yield prisma_1.prisma.incident.findMany({
+        // Pull pause windows so we can exclude incidents / ratings that fell
+        // inside a maternity / sabbatical period.
+        const pauses = yield prisma_1.prisma.employeeAppraisalPause.findMany({
+            where: {
+                employeeId: appraisal.employeeId,
+                startDate: { lte: endDate },
+                OR: [{ endDate: null }, { endDate: { gte: startDate } }],
+            },
+            select: { startDate: true, endDate: true, reason: true },
+        });
+        const pausedDays = yield (0, appraisal_pause_controller_1.getPausedDaysBetween)(appraisal.employeeId, startDate, endDate);
+        const isInPause = (d) => pauses.some(p => { var _a; return d >= p.startDate && d <= ((_a = p.endDate) !== null && _a !== void 0 ? _a : endDate); });
+        // Incidents during the period (excluding paused windows)
+        const incidentsRaw = yield prisma_1.prisma.incident.findMany({
             where: {
                 employeeId: appraisal.employeeId,
                 createdAt: { gte: startDate, lte: endDate },
@@ -1137,8 +1175,9 @@ const getEmployeeInsights = (req, res) => __awaiter(void 0, void 0, void 0, func
             select: { id: true, title: true, status: true, createdAt: true },
             orderBy: { createdAt: "desc" },
         });
-        // Weekly ratings during the period
-        const weeklyRatings = yield prisma_1.prisma.weeklyPerformanceRating.findMany({
+        const incidents = incidentsRaw.filter(i => !isInPause(i.createdAt));
+        // Weekly ratings during the period (excluding paused windows)
+        const ratingsRaw = yield prisma_1.prisma.weeklyPerformanceRating.findMany({
             where: {
                 employeeId: appraisal.employeeId,
                 status: "SUBMITTED",
@@ -1147,6 +1186,7 @@ const getEmployeeInsights = (req, res) => __awaiter(void 0, void 0, void 0, func
             select: { weekStartDate: true, weekLabel: true, overallScore: true },
             orderBy: { weekStartDate: "asc" },
         });
+        const weeklyRatings = ratingsRaw.filter(r => !isInPause(r.weekStartDate));
         // Calculate monthly averages
         const monthlyMap = {};
         for (const r of weeklyRatings) {
@@ -1170,6 +1210,7 @@ const getEmployeeInsights = (req, res) => __awaiter(void 0, void 0, void 0, func
             : null;
         return res.json({
             period: { start: startDate, end: endDate },
+            pause: { totalDays: pausedDays, windows: pauses },
             incidents: { count: incidents.length, list: incidents },
             weeklyRatings: {
                 totalWeeks: weeklyRatings.length,

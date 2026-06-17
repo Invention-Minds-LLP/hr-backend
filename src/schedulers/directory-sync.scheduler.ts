@@ -9,13 +9,14 @@
 import cron from 'node-cron';
 import { PrismaClient } from '@prisma/client';
 import { syncBulkToDirectory } from '../lib/directory';
+import { config } from '../config';
 
 const prisma = new PrismaClient();
 
-const SCHEDULE = process.env.DIRECTORY_SYNC_CRON ?? '30 2 * * *';
+const SCHEDULE = config.directory.syncCron || '30 2 * * *';
 
 export function initDirectorySyncCron() {
-  if (!process.env.DIRECTORY_URL || !process.env.DIRECTORY_API_KEY) {
+  if (!config.directory.url || !config.directory.apiKey) {
     console.log('[directory-sync] DIRECTORY_URL or DIRECTORY_API_KEY not set — nightly cron disabled');
     return;
   }

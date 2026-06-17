@@ -12,6 +12,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getAllSummaries = exports.assignSummaryTemplate = exports.assignFormToEmployee = exports.submitFullForm = exports.getEmployeeForm = exports.submitFinalReview = exports.submitSummary = exports.submitResponses = exports.listTemplatesByDept = exports.deleteTemplate = exports.updateTemplate = exports.getTemplateDetail = exports.getTemplateByDept = exports.createTemplate = void 0;
 const prisma_1 = require("../../lib/prisma");
 const notifications_controller_1 = require("../notifications/notifications.controller");
+const appraisal_pause_controller_1 = require("../appraisal/appraisal-pause.controller");
 // Create a template
 const createTemplate = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
@@ -193,8 +194,13 @@ const listTemplatesByDept = (req, res) => __awaiter(void 0, void 0, void 0, func
 exports.listTemplatesByDept = listTemplatesByDept;
 // Submit per-question responses — upsert per (employee, cycle, period, question)
 const submitResponses = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     try {
         const { employeeId, departmentId, cycle, responses } = req.body;
+        const callerEmpId = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const guard = yield (0, appraisal_pause_controller_1.assertNotPausedOrHR)(Number(employeeId), callerEmpId);
+        if (guard.blocked)
+            return res.status(423).json({ error: guard.message });
         yield prisma_1.prisma.$transaction((responses || []).map((r) => prisma_1.prisma.performanceResponse.upsert({
             where: {
                 employeeId_cycle_period_questionId: {
@@ -229,8 +235,13 @@ const submitResponses = (req, res) => __awaiter(void 0, void 0, void 0, function
 exports.submitResponses = submitResponses;
 // Submit summary — idempotent per (employee, cycle, period, templateId)
 const submitSummary = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     try {
         const { employeeId, departmentId, cycle, templateId, summaries } = req.body;
+        const callerEmpId = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const guard = yield (0, appraisal_pause_controller_1.assertNotPausedOrHR)(Number(employeeId), callerEmpId);
+        if (guard.blocked)
+            return res.status(423).json({ error: guard.message });
         const tid = templateId !== null && templateId !== void 0 ? templateId : null;
         yield prisma_1.prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
             for (const s of (summaries || [])) {
@@ -273,8 +284,13 @@ function upsertSummary(tx, args) {
 }
 // Submit final review
 const submitFinalReview = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     try {
         const { employeeId, departmentId, cycle, appreciations, talents, overallComments, employeeSig, supervisorSig, hrSig } = req.body;
+        const callerEmpId = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const guard = yield (0, appraisal_pause_controller_1.assertNotPausedOrHR)(Number(employeeId), callerEmpId);
+        if (guard.blocked)
+            return res.status(423).json({ error: guard.message });
         const review = yield prisma_1.prisma.performanceFinalReview.create({
             data: { employeeId, departmentId, cycle, appreciations, talents, overallComments, employeeSig, supervisorSig, hrSig }
         });
@@ -333,10 +349,14 @@ const getEmployeeForm = (req, res) => __awaiter(void 0, void 0, void 0, function
 });
 exports.getEmployeeForm = getEmployeeForm;
 const submitFullForm = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e, _f;
     try {
         const data = req.body;
-        const templateId = (_a = data.templateId) !== null && _a !== void 0 ? _a : null;
+        const callerEmpId = (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.empId) !== null && _b !== void 0 ? _b : null;
+        const guard = yield (0, appraisal_pause_controller_1.assertNotPausedOrHR)(Number(data.employeeId), callerEmpId);
+        if (guard.blocked)
+            return res.status(423).json({ error: guard.message });
+        const templateId = (_c = data.templateId) !== null && _c !== void 0 ? _c : null;
         yield prisma_1.prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
             var _a, _b;
             // 1) Upsert per-question responses (idempotent on re-submit)
@@ -421,7 +441,7 @@ const submitFullForm = (req, res) => __awaiter(void 0, void 0, void 0, function*
             }
         }));
         // 4) Notify HR when summaries are submitted without a final review yet.
-        if (!data.finalReview && ((_b = data.summaries) === null || _b === void 0 ? void 0 : _b.length)) {
+        if (!data.finalReview && ((_d = data.summaries) === null || _d === void 0 ? void 0 : _d.length)) {
             const employee = yield prisma_1.prisma.employee.findUnique({
                 where: { id: data.employeeId },
                 select: { firstName: true, lastName: true, employeeCode: true },
@@ -433,7 +453,7 @@ const submitFullForm = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 where: { departmentId: 1, employmentStatus: 'ACTIVE' },
                 select: { id: true },
             });
-            const period = (_d = (_c = data.summaries[0]) === null || _c === void 0 ? void 0 : _c.period) !== null && _d !== void 0 ? _d : '';
+            const period = (_f = (_e = data.summaries[0]) === null || _e === void 0 ? void 0 : _e.period) !== null && _f !== void 0 ? _f : '';
             const message = `HOD has submitted appraisal for ${employeeName} for ${data.cycle}${period ? ` – ${period}` : ''}. Please review.`;
             for (const hr of hrUsers) {
                 yield (0, notifications_controller_1.createNotification)(hr.id, message);

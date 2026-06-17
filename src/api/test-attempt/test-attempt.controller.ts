@@ -7,12 +7,13 @@ import { Client } from 'basic-ftp';
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
 import { createNotification } from '../notifications/notifications.controller';
+import { config } from '../../config';
 
 const FTP_CONFIG = {
-  host: process.env.FTP_HOST ?? "",
-  user: process.env.FTP_USER ?? "",
-  password: process.env.FTP_PASS ?? "",
-  secure: process.env.FTP_SECURE === "true"
+  host: config.ftp.host,
+  user: config.ftp.user,
+  password: config.ftp.pass,
+  secure: config.ftp.secure,
 }
 const TEMP_FOLDER = path.join(__dirname, '../temp'); // absolute path
 

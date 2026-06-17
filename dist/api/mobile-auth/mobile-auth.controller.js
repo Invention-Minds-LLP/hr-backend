@@ -18,14 +18,16 @@ const otp_service_1 = require("../../services/otp.service");
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const crypto_1 = __importDefault(require("crypto"));
 const sms_controller_1 = require("../sms/sms.controller");
+const leave_controller_1 = require("../leave/leave.controller");
 const sendEmailOtp_1 = require("../../utils/sendEmailOtp");
 const attendanceMode_1 = require("../../lib/attendanceMode");
+const config_1 = require("../../config");
 const mobilePhoneInit = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a, _b, _c;
     const { phone } = req.body;
     // ✅ PLAY STORE REVIEW AUTO LOGIN
-    if (process.env.PLAY_REVIEW_MODE === 'true' &&
-        phone === process.env.PLAY_REVIEW_PHONE) {
+    if (config_1.config.playReview.mode &&
+        phone === config_1.config.playReview.phone) {
         const employee = yield prisma_1.prisma.employee.findFirst({
             where: { phone },
             include: {
@@ -50,7 +52,7 @@ const mobilePhoneInit = (req, res) => __awaiter(void 0, void 0, void 0, function
             empId: employee.id,
             role: empRoleName,
             reviewMode: true
-        }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        }, config_1.config.jwtSecret, { expiresIn: '1h' });
         const refreshToken = crypto_1.default.randomUUID();
         yield prisma_1.prisma.refreshToken.create({
             data: {
@@ -83,21 +85,38 @@ const mobilePhoneInit = (req, res) => __awaiter(void 0, void 0, void 0, function
     if (!employee) {
         return res.status(404).json({ message: 'Phone not registered' });
     }
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    yield otp_service_1.otpService.generate(phone, otp);
-    const sms = yield (0, sms_controller_1.sendOtpSms)({
-        patientName: employee.firstName,
-        otp,
-        service: 'Mobile Login',
-        phoneNumber: phone
-    });
-    console.log('OTP SMS sent:', sms.data);
     const session = yield prisma_1.prisma.mobileAuthSession.create({
         data: {
             employeeId: employee.id,
             expiresAt: new Date(Date.now() + 15 * 60 * 1000)
         }
     });
+    // Per-client (MOBILE_SKIP_PHONE_OTP in .env): IM skips the phone-OTP step and
+    // goes phone → identity confirmation → email OTP. No phone OTP is sent.
+    if (config_1.config.flags.skipPhoneOtp) {
+        return res.json({ sessionId: session.id, next: 'IDENTITY_CONFIRMATION' });
+    }
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    yield otp_service_1.otpService.generate(phone, otp);
+    // OTP channel is per-client by which provider they own (OTP_CHANNEL in .env):
+    // IM → WhatsApp (its creds + template), JMRH → SMS (its creds).
+    if (config_1.config.flags.otpChannel === 'whatsapp') {
+        const wa = yield (0, leave_controller_1.sendWhatsAppTemplate)({
+            to: phone,
+            templateId: config_1.config.whatsapp.otpTemplateId,
+            placeholders: [otp], // assumes template body {{1}} = OTP code
+        });
+        console.log('OTP WhatsApp sent:', wa);
+    }
+    else {
+        const sms = yield (0, sms_controller_1.sendOtpSms)({
+            patientName: employee.firstName,
+            otp,
+            service: 'Mobile Login',
+            phoneNumber: phone
+        });
+        console.log('OTP SMS sent:', sms.data);
+    }
     res.json({ sessionId: session.id });
 });
 exports.mobilePhoneInit = mobilePhoneInit;
@@ -143,7 +162,7 @@ const mobileConfirmIdentity = (req, res) => __awaiter(void 0, void 0, void 0, fu
 exports.mobileConfirmIdentity = mobileConfirmIdentity;
 const getMobileClientInfo = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
     res.json({
-        clientName: process.env.MOBILE_CLIENT_NAME
+        clientName: config_1.config.branding.mobileClientName
     });
 });
 exports.getMobileClientInfo = getMobileClientInfo;
@@ -242,7 +261,7 @@ const mobileFinalizeLogin = (req, res) => __awaiter(void 0, void 0, void 0, func
         userId: user.id,
         empId: employee.id,
         role: roleName
-    }, process.env.JWT_SECRET, { expiresIn: '15m' });
+    }, config_1.config.jwtSecret, { expiresIn: '15m' });
     const refreshToken = crypto_1.default.randomUUID();
     yield prisma_1.prisma.refreshToken.create({
         data: {
@@ -292,7 +311,7 @@ const refreshAccessToken = (req, res) => __awaiter(void 0, void 0, void 0, funct
         userId: stored.user.id,
         role: (_b = (_a = employee.role) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : stored.user.role,
         empId: employee.id,
-    }, process.env.JWT_SECRET, { expiresIn: '12h' });
+    }, config_1.config.jwtSecret, { expiresIn: '12h' });
     res.json({ accessToken });
 });
 exports.refreshAccessToken = refreshAccessToken;

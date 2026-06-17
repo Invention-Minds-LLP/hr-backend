@@ -27,7 +27,7 @@ async function isHoliday(date: Date) {
 //   // Sunday as default weekly off
 //   return date.getDay() === 0;
 // }
-async function isWeeklyOff(employeeId: number, date: Date) {
+export async function isWeeklyOff(employeeId: number, date: Date) {
   const approval = await prisma.shiftApproval.findFirst({
     where: {
       employeeId,

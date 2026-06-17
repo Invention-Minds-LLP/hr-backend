@@ -44,7 +44,6 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
-var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.uploadPrescription = exports.triggerFYRollover = exports.purgeAndRerunFYRollover = exports.initFinancialYearRolloverCron = exports.bulkUploadLeaveBalancesExcel = exports.initNewJoineeLeaveAllocationCron = exports.initELAccrualCron = exports.triggerELAccrual = exports.getCompOffCredits = exports.getMonthlyCasualUsage = exports.updateLeaveType = exports.initLeaveEndScheduler = exports.getLeaveBalance = exports.getBlockedDates = exports.createLeaveBalances = exports.updateLeaveStatus = exports.getLeaveTypes = exports.createLeaveType = exports.getLeaveRequests = exports.cancelLeaveRequest = exports.updateLeaveRequest = exports.createLeaveRequest = void 0;
 exports.daysInclusive = daysInclusive;
@@ -57,11 +56,12 @@ exports.computeTotalUsed = computeTotalUsed;
 exports.getTouchedMonths = getTouchedMonths;
 exports.insertLedgerTx = insertLedgerTx;
 exports.getLastLedgerBalanceTx = getLastLedgerBalanceTx;
+exports.getLeaveStartMode = getLeaveStartMode;
+exports.getNewJoineeEntitlement = getNewJoineeEntitlement;
+exports.allocateNewJoineeLeave = allocateNewJoineeLeave;
 exports.getFinancialYear = getFinancialYear;
 exports.getCalendarYear = getCalendarYear;
 exports.runFYRollover = runFYRollover;
-// import { PrismaClient, LeaveStatus } from "@prisma/client";
-const axios_1 = __importDefault(require("axios"));
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
 const notifications_controller_1 = require("../notifications/notifications.controller");
@@ -73,11 +73,12 @@ const p_limit_1 = __importDefault(require("p-limit"));
 const fs_1 = __importDefault(require("fs"));
 const basic_ftp_1 = require("basic-ftp");
 const path_1 = __importDefault(require("path"));
+const config_1 = require("../../config");
 const FTP_CONFIG = {
-    host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
-    user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
-    password: (_c = process.env.FTP_PASS) !== null && _c !== void 0 ? _c : "",
-    secure: false,
+    host: config_1.config.ftp.host,
+    user: config_1.config.ftp.user,
+    password: config_1.config.ftp.pass,
+    secure: config_1.config.ftp.secure,
 };
 const LEAVE_APPLY_TEMPLATE_ID = "890321";
 const LEAVE_STATUS_TEMPLATE_ID = "909803";
@@ -2170,26 +2171,32 @@ const fmtDate = (d) => new Intl.DateTimeFormat("en-IN", { timeZone: TZ, day: "2-
 function atStart(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
 function sendWhatsAppTemplate(_a) {
     return __awaiter(this, arguments, void 0, function* ({ to, templateId, placeholders }) {
-        var _b;
-        const payload = {
-            from: process.env.WHATSAPP_FROM_PHONE_NUMBER,
-            to: formatPhoneNumber(to),
-            type: "template",
-            message: {
-                templateid: templateId,
-                placeholders: placeholders.map(String),
-            },
-        };
-        const headers = {
-            "Content-Type": "application/json",
-            apikey: process.env.WHATSAPP_AUTH_TOKEN,
-        };
-        const url = process.env.WHATSAPP_API_URL;
-        const resp = yield axios_1.default.post(url, payload, { headers });
-        if (((_b = resp === null || resp === void 0 ? void 0 : resp.data) === null || _b === void 0 ? void 0 : _b.code) !== "200") {
-            throw new Error(`WhatsApp send failed: ${JSON.stringify(resp.data)}`);
-        }
-        return resp.data;
+        // ── WhatsApp sending DISABLED for now ──────────────────────────────────────
+        // We don't want any WhatsApp messages going out at the moment. Every WhatsApp
+        // send in the app routes through this function (leave/wfh/appraisal/permission/
+        // test-assign notifications + mobile-login OTP), so disabling it here turns
+        // them all off. To re-enable, delete the two lines below and uncomment block.
+        console.log(`[whatsapp] disabled — skipping send to ${to} (template ${templateId}, ${placeholders.length} placeholders)`);
+        return null;
+        // const payload = {
+        //   from: config.whatsapp.fromPhoneNumber,
+        //   to: formatPhoneNumber(to),
+        //   type: "template",
+        //   message: {
+        //     templateid: templateId,
+        //     placeholders: placeholders.map(String),
+        //   },
+        // };
+        // const headers = {
+        //   "Content-Type": "application/json",
+        //   apikey: config.whatsapp.authToken,
+        // };
+        // const url = config.whatsapp.apiUrl;
+        // const resp = await axios.post(url, payload, { headers });
+        // if (resp?.data?.code !== "200") {
+        //   throw new Error(`WhatsApp send failed: ${JSON.stringify(resp.data)}`);
+        // }
+        // return resp.data;
     });
 }
 const getBlockedDates = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
@@ -2951,8 +2958,65 @@ function getWorkedDaysOptimized(employeeId, year, month, weekOffConfig) {
         return finalCount;
     });
 }
+/**
+ * Controls when a new employee's CL/SL is credited:
+ *  - "DOJ" (default): pro-rata from the Date of Joining, at employee creation.
+ *    The probation period is ignored for leave accrual — matches the leave
+ *    policy ("1 CL & 1 SL per month from DOJ").
+ *  - "PROBATION_END": pro-rata from the probation end date, via the daily cron
+ *    below (legacy behavior).
+ * Set LEAVE_BALANCE_START_MODE=PROBATION_END in .env to use the legacy behavior.
+ */
+function getLeaveStartMode() {
+    return config_1.config.leave.balanceStartMode === "PROBATION_END"
+        ? "PROBATION_END"
+        : "DOJ";
+}
+/**
+ * Pro-rata CL/SL entitlement counting from `baseDate` to the end of that
+ * financial year. Half-month rule: if `baseDate` is after the 15th, that month
+ * is not counted (start shifts to the 1st of the next month).
+ */
+function getNewJoineeEntitlement(baseDate) {
+    const fy = getFinancialYearBounds(baseDate);
+    // ✅ APPLY HALF-MONTH RULE
+    let effectiveStart = new Date(baseDate);
+    if (baseDate.getDate() > 15) {
+        // skip current month → move to next month 1st
+        effectiveStart = new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 1);
+    }
+    const months = getRemainingMonths(effectiveStart, fy.end);
+    const CL_ANNUAL = 12;
+    const SL_ANNUAL = 12;
+    return {
+        fyYear: fy.fyYear,
+        effectiveStart,
+        months,
+        cl: (CL_ANNUAL / 12) * months,
+        sl: (SL_ANNUAL / 12) * months,
+    };
+}
+/**
+ * Allocate pro-rata CL & SL for a new joinee, counting from `baseDate`.
+ * Idempotent per (employee, leaveType, FY) via the OPENING_BALANCE guard in
+ * allocateLeave, so re-running it will not double-credit.
+ */
+function allocateNewJoineeLeave(employeeId, baseDate) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const { cl, sl, fyYear, effectiveStart } = getNewJoineeEntitlement(baseDate);
+        yield prisma_1.prisma.$transaction((tx) => __awaiter(this, void 0, void 0, function* () {
+            yield allocateLeave(tx, employeeId, "CL", cl, fyYear, effectiveStart);
+            yield allocateLeave(tx, employeeId, "SL", sl, fyYear, effectiveStart);
+        }));
+        return { cl, sl, fyYear };
+    });
+}
 const initNewJoineeLeaveAllocationCron = () => {
     node_cron_1.default.schedule("0 2 * * *", () => __awaiter(void 0, void 0, void 0, function* () {
+        // In DOJ mode, CL/SL is credited at employee creation (createEmployee),
+        // not at probation end — so this cron is a no-op.
+        if (getLeaveStartMode() !== "PROBATION_END")
+            return;
         console.log("Running New Joinee Leave Allocation Cron...");
         const today = new Date();
         const employees = yield prisma_1.prisma.employee.findMany({
@@ -2967,26 +3031,10 @@ const initNewJoineeLeaveAllocationCron = () => {
             if (!emp.probationEndDate)
                 continue;
             const eligibleDate = new Date(emp.probationEndDate);
-            // const eligibleDate = new Date(emp.probationEndDate);
-            // 👉 Only trigger ONCE
+            // 👉 Only trigger ONCE, on the probation end date
             if (!isSameDate(eligibleDate, today))
                 continue;
-            const fy = getFinancialYearBounds(eligibleDate);
-            // ✅ APPLY HALF-MONTH RULE
-            let effectiveStart = new Date(eligibleDate);
-            if (eligibleDate.getDate() > 15) {
-                // skip current month → move to next month 1st
-                effectiveStart = new Date(eligibleDate.getFullYear(), eligibleDate.getMonth() + 1, 1);
-            }
-            const months = getRemainingMonths(effectiveStart, fy.end);
-            const CL_ANNUAL = 12;
-            const SL_ANNUAL = 12;
-            const cl = (CL_ANNUAL / 12) * months;
-            const sl = (SL_ANNUAL / 12) * months;
-            yield prisma_1.prisma.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
-                yield allocateLeave(tx, emp.id, "CL", cl, fy.fyYear, effectiveStart);
-                yield allocateLeave(tx, emp.id, "SL", sl, fy.fyYear, effectiveStart);
-            }));
+            const { cl, sl } = yield allocateNewJoineeLeave(emp.id, eligibleDate);
             console.log(`✅ Leave allocated for emp ${emp.id}: CL=${cl}, SL=${sl}`);
         }
     }));
@@ -3020,6 +3068,20 @@ function allocateLeave(tx, employeeId, leaveName, amount, year, date) {
             where: { name: leaveName }
         });
         if (!lt)
+            return;
+        // Idempotency: don't re-allocate if a system opening balance already exists
+        // for this employee + leave type + financial year (e.g. cron + DOJ paths, or
+        // a re-run). Prevents double-crediting.
+        const alreadyAllocated = yield tx.leaveLedger.findFirst({
+            where: {
+                employeeId,
+                leaveTypeId: lt.id,
+                year,
+                action: "OPENING_BALANCE",
+                source: "SYSTEM",
+            },
+        });
+        if (alreadyAllocated)
             return;
         const prevBalance = yield getLastLedgerBalanceTx(tx, employeeId, lt.id, year);
         const newBalance = prevBalance + amount;

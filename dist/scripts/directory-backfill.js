@@ -24,10 +24,11 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 require("dotenv/config");
+const config_1 = require("../config");
 const directory_sync_scheduler_1 = require("../schedulers/directory-sync.scheduler");
 function main() {
     return __awaiter(this, void 0, void 0, function* () {
-        if (!process.env.DIRECTORY_URL || !process.env.DIRECTORY_API_KEY) {
+        if (!config_1.config.directory.url || !config_1.config.directory.apiKey) {
             console.error('❌ DIRECTORY_URL and DIRECTORY_API_KEY must be set in .env');
             process.exit(1);
         }

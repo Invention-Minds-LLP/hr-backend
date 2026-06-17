@@ -18,13 +18,14 @@ import bcrypt from "bcryptjs";
 import cron from 'node-cron';
 import { syncEmployeeToDirectory, deactivateEmployeeInDirectory } from "../../lib/directory";
 import { allocateNewJoineeLeave, getLeaveStartMode } from "../leave/leave.controller";
+import { config } from "../../config";
 
 
 const FTP_CONFIG = {
-  host: process.env.FTP_HOST ?? "",
-  user: process.env.FTP_USER ?? "",
-  password: process.env.FTP_PASS ?? "",
-  secure: process.env.FTP_SECURE === "true"
+  host: config.ftp.host,
+  user: config.ftp.user,
+  password: config.ftp.pass,
+  secure: config.ftp.secure,
 }
 const TEMP_FOLDER = path.join(__dirname, '../temp'); // absolute path
 
@@ -101,14 +102,14 @@ const EMPLOYEE_PREFIX_MAP: Record<string, string> = {
 
 
 async function generateEmployeeCode(employmentType: string) {
-  const basePrefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
+  const basePrefix = config.employeeCode.prefix || 'EMP';
 
   const suffix =
     EMPLOYEE_PREFIX_MAP[employmentType?.toUpperCase()] ?? '';
 
   const prefix = `${basePrefix}${suffix}`;
 
-  const startNumber = process.env.EMPLOYEE_CODE_START || '001';
+  const startNumber = config.employeeCode.start || '001';
 
   const lastEmployee = await prisma.employee.findFirst({
     where: {

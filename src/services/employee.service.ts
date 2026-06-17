@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
   import jwt from 'jsonwebtoken';
 import { prisma } from '../lib/prisma';
+import { config } from '../config';
 
 export class UserAuthService {
 
@@ -72,7 +73,7 @@ finalizeLogin = async (
 
   const token = jwt.sign(
     payload,
-    process.env.JWT_SECRET as string,
+    config.jwtSecret,
     { expiresIn: '12h' }
   );
 

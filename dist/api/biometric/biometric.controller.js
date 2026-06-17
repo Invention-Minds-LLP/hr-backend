@@ -22,14 +22,16 @@ const client_1 = require("@prisma/client");
 const notifications_controller_1 = require("../notifications/notifications.controller");
 const comOff_service_1 = require("../../services/comOff.service");
 const attendanceMode_1 = require("../../lib/attendanceMode");
+const config_1 = require("../../config");
 const prisma = new client_1.PrismaClient();
 /* ---------------------------------
    COSEC CONFIG
+   Per-client biometric device — set COSEC_BASE_URL / COSEC_USERNAME /
+   COSEC_PASSWORD in this client's .env (see src/config).
 ---------------------------------- */
-const COSEC_BASE_URL = 'http://192.168.14.114:83/COSEC/api.svc/v2';
-// const COSEC_BASE_URL = 'http://14.194.12.229:83/COSEC/api.svc/v2';
-const COSEC_USERNAME = 'api';
-const COSEC_PASSWORD = 'Api@123';
+const COSEC_BASE_URL = config_1.config.cosec.baseUrl;
+const COSEC_USERNAME = config_1.config.cosec.username;
+const COSEC_PASSWORD = config_1.config.cosec.password;
 /* ---------------------------------
    DATE HELPERS
 ---------------------------------- */

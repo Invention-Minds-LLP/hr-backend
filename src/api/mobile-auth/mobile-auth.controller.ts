@@ -5,16 +5,18 @@ import { otpService } from '../../services/otp.service';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { sendOtpSms } from '../sms/sms.controller';
+import { sendWhatsAppTemplate } from '../leave/leave.controller';
 import { sendEmailOtp } from '../../utils/sendEmailOtp';
 import { resolveAttendanceMode } from '../../lib/attendanceMode';
+import { config } from '../../config';
 
 export const mobilePhoneInit = async (req: Request, res: Response) => {
     const { phone } = req.body;
 
     // ✅ PLAY STORE REVIEW AUTO LOGIN
     if (
-        process.env.PLAY_REVIEW_MODE === 'true' &&
-        phone === process.env.PLAY_REVIEW_PHONE
+        config.playReview.mode &&
+        phone === config.playReview.phone
     ) {
         const employee = await prisma.employee.findFirst({
             where: { phone },
@@ -47,7 +49,7 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
                 role: empRoleName,
                 reviewMode: true
             },
-            process.env.JWT_SECRET!,
+            config.jwtSecret,
             { expiresIn: '1h' }
         );
 
@@ -90,17 +92,6 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
     if (!employee) {
         return res.status(404).json({ message: 'Phone not registered' });
     }
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    await otpService.generate(phone, otp);
-
-    const sms = await sendOtpSms({
-        patientName: employee.firstName,
-        otp,
-        service: 'Mobile Login',
-        phoneNumber: phone
-    });
-
-    console.log('OTP SMS sent:', sms.data);
 
     const session = await prisma.mobileAuthSession.create({
         data: {
@@ -108,6 +99,34 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
             expiresAt: new Date(Date.now() + 15 * 60 * 1000)
         }
     });
+
+    // Per-client (MOBILE_SKIP_PHONE_OTP in .env): IM skips the phone-OTP step and
+    // goes phone → identity confirmation → email OTP. No phone OTP is sent.
+    if (config.flags.skipPhoneOtp) {
+        return res.json({ sessionId: session.id, next: 'IDENTITY_CONFIRMATION' });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    await otpService.generate(phone, otp);
+
+    // OTP channel is per-client by which provider they own (OTP_CHANNEL in .env):
+    // IM → WhatsApp (its creds + template), JMRH → SMS (its creds).
+    if (config.flags.otpChannel === 'whatsapp') {
+        const wa = await sendWhatsAppTemplate({
+            to: phone,
+            templateId: config.whatsapp.otpTemplateId,
+            placeholders: [otp], // assumes template body {{1}} = OTP code
+        });
+        console.log('OTP WhatsApp sent:', wa);
+    } else {
+        const sms = await sendOtpSms({
+            patientName: employee.firstName,
+            otp,
+            service: 'Mobile Login',
+            phoneNumber: phone
+        });
+        console.log('OTP SMS sent:', sms.data);
+    }
 
     res.json({ sessionId: session.id });
 };
@@ -163,7 +182,7 @@ export const mobileConfirmIdentity = async (req: Request, res: Response) => {
 };
 export const getMobileClientInfo = async (_req: Request, res: Response) => {
     res.json({
-        clientName: process.env.MOBILE_CLIENT_NAME
+        clientName: config.branding.mobileClientName
     });
 };
 
@@ -284,7 +303,7 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
             empId: employee.id,
             role: roleName
         },
-        process.env.JWT_SECRET!,
+        config.jwtSecret,
         { expiresIn: '15m' }
     );
 
@@ -348,7 +367,7 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
             role: employee.role?.name ?? stored.user.role,
             empId: employee.id,
         },
-        process.env.JWT_SECRET!,
+        config.jwtSecret,
         { expiresIn: '12h' }
     );
 

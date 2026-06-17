@@ -14,14 +14,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.sendEmailOtp = void 0;
 const nodemailer_1 = __importDefault(require("nodemailer"));
+const config_1 = require("../config");
 const transporter = nodemailer_1.default.createTransport({
-    service: 'gmail',
-    host: "smtp.gmail.com",
-    port: 587,
-    secure: false,
+    host: config_1.config.smtp.host,
+    port: config_1.config.smtp.port,
+    secure: config_1.config.smtp.secure,
     auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
+        user: config_1.config.smtp.user,
+        pass: config_1.config.smtp.pass
     }
 });
 const sendEmailOtp = (_a) => __awaiter(void 0, [_a], void 0, function* ({ to, otp, employeeName = 'Employee', purpose = 'Mobile Login Verification' }) {
@@ -56,7 +56,7 @@ HR Team
   </div>
 `;
     return transporter.sendMail({
-        from: process.env.SMTP_USER,
+        from: config_1.config.smtp.from,
         to,
         subject,
         text,

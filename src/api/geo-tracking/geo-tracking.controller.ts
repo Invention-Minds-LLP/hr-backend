@@ -5,6 +5,7 @@ import fs from "fs";
 import path from "path";
 import formidable, { File as FormidableFile } from "formidable";
 import { Client } from "basic-ftp";
+import { config } from "../../config";
 
 
 
@@ -270,10 +271,10 @@ export const endLocationSession = async (
 
 
 const FTP_CONFIG = {
-    host: process.env.FTP_HOST!,
-    user: process.env.FTP_USER!,
-    password: process.env.FTP_PASS!,
-    secure: false,
+    host: config.ftp.host,
+    user: config.ftp.user,
+    password: config.ftp.pass,
+    secure: config.ftp.secure,
 };
 
 async function uploadToFTP(localFilePath: string, remotePath: string): Promise<void> {

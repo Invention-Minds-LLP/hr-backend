@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
+import { assertNotPausedOrHR } from "../appraisal/appraisal-pause.controller";
 
 // Create a template
 export const createTemplate = async (req: Request, res: Response) => {
@@ -192,6 +193,9 @@ export const listTemplatesByDept = async (req: Request, res: Response) => {
 export const submitResponses = async (req: Request, res: Response) => {
   try {
     const { employeeId, departmentId, cycle, responses } = req.body;
+    const callerEmpId = (req as any).user?.empId ?? null;
+    const guard = await assertNotPausedOrHR(Number(employeeId), callerEmpId);
+    if (guard.blocked) return res.status(423).json({ error: guard.message });
     await prisma.$transaction(
       (responses || []).map((r: any) =>
         prisma.performanceResponse.upsert({
@@ -231,6 +235,9 @@ export const submitResponses = async (req: Request, res: Response) => {
 export const submitSummary = async (req: Request, res: Response) => {
   try {
     const { employeeId, departmentId, cycle, templateId, summaries } = req.body;
+    const callerEmpId = (req as any).user?.empId ?? null;
+    const guard = await assertNotPausedOrHR(Number(employeeId), callerEmpId);
+    if (guard.blocked) return res.status(423).json({ error: guard.message });
     const tid: number | null = templateId ?? null;
     await prisma.$transaction(async (tx) => {
       for (const s of (summaries || [])) {
@@ -286,6 +293,9 @@ async function upsertSummary(
 export const submitFinalReview = async (req: Request, res: Response) => {
   try {
     const { employeeId, departmentId, cycle, appreciations, talents, overallComments, employeeSig, supervisorSig, hrSig } = req.body;
+    const callerEmpId = (req as any).user?.empId ?? null;
+    const guard = await assertNotPausedOrHR(Number(employeeId), callerEmpId);
+    if (guard.blocked) return res.status(423).json({ error: guard.message });
     const review = await prisma.performanceFinalReview.create({
       data: { employeeId, departmentId, cycle, appreciations, talents, overallComments, employeeSig, supervisorSig, hrSig }
     });
@@ -359,6 +369,9 @@ export const getEmployeeForm = async (req: Request, res: Response) => {
 export const submitFullForm = async (req: Request, res: Response) => {
   try {
     const data = req.body as any;
+    const callerEmpId = (req as any).user?.empId ?? null;
+    const guard = await assertNotPausedOrHR(Number(data.employeeId), callerEmpId);
+    if (guard.blocked) return res.status(423).json({ error: guard.message });
     const templateId: number | null = data.templateId ?? null;
 
     await prisma.$transaction(async (tx) => {

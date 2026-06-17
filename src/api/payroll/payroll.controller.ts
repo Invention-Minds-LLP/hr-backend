@@ -207,10 +207,20 @@ export const upsertSalaryStructure = async (req: Request, res: Response) => {
 
     if (!employeeId) return res.status(400).json({ message: 'employeeId required' });
 
+    const empId = Number(employeeId);
+    const ctc = (n: any) =>
+      (n.basic || 0) + (n.hra || 0) + (n.medicalAllowance || 0) + (n.travelAllowance || 0) +
+      (n.specialAllowance || 0) + (n.otherAllowances || 0);
+
+    // Capture the prior CTC before the upsert so we can log a revision.
+    const existing = await prisma.salaryStructure.findUnique({ where: { employeeId: empId } });
+    const oldCtc = existing ? ctc(existing) : 0;
+    const newCtc = ctc({ basic, hra, medicalAllowance, travelAllowance, specialAllowance, otherAllowances });
+
     const structure = await (prisma as any).salaryStructure.upsert({
-      where: { employeeId: Number(employeeId) },
+      where: { employeeId: empId },
       create: {
-        employeeId: Number(employeeId),
+        employeeId: empId,
         basic, hra, medicalAllowance, travelAllowance, specialAllowance, otherAllowances,
         pfApplicable, esiApplicable, ptApplicable, tdsMonthly,
         effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : new Date(),
@@ -221,6 +231,23 @@ export const upsertSalaryStructure = async (req: Request, res: Response) => {
         effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : undefined,
       },
     });
+
+    // Record a salary revision when an existing CTC actually changed
+    // (feeds management dashboard #22 — increment % by department).
+    if (existing && oldCtc > 0 && Math.round(oldCtc) !== Math.round(newCtc)) {
+      await prisma.salaryRevision.create({
+        data: {
+          employeeId: empId,
+          previousCtc: oldCtc,
+          newCtc,
+          percentage: +(((newCtc - oldCtc) / oldCtc) * 100).toFixed(2),
+          effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : new Date(),
+          reason: req.body?.reason ?? null,
+          createdBy: (req as any).user?.id ?? null,
+        },
+      });
+    }
+
     res.json(structure);
   } catch (err: any) {
     res.status(500).json({ message: err.message });

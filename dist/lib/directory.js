@@ -25,15 +25,15 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
-var _a;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.syncEmployeeToDirectory = syncEmployeeToDirectory;
 exports.syncBulkToDirectory = syncBulkToDirectory;
 exports.deactivateEmployeeInDirectory = deactivateEmployeeInDirectory;
 exports.pingDirectory = pingDirectory;
 const axios_1 = __importDefault(require("axios"));
-const DIRECTORY_URL = (_a = process.env.DIRECTORY_URL) === null || _a === void 0 ? void 0 : _a.replace(/\/$/, '');
-const DIRECTORY_API_KEY = process.env.DIRECTORY_API_KEY;
+const config_1 = require("../config");
+const DIRECTORY_URL = config_1.config.directory.url.replace(/\/$/, '');
+const DIRECTORY_API_KEY = config_1.config.directory.apiKey;
 let client = null;
 function getClient() {
     if (!DIRECTORY_URL || !DIRECTORY_API_KEY)

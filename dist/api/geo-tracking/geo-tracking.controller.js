@@ -19,6 +19,7 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const formidable_1 = __importDefault(require("formidable"));
 const basic_ftp_1 = require("basic-ftp");
+const config_1 = require("../../config");
 function calculateDistance(lat1, lon1, lat2, lon2) {
     const R = 6371000; // meters
     const toRad = (x) => (x * Math.PI) / 180;
@@ -215,10 +216,10 @@ const endLocationSession = (req, res) => __awaiter(void 0, void 0, void 0, funct
 });
 exports.endLocationSession = endLocationSession;
 const FTP_CONFIG = {
-    host: process.env.FTP_HOST,
-    user: process.env.FTP_USER,
-    password: process.env.FTP_PASS,
-    secure: false,
+    host: config_1.config.ftp.host,
+    user: config_1.config.ftp.user,
+    password: config_1.config.ftp.pass,
+    secure: config_1.config.ftp.secure,
 };
 function uploadToFTP(localFilePath, remotePath) {
     return __awaiter(this, void 0, void 0, function* () {

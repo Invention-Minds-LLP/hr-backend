@@ -11,7 +11,6 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
-var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.listEmployeeInterviews = exports.listInterviews = exports.getSummary = exports.saveHrReview = exports.updateReferralBonus = exports.deleteBgvDocument = exports.listBgvDocuments = exports.addBgvDocument = exports.completeBgv = exports.resolveBgvDiscrepancy = exports.updateBgvCheck = exports.getBgv = exports.initiateBgv = exports.recordReferenceCheck = exports.deleteReference = exports.updateReference = exports.addReference = exports.listReferences = exports.recordConsent = exports.upsertFeedback = exports.RecruitingController = void 0;
 exports.expireStaleOffers = expireStaleOffers;
@@ -28,32 +27,26 @@ const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const notifications_controller_1 = require("../notifications/notifications.controller");
 const offerLetterPdf_1 = require("./offerLetterPdf");
+const config_1 = require("../../config");
 const prisma = new client_1.PrismaClient();
-// FTP credentials are loaded from environment variables. Add the following to your `.env`:
-//   FTP_HOST=srv680.main-hosting.eu
-//   FTP_USER=u948610439.hrproindia.in
-//   FTP_PASSWORD=*****
-//   FTP_SECURE=false
+// FTP credentials come from this client's .env via src/config (FTP_HOST /
+// FTP_USER / FTP_PASS / FTP_SECURE).
 const FTP_CONFIG = {
-    host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
-    user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
-    password: (_c = process.env.FTP_PASS) !== null && _c !== void 0 ? _c : "",
-    secure: process.env.FTP_SECURE === "true",
+    host: config_1.config.ftp.host,
+    user: config_1.config.ftp.user,
+    password: config_1.config.ftp.pass,
+    secure: config_1.config.ftp.secure,
 };
 if (!FTP_CONFIG.host || !FTP_CONFIG.user || !FTP_CONFIG.password) {
-    console.warn("⚠️  [recruiting] FTP_HOST / FTP_USER / FTP_PASSWORD not set in env — file uploads will fail");
+    console.warn("⚠️  [recruiting] FTP_HOST / FTP_USER / FTP_PASS not set in env — file uploads will fail");
 }
 // Default IDs that used to be hard-coded throughout this file. Override per
-// environment by adding these to your `.env`:
-//   HR_DEPARTMENT_ID=1
-//   DEFAULT_BRANCH_ID=1
-//   DEFAULT_EMPLOYEE_ROLE_ID=3
-//   DEFAULT_HR_ROLE_ID=1
+// client by setting these in the .env (see src/config).
 const RECRUITING_DEFAULTS = {
-    hrDepartmentId: Number(process.env.HR_DEPARTMENT_ID) || 1,
-    defaultBranchId: Number(process.env.DEFAULT_BRANCH_ID) || 1,
-    defaultEmployeeRoleId: Number(process.env.DEFAULT_EMPLOYEE_ROLE_ID) || 3,
-    defaultHrRoleId: Number(process.env.DEFAULT_HR_ROLE_ID) || 1,
+    hrDepartmentId: config_1.config.recruiting.hrDepartmentId,
+    defaultBranchId: config_1.config.recruiting.defaultBranchId,
+    defaultEmployeeRoleId: config_1.config.recruiting.defaultEmployeeRoleId,
+    defaultHrRoleId: config_1.config.recruiting.defaultHrRoleId,
 };
 /**
  * Read panel member IDs for an interview, preferring the new junction table
@@ -97,13 +90,12 @@ function logApplicationAction(tx_1, applicationId_1, action_1) {
     });
 }
 const transporter = nodemailer_1.default.createTransport({
-    service: 'gmail',
-    host: "smtp.gmail.com",
-    port: 587,
-    secure: false,
+    host: config_1.config.smtp.host,
+    port: config_1.config.smtp.port,
+    secure: config_1.config.smtp.secure,
     auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
+        user: config_1.config.smtp.user,
+        pass: config_1.config.smtp.pass
     }
 });
 function uploadToFTP(localFilePath, remoteFileName) {
@@ -703,9 +695,9 @@ class RecruitingController {
          */
         this.getRecruiterInsights = asyncHandler((_req, res) => __awaiter(this, void 0, void 0, function* () {
             var _a, _b, _c, _d;
-            const STALE_DAYS = Number(process.env.RECRUIT_STALE_DAYS) || 7;
-            const HOT_TEST_SCORE = Number(process.env.RECRUIT_HOT_TEST_SCORE) || 80;
-            const HOT_INTERVIEW_AVG = Number(process.env.RECRUIT_HOT_INTERVIEW_AVG) || 8;
+            const STALE_DAYS = config_1.config.recruiting.staleDays;
+            const HOT_TEST_SCORE = config_1.config.recruiting.hotTestScore;
+            const HOT_INTERVIEW_AVG = config_1.config.recruiting.hotInterviewAvg;
             const now = new Date();
             const staleCutoff = new Date(now.getTime() - STALE_DAYS * 86400000);
             const sevenDaysAhead = new Date(now.getTime() + 7 * 86400000);
@@ -1211,7 +1203,6 @@ class RecruitingController {
        * body: { stage, startTime, endTime, panelUserIds: number[], feedbackDue? }
        */
         this.scheduleInterview = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
-            var _a, _b, _c, _d, _e, _f;
             const applicationId = Number(req.params.id);
             const { stage, startTime, endTime, panelUserIds, feedbackDue } = req.body || {};
             if (!stage || !startTime || !endTime)
@@ -1369,9 +1360,9 @@ class RecruitingController {
                         startTime: start.toLocaleString(),
                         endTime: end.toLocaleString(),
                         panelNames,
-                        hospitalName: (_a = process.env.HOSPITAL_NAME) !== null && _a !== void 0 ? _a : "",
-                        hospitalAddress: (_b = process.env.HOSPITAL_ADDRESS) !== null && _b !== void 0 ? _b : "",
-                        googleLocationUrl: (_c = process.env.HOSPITAL_GOOGLE_MAP) !== null && _c !== void 0 ? _c : "",
+                        hospitalName: config_1.config.branding.hospitalName,
+                        hospitalAddress: config_1.config.branding.hospitalAddress,
+                        googleLocationUrl: config_1.config.branding.hospitalGoogleMap,
                     });
                     mailStatus = "sent";
                 }
@@ -1412,9 +1403,9 @@ class RecruitingController {
                                 startTime: start.toLocaleString(),
                                 endTime: end.toLocaleString(),
                                 panelNames,
-                                hospitalName: (_d = process.env.HOSPITAL_NAME) !== null && _d !== void 0 ? _d : "",
-                                hospitalAddress: (_e = process.env.HOSPITAL_ADDRESS) !== null && _e !== void 0 ? _e : "",
-                                googleLocationUrl: (_f = process.env.HOSPITAL_GOOGLE_MAP) !== null && _f !== void 0 ? _f : "",
+                                hospitalName: config_1.config.branding.hospitalName,
+                                hospitalAddress: config_1.config.branding.hospitalAddress,
+                                googleLocationUrl: config_1.config.branding.hospitalGoogleMap,
                                 // Hint to the email helper that this is the panelist copy. Helper
                                 // can use it to re-write the salutation if needed; if it ignores
                                 // the field, the candidate-facing text still reads OK.
@@ -1561,10 +1552,10 @@ class RecruitingController {
                     workMode: updated.workMode,
                     proposedJoinAt: updated.proposedJoinAt,
                     customNotes: updated.customNotes,
-                    companyName: process.env.COMPANY_NAME || undefined,
-                    companyAddress: process.env.COMPANY_ADDRESS || undefined,
-                    hrName: process.env.HR_SIGNATORY_NAME || undefined,
-                    hrTitle: process.env.HR_SIGNATORY_TITLE || undefined,
+                    companyName: config_1.config.branding.companyName || undefined,
+                    companyAddress: config_1.config.branding.companyAddress || undefined,
+                    hrName: config_1.config.branding.hrSignatoryName || undefined,
+                    hrTitle: config_1.config.branding.hrSignatoryTitle || undefined,
                 };
                 const pdfBuffer = yield (0, offerLetterPdf_1.generateOfferLetterPdf)(letterData);
                 yield sendOfferLetterMail({
@@ -1688,10 +1679,10 @@ class RecruitingController {
                 workMode: (_e = offer.workMode) !== null && _e !== void 0 ? _e : null,
                 proposedJoinAt: (_f = offer.proposedJoinAt) !== null && _f !== void 0 ? _f : null,
                 customNotes: (_g = offer.customNotes) !== null && _g !== void 0 ? _g : null,
-                companyName: process.env.COMPANY_NAME || undefined,
-                companyAddress: process.env.COMPANY_ADDRESS || undefined,
-                hrName: process.env.HR_SIGNATORY_NAME || undefined,
-                hrTitle: process.env.HR_SIGNATORY_TITLE || undefined,
+                companyName: config_1.config.branding.companyName || undefined,
+                companyAddress: config_1.config.branding.companyAddress || undefined,
+                hrName: config_1.config.branding.hrSignatoryName || undefined,
+                hrTitle: config_1.config.branding.hrSignatoryTitle || undefined,
             });
             const safeName = offer.application.candidate.name.replace(/\s+/g, '_');
             const filename = `Offer-Letter-${safeName}.pdf`;
@@ -1927,7 +1918,7 @@ class RecruitingController {
         }));
         // Assign a test as an interview round
         this.assignTestToApplication = asyncHandler((req, res) => __awaiter(this, void 0, void 0, function* () {
-            var _a, _b, _c, _d;
+            var _a, _b, _c;
             const applicationId = Number(req.params.id);
             const { testId, testDate, deadlineDate, assignedBy } = req.body || {};
             if (!testId)
@@ -2023,7 +2014,7 @@ class RecruitingController {
                         loginEmail: app.candidate.email,
                         // Only sent on first-time assign — null on subsequent assigns
                         firstTimePassword: plainPasswordForEmail,
-                        portalUrl: (_d = process.env.CANDIDATE_PORTAL_URL) !== null && _d !== void 0 ? _d : '',
+                        portalUrl: config_1.config.candidatePortalUrl,
                     });
                     mailStatus = "sent";
                 }
@@ -2751,7 +2742,7 @@ exports.deleteBgvDocument = asyncHandler((req, res) => __awaiter(void 0, void 0,
  */
 function processReferralBonusEligibility() {
     return __awaiter(this, void 0, void 0, function* () {
-        const probationDays = parseInt(process.env.REFERRAL_PROBATION_DAYS || '90', 10);
+        const probationDays = config_1.config.recruiting.referralProbationDays;
         // Pot 1: candidate joined → start probation clock
         const pendingJoin = yield prisma.application.findMany({
             where: {
@@ -2824,8 +2815,8 @@ exports.updateReferralBonus = asyncHandler((req, res) => __awaiter(void 0, void 
 }));
 function generateEmployeeCode() {
     return __awaiter(this, arguments, void 0, function* (tx = prisma) {
-        const prefix = process.env.EMPLOYEE_CODE_PREFIX || 'EMP';
-        const startNumber = parseInt(process.env.EMPLOYEE_CODE_START || '1', 10);
+        const prefix = config_1.config.employeeCode.prefix || 'EMP';
+        const startNumber = parseInt(config_1.config.employeeCode.start || '1', 10);
         // Find the highest existing numeric suffix among employee codes that
         // start with our prefix. Doing this inside the same `tx` ensures we
         // see uncommitted inserts from concurrent hires.
@@ -3182,7 +3173,7 @@ HR Team
   <p>Best Regards,<br>HR Team</p>
   `;
         yield transporter.sendMail({
-            from: process.env.SMTP_USER,
+            from: config_1.config.smtp.from,
             to: recipients,
             subject: `Interview Scheduled – ${jobTitle}`,
             text,
@@ -3268,7 +3259,7 @@ ${credsHtml}
 <p>Best regards,<br>HR Team</p>
 `;
         yield transporter.sendMail({
-            from: process.env.SMTP_USER,
+            from: config_1.config.smtp.from,
             to,
             subject: `Assessment Assigned – ${testName}`,
             text,
@@ -3333,7 +3324,7 @@ and confirm your acceptance through the candidate portal at the earliest.</p>
 <p>Best regards,<br>HR Team</p>
 `;
         yield transporter.sendMail({
-            from: process.env.SMTP_USER,
+            from: config_1.config.smtp.from,
             to,
             cc: cc && cc.length ? cc : undefined,
             bcc: bcc && bcc.length ? bcc : undefined,

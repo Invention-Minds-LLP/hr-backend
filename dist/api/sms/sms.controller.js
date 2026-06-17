@@ -14,6 +14,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.sendOtpSmsController = exports.sendOtpSms = void 0;
 const axios_1 = __importDefault(require("axios"));
+const config_1 = require("../../config");
 // export const sendOtpSms = async ({
 //   patientName,
 //   otp,
@@ -34,11 +35,13 @@ const axios_1 = __importDefault(require("axios"));
 const sendOtpSms = (_a) => __awaiter(void 0, [_a], void 0, function* ({ patientName, otp, service, phoneNumber, }) {
     var _b, _c;
     try {
-        const apiKey = process.env.SMS_API_KEY;
-        const apiUrl = process.env.SMS_API_URL;
-        const sender = process.env.SMS_SENDER;
-        const dltTemplateId = process.env.SMS_DLT_TE_ID_FOR_OTP;
-        const dltEntityId = process.env.DLT_ENTITY_ID;
+        const apiKey = config_1.config.sms.apiKey;
+        const apiUrl = config_1.config.sms.apiUrl;
+        const sender = config_1.config.sms.sender;
+        const dltTemplateId = config_1.config.sms.dltTeIdForOtp;
+        const dltEntityId = config_1.config.sms.dltEntityId;
+        // DLT-registered template — text must match exactly, and this OTP flow is
+        // Rashtrotthana-only, so the org name stays hardcoded here.
         const message = `Dear ${patientName}, ${otp} is your One Time Password from Rashtrotthana Hospital for ${service} service. Expires in 2 mins. Please do not share this OTP with anyone.`;
         const url = `${apiUrl}/${sender}/${phoneNumber}/${encodeURIComponent(message)}/TXT?apikey=${apiKey}&dltentityid=${dltEntityId}&dlttempid=${dltTemplateId}`;
         const response = yield axios_1.default.get(url);

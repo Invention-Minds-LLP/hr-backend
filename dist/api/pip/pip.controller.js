@@ -16,13 +16,13 @@ exports.getPIPResponses = exports.acknowledgeResponse = exports.logManualRespons
 const prisma_1 = require("../../lib/prisma");
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const crypto_1 = __importDefault(require("crypto"));
+const config_1 = require("../../config");
 // ── Email transporter (reuse existing SMTP config) ──────────────────────────
 const transporter = nodemailer_1.default.createTransport({
-    service: "gmail",
-    host: "smtp.gmail.com",
-    port: 587,
-    secure: false,
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    host: config_1.config.smtp.host,
+    port: config_1.config.smtp.port,
+    secure: config_1.config.smtp.secure,
+    auth: { user: config_1.config.smtp.user, pass: config_1.config.smtp.pass },
 });
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function fillPlaceholders(template, data) {
@@ -62,14 +62,14 @@ function addDays(date, days) {
     return d;
 }
 function buildPlaceholderData(emp, pip, extras = {}) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
     const noticeDays = emp.dateOfJoining
         ? getNoticePeriodDays(new Date(emp.dateOfJoining))
         : 30;
     const lastWorkingDay = (pip === null || pip === void 0 ? void 0 : pip.warningDate)
         ? formatDate(addDays(new Date(), noticeDays))
         : "—";
-    return Object.assign({ employeeName: `${emp.firstName} ${emp.lastName}`, employeeCode: (_a = emp.employeeCode) !== null && _a !== void 0 ? _a : "", department: (_e = (_c = (_b = emp.Department) === null || _b === void 0 ? void 0 : _b.name) !== null && _c !== void 0 ? _c : (_d = emp.department) === null || _d === void 0 ? void 0 : _d.name) !== null && _e !== void 0 ? _e : "", designation: (_g = (_f = emp.designation) === null || _f === void 0 ? void 0 : _f.name) !== null && _g !== void 0 ? _g : "", monthlyScore: (_j = (_h = pip === null || pip === void 0 ? void 0 : pip.triggerScore) === null || _h === void 0 ? void 0 : _h.toString()) !== null && _j !== void 0 ? _j : "", triggerMonth: (_k = pip === null || pip === void 0 ? void 0 : pip.triggerMonth) !== null && _k !== void 0 ? _k : "", pipStartDate: (pip === null || pip === void 0 ? void 0 : pip.pipStartDate) ? formatDate(new Date(pip.pipStartDate)) : "—", pipEndDate: (pip === null || pip === void 0 ? void 0 : pip.pipEndDate) ? formatDate(new Date(pip.pipEndDate)) : "—", warningDate: (pip === null || pip === void 0 ? void 0 : pip.warningDate) ? formatDate(new Date(pip.warningDate)) : formatDate(new Date()), responseDeadline: (pip === null || pip === void 0 ? void 0 : pip.responseDeadline) ? formatDate(new Date(pip.responseDeadline)) : formatDate(addDays(new Date(), 7)), noticePeriodDays: noticeDays.toString(), lastWorkingDay, currentDate: formatDate(new Date()), hospitalName: (_l = process.env.HOSPITAL_NAME) !== null && _l !== void 0 ? _l : "The Organisation", hospitalAddress: (_m = process.env.HOSPITAL_ADDRESS) !== null && _m !== void 0 ? _m : "", weekNumber: (_o = extras.weekNumber) !== null && _o !== void 0 ? _o : "", reviewDate: (_p = extras.reviewDate) !== null && _p !== void 0 ? _p : "" }, extras);
+    return Object.assign({ employeeName: `${emp.firstName} ${emp.lastName}`, employeeCode: (_a = emp.employeeCode) !== null && _a !== void 0 ? _a : "", department: (_e = (_c = (_b = emp.Department) === null || _b === void 0 ? void 0 : _b.name) !== null && _c !== void 0 ? _c : (_d = emp.department) === null || _d === void 0 ? void 0 : _d.name) !== null && _e !== void 0 ? _e : "", designation: (_g = (_f = emp.designation) === null || _f === void 0 ? void 0 : _f.name) !== null && _g !== void 0 ? _g : "", monthlyScore: (_j = (_h = pip === null || pip === void 0 ? void 0 : pip.triggerScore) === null || _h === void 0 ? void 0 : _h.toString()) !== null && _j !== void 0 ? _j : "", triggerMonth: (_k = pip === null || pip === void 0 ? void 0 : pip.triggerMonth) !== null && _k !== void 0 ? _k : "", pipStartDate: (pip === null || pip === void 0 ? void 0 : pip.pipStartDate) ? formatDate(new Date(pip.pipStartDate)) : "—", pipEndDate: (pip === null || pip === void 0 ? void 0 : pip.pipEndDate) ? formatDate(new Date(pip.pipEndDate)) : "—", warningDate: (pip === null || pip === void 0 ? void 0 : pip.warningDate) ? formatDate(new Date(pip.warningDate)) : formatDate(new Date()), responseDeadline: (pip === null || pip === void 0 ? void 0 : pip.responseDeadline) ? formatDate(new Date(pip.responseDeadline)) : formatDate(addDays(new Date(), 7)), noticePeriodDays: noticeDays.toString(), lastWorkingDay, currentDate: formatDate(new Date()), hospitalName: config_1.config.branding.hospitalName || "The Organisation", hospitalAddress: config_1.config.branding.hospitalAddress, weekNumber: (_l = extras.weekNumber) !== null && _l !== void 0 ? _l : "", reviewDate: (_m = extras.reviewDate) !== null && _m !== void 0 ? _m : "" }, extras);
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // DEFAULT TEMPLATES
@@ -463,7 +463,7 @@ const sendWarning = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 let errorMessage = null;
                 try {
                     yield transporter.sendMail({
-                        from: process.env.SMTP_USER,
+                        from: config_1.config.smtp.from,
                         to: emp.email,
                         cc: template.cc || undefined,
                         bcc: template.bcc || undefined,
@@ -701,7 +701,7 @@ const closePIP = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
                 let emailStatus = "SENT";
                 let errorMessage = null;
                 try {
-                    yield transporter.sendMail({ from: process.env.SMTP_USER, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body });
+                    yield transporter.sendMail({ from: config_1.config.smtp.from, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body });
                 }
                 catch (e) {
                     emailStatus = "FAILED";
@@ -758,7 +758,7 @@ const extendPIP = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
                 let emailStatus = "SENT";
                 let errorMessage = null;
                 try {
-                    yield transporter.sendMail({ from: process.env.SMTP_USER, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body });
+                    yield transporter.sendMail({ from: config_1.config.smtp.from, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body });
                 }
                 catch (e) {
                     emailStatus = "FAILED";
@@ -819,7 +819,7 @@ const terminatePIP = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 let emailStatus = "SENT";
                 let errorMessage = null;
                 try {
-                    yield transporter.sendMail({ from: process.env.SMTP_USER, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body });
+                    yield transporter.sendMail({ from: config_1.config.smtp.from, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body });
                 }
                 catch (e) {
                     emailStatus = "FAILED";

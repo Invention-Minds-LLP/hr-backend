@@ -14,9 +14,10 @@
  */
 
 import axios, { AxiosInstance } from 'axios';
+import { config } from '../config';
 
-const DIRECTORY_URL = process.env.DIRECTORY_URL?.replace(/\/$/, '');
-const DIRECTORY_API_KEY = process.env.DIRECTORY_API_KEY;
+const DIRECTORY_URL = config.directory.url.replace(/\/$/, '');
+const DIRECTORY_API_KEY = config.directory.apiKey;
 
 let client: AxiosInstance | null = null;
 

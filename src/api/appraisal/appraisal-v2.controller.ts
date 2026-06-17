@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
+import { getEffectiveMonthsSinceJoining, getPausedDaysBetween, assertNotPausedOrHR } from "./appraisal-pause.controller";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SELF-APPRAISAL QUESTIONS (Master)
@@ -180,6 +181,12 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
     });
     if (!appraisal) return res.status(404).json({ error: "Appraisal not found" });
 
+    // Pause guard — block when the employee is in an open pause window.
+    // HR (roleId 1 or dept 1 + roleId 2) overrides.
+    const callerEmpId = (req as any).user?.empId ?? null;
+    const guard = await assertNotPausedOrHR(appraisal.employeeId, callerEmpId);
+    if (guard.blocked) return res.status(423).json({ error: guard.message });
+
     // Allow self-appraisal during PENDING_FILL or if already submitted (edit after approval)
     if (!["PENDING_FILL", "SELF_APPRAISAL_PENDING", "HR_VERIFIED"].includes(appraisal.status)) {
       return res.status(400).json({ error: "Self-appraisal cannot be submitted at this stage" });
@@ -300,6 +307,10 @@ export const submitManagerAppraisalV2 = async (req: Request, res: Response) => {
     });
     if (!appraisal) return res.status(404).json({ error: "Appraisal not found" });
 
+    const callerEmpId = (req as any).user?.empId ?? null;
+    const guard = await assertNotPausedOrHR(appraisal.employeeId, callerEmpId);
+    if (guard.blocked) return res.status(423).json({ error: guard.message });
+
     // Allow manager to fill during PENDING_FILL (parallel) or after self-appraisal submitted
     if (!["PENDING_FILL", "SELF_APPRAISAL_SUBMITTED", "MANAGER_APPRAISAL_PENDING", "MANAGER_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
       return res.status(400).json({ error: "Manager appraisal cannot be submitted at this stage" });
@@ -415,6 +426,10 @@ export const submitManagementAppraisal = async (req: Request, res: Response) => 
       include: { employee: { select: { departmentId: true, firstName: true, lastName: true, inchargeId: true } } },
     });
     if (!appraisal) return res.status(404).json({ error: "Appraisal not found" });
+
+    const callerEmpId = (req as any).user?.empId ?? null;
+    const guard = await assertNotPausedOrHR(appraisal.employeeId, callerEmpId);
+    if (guard.blocked) return res.status(423).json({ error: guard.message });
 
     if (!["PENDING_FILL", "SELF_APPRAISAL_PENDING", "MANAGER_APPRAISAL_PENDING", "MANAGER_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
       return res.status(400).json({ error: "Management appraisal cannot be submitted at this stage" });
@@ -1078,6 +1093,9 @@ export const submitInchargeAppraisal = async (req: Request, res: Response) => {
     });
     if (!appraisal) return res.status(404).json({ error: "Appraisal not found" });
 
+    const guard = await assertNotPausedOrHR(appraisal.employeeId, callerEmpId);
+    if (guard.blocked) return res.status(423).json({ error: guard.message });
+
     // Fall back to the employee's current in-charge for appraisals created
     // before the snapshot field existed. Snapshot it now so subsequent calls
     // (and the table display) are consistent.
@@ -1171,11 +1189,19 @@ export const initAppraisalAutoDraftCron = () => {
 
       for (const emp of employees) {
         const doj = new Date(emp.dateOfJoining);
-        const monthsSinceJoining = (today.getFullYear() - doj.getFullYear()) * 12 + (today.getMonth() - doj.getMonth());
 
-        // Create appraisal at 11 months, 23 months, 35 months, etc.
-        if (monthsSinceJoining >= 11 && monthsSinceJoining % 12 === 11) {
-          const yearNum = Math.floor(monthsSinceJoining / 12) + 1;
+        // EFFECTIVE months = calendar months elapsed minus the sum of any
+        // EmployeeAppraisalPause windows (maternity, long medical leave …).
+        // A 6-month pause delays the annual draft by 6 calendar months — the
+        // cycle name still matches the employee's effective year.
+        const effectiveMonths = await getEffectiveMonthsSinceJoining(emp.id, doj, today);
+
+        // Eligible from 11 effective months. yearNum keeps the original
+        // semantics: 11→Y1, 23→Y2, 35→Y3. The `existing` check below
+        // prevents duplicates while we're inside an eligibility window.
+        if (effectiveMonths >= 11) {
+          const yearNum = Math.floor((effectiveMonths + 1) / 12);
+          if (yearNum < 1) continue;
           const cycle = `Year ${yearNum} - Annual Review`;
 
           // Check if already exists
@@ -1235,8 +1261,22 @@ export const getEmployeeInsights = async (req: Request, res: Response) => {
     const startDate = appraisal.appraisalStartDate || new Date(new Date().setFullYear(new Date().getFullYear() - 1));
     const endDate = appraisal.appraisalEndDate || new Date();
 
-    // Incidents during the period
-    const incidents = await prisma.incident.findMany({
+    // Pull pause windows so we can exclude incidents / ratings that fell
+    // inside a maternity / sabbatical period.
+    const pauses = await prisma.employeeAppraisalPause.findMany({
+      where: {
+        employeeId: appraisal.employeeId,
+        startDate: { lte: endDate },
+        OR: [{ endDate: null }, { endDate: { gte: startDate } }],
+      },
+      select: { startDate: true, endDate: true, reason: true },
+    });
+    const pausedDays = await getPausedDaysBetween(appraisal.employeeId, startDate, endDate);
+    const isInPause = (d: Date) =>
+      pauses.some(p => d >= p.startDate && d <= (p.endDate ?? endDate));
+
+    // Incidents during the period (excluding paused windows)
+    const incidentsRaw = await prisma.incident.findMany({
       where: {
         employeeId: appraisal.employeeId,
         createdAt: { gte: startDate, lte: endDate },
@@ -1244,9 +1284,10 @@ export const getEmployeeInsights = async (req: Request, res: Response) => {
       select: { id: true, title: true, status: true, createdAt: true },
       orderBy: { createdAt: "desc" },
     });
+    const incidents = incidentsRaw.filter(i => !isInPause(i.createdAt));
 
-    // Weekly ratings during the period
-    const weeklyRatings = await prisma.weeklyPerformanceRating.findMany({
+    // Weekly ratings during the period (excluding paused windows)
+    const ratingsRaw = await prisma.weeklyPerformanceRating.findMany({
       where: {
         employeeId: appraisal.employeeId,
         status: "SUBMITTED",
@@ -1255,6 +1296,7 @@ export const getEmployeeInsights = async (req: Request, res: Response) => {
       select: { weekStartDate: true, weekLabel: true, overallScore: true },
       orderBy: { weekStartDate: "asc" },
     });
+    const weeklyRatings = ratingsRaw.filter(r => !isInPause(r.weekStartDate));
 
     // Calculate monthly averages
     const monthlyMap: Record<string, { total: number; count: number }> = {};
@@ -1281,6 +1323,7 @@ export const getEmployeeInsights = async (req: Request, res: Response) => {
 
     return res.json({
       period: { start: startDate, end: endDate },
+      pause: { totalDays: pausedDays, windows: pauses },
       incidents: { count: incidents.length, list: incidents },
       weeklyRatings: {
         totalWeeks: weeklyRatings.length,

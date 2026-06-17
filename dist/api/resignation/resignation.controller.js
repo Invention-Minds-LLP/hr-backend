@@ -44,7 +44,6 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
-var _a, _b, _c, _d, _e, _f, _g, _h, _j;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initNoticePeriodSchedular = exports.generateClearanceCertificate = void 0;
 exports.createResignation = createResignation;
@@ -82,6 +81,7 @@ const os = __importStar(require("os"));
 const path = __importStar(require("path"));
 const axios_1 = __importDefault(require("axios"));
 const basic_ftp_1 = require("basic-ftp");
+const config_1 = require("../../config");
 // import { ClearanceType } from '@prisma/client';
 const prisma = new client_1.PrismaClient();
 const node_cron_1 = __importDefault(require("node-cron"));
@@ -997,12 +997,12 @@ function hrRejectWithdraw(req, res) {
         }
     });
 }
-const APP_PUBLIC_URL = (_a = process.env.APP_PUBLIC_URL) !== null && _a !== void 0 ? _a : 'https://example.com';
-const COMPANY_NAME = (_b = process.env.COMPANY_NAME) !== null && _b !== void 0 ? _b : 'HR MINDS';
-const COMPANY_LOGO_URL = (_c = process.env.COMPANY_LOGO_URL) !== null && _c !== void 0 ? _c : ''; // optional
-const COMPANY_TAGLINE = (_d = process.env.COMPANY_TAGLINE) !== null && _d !== void 0 ? _d : ''; // optional
-const PUBLIC_BASE_URL = (_e = process.env.PUBLIC_BASE_URL) !== null && _e !== void 0 ? _e : 'https://hrproindia.in';
-const FTP_PUBLIC_DIR = (_f = process.env.FTP_PUBLIC_DIR) !== null && _f !== void 0 ? _f : '/public_html/certificate'; // remote dir
+const APP_PUBLIC_URL = config_1.config.appPublicUrl || 'https://example.com';
+const COMPANY_NAME = config_1.config.branding.companyName || 'HR MINDS';
+const COMPANY_LOGO_URL = config_1.config.branding.companyLogoUrl; // optional
+const COMPANY_TAGLINE = config_1.config.branding.companyTagline; // optional
+const PUBLIC_BASE_URL = config_1.config.publicBaseUrl || 'https://hrproindia.in';
+const FTP_PUBLIC_DIR = config_1.config.ftp.publicDir || '/public_html/certificate'; // remote dir
 const generateClearanceCertificate = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a, _b, _c, _d, _e, _f;
     const id = Number(req.params.id);
@@ -1350,10 +1350,10 @@ function generateClearancePdf(input) {
     });
 }
 const FTP_CONFIG = {
-    host: (_g = process.env.FTP_HOST) !== null && _g !== void 0 ? _g : "",
-    user: (_h = process.env.FTP_USER) !== null && _h !== void 0 ? _h : "",
-    password: (_j = process.env.FTP_PASS) !== null && _j !== void 0 ? _j : "",
-    secure: process.env.FTP_SECURE === "true"
+    host: config_1.config.ftp.host,
+    user: config_1.config.ftp.user,
+    password: config_1.config.ftp.pass,
+    secure: config_1.config.ftp.secure,
 };
 function uploadToFTP(localFilePath, remoteFilePath) {
     return __awaiter(this, void 0, void 0, function* () {

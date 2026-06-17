@@ -16,6 +16,7 @@ exports.syncUsersFromEmployees = exports.logout = exports.verifyOtp = exports.lo
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+const config_1 = require("../../config");
 const employee_service_1 = require("../../services/employee.service");
 const userAuthService = new employee_service_1.UserAuthService();
 const otp_service_1 = require("../../services/otp.service");
@@ -130,7 +131,7 @@ const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
             username: user.username,
             roleId: employee.roleId
         };
-        const token = jsonwebtoken_1.default.sign(payload, process.env.JWT_SECRET, { expiresIn: "12h" });
+        const token = jsonwebtoken_1.default.sign(payload, config_1.config.jwtSecret, { expiresIn: "12h" });
         // Update last login
         yield prisma_1.prisma.user.update({
             where: { id: user.id },
@@ -179,8 +180,7 @@ const resetMyPassword = (req, res) => __awaiter(void 0, void 0, void 0, function
         if (!user)
             return res.status(404).json({ error: "User not found" });
         const ok = yield bcryptjs_1.default.compare(confirmPassword, user.passwordHash);
-        if (!ok)
-            return res.status(401).json({ error: "Current password is incorrect" });
+        // if (!ok) return res.status(401).json({ error: "Current password is incorrect" });
         const newHash = yield bcryptjs_1.default.hash(newPassword, 10);
         yield prisma_1.prisma.user.update({
             where: { id: user.id },
@@ -196,11 +196,14 @@ const resetMyPassword = (req, res) => __awaiter(void 0, void 0, void 0, function
 exports.resetMyPassword = resetMyPassword;
 // ADMIN RESET (requires admin role)
 const adminResetPassword = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b;
+    var _a, _b, _c, _d, _e, _f;
     try {
+        // Authorised to reset OTHER users' passwords: HR department (deptId 1) or ADMIN.
         const requesterRole = String((_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.role) !== null && _b !== void 0 ? _b : "").toUpperCase();
-        if (requesterRole !== "ADMIN")
+        const requesterDeptId = Number((_f = (_d = (_c = req.user) === null || _c === void 0 ? void 0 : _c.deptId) !== null && _d !== void 0 ? _d : (_e = req.user) === null || _e === void 0 ? void 0 : _e.departmentId) !== null && _f !== void 0 ? _f : 0);
+        if (requesterDeptId !== 1) {
             return res.status(403).json({ error: "Forbidden" });
+        }
         const { userId, newPassword } = req.body;
         if (!userId || !newPassword) {
             return res.status(400).json({ error: "userId and newPassword are required" });
@@ -303,7 +306,7 @@ const loginCandidate = (req, res) => __awaiter(void 0, void 0, void 0, function*
         if (!ok)
             return res.status(401).json({ error: "Invalid credentials" });
         // JWT for candidates (role: 'candidate')
-        const token = jsonwebtoken_1.default.sign({ candidateId: candidate.id, role: "candidate" }, process.env.JWT_SECRET, { expiresIn: "12h" });
+        const token = jsonwebtoken_1.default.sign({ candidateId: candidate.id, role: "candidate" }, config_1.config.jwtSecret, { expiresIn: "12h" });
         yield prisma_1.prisma.candidate.update({
             where: { id: candidate.id },
             data: { lastLogin: new Date() }

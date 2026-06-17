@@ -101,6 +101,7 @@ model Employee {
   Address                  Address[]
   AnnouncementAck          AnnouncementAck[]
   appraisals               AppraisalForm[]
+  appraisalPauses          EmployeeAppraisalPause[]
   AssignedTest             AssignedTest[]
   attendances              Attendance[]
   bagChecks                BagCheck[]
@@ -734,6 +735,28 @@ model AppraisalForm {
 
   @@index([employeeId], map: "AppraisalForm_employeeId_fkey")
   @@index([status])
+}
+
+/// Captures any window in which an employee's appraisal & performance clocks
+/// should NOT tick (maternity, long medical leave, sabbatical). One row =
+/// one pause window. endDate = null means the pause is currently active.
+/// Effective months worked = calendar months elapsed minus the sum of these
+/// windows' days; auto-draft cron + period selector both consume this.
+model EmployeeAppraisalPause {
+  id          Int       @id @default(autoincrement())
+  employeeId  Int
+  startDate   DateTime
+  endDate     DateTime?
+  reason      String    @db.Text
+  createdBy   Int
+  createdAt   DateTime  @default(now())
+  endedBy     Int?
+  endedAt     DateTime?
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId])
+  @@index([employeeId, endDate])
 }
 
 /// Master question pool shared by all three review levels (In-charge,
@@ -3264,7 +3287,7 @@ model AttendancePunch {
   timestamp    DateTime @default(now())
   latitude     Float
   longitude    Float
-  address      String?
+  address      String?  @db.LongText
   photoUrl     String?  @db.Text
   notes        String?
   createdAt    DateTime @default(now())
@@ -3310,13 +3333,27 @@ model WeeklyPerformanceReport {
 
   previousWeekId Int?
 
-  employee   Employee          @relation(fields: [employeeId], references: [id])
+  employee   Employee               @relation(fields: [employeeId], references: [id])
   dailyTasks WeeklyTaskEntry[]
+  activities WeeklyReportActivity[]
 
   @@unique([employeeId, weekStartDate])
   @@index([employeeId])
   @@index([weekStartDate])
   @@index([status])
+}
+
+model WeeklyReportActivity {
+  id        Int      @id @default(autoincrement())
+  reportId  Int
+  action    String   // CREATED | SUBMITTED | RESUBMITTED | EDITED | TASK_ADDED | TASK_UPDATED | TASK_DELETED | APPROVED | DECLINED | CARRIED_FORWARD
+  byEmpId   Int?
+  detail    String?  @db.Text
+  createdAt DateTime @default(now())
+
+  report WeeklyPerformanceReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId])
 }
 
 model WeeklyTaskEntry {

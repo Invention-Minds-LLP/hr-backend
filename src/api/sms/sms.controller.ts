@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import axios from 'axios';
+import { config } from '../../config';
 
 interface SendOtpSmsParams {
   patientName: string;
@@ -37,12 +38,14 @@ export const sendOtpSms = async ({
   phoneNumber,
 }: SendOtpSmsParams) => {
   try {
-    const apiKey = process.env.SMS_API_KEY;
-    const apiUrl = process.env.SMS_API_URL;
-    const sender = process.env.SMS_SENDER;
-    const dltTemplateId = process.env.SMS_DLT_TE_ID_FOR_OTP;
-    const dltEntityId = process.env.DLT_ENTITY_ID;
+    const apiKey = config.sms.apiKey;
+    const apiUrl = config.sms.apiUrl;
+    const sender = config.sms.sender;
+    const dltTemplateId = config.sms.dltTeIdForOtp;
+    const dltEntityId = config.sms.dltEntityId;
 
+    // DLT-registered template — text must match exactly, and this OTP flow is
+    // Rashtrotthana-only, so the org name stays hardcoded here.
     const message = `Dear ${patientName}, ${otp} is your One Time Password from Rashtrotthana Hospital for ${service} service. Expires in 2 mins. Please do not share this OTP with anyone.`;
 
     const url = `${apiUrl}/${sender}/${phoneNumber}/${encodeURIComponent(

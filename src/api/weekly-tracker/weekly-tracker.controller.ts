@@ -19,6 +19,70 @@ async function getEmployeeMap(): Promise<Map<number, string>> {
   return new Map(emps.map(e => [e.id, `${e.firstName} ${e.lastName}`]));
 }
 
+// ── Helper: a report is editable by its owner only until an approver acts ───────
+// Editable when DRAFT, REJECTED, or SUBMITTED with every approval level still PENDING.
+function isReportEditable(report: {
+  status: string;
+  inChargeDecision?: string | null;
+  hodDecision?: string | null;
+  hrDecision?: string | null;
+}): boolean {
+  if (report.status === "DRAFT" || report.status === "REJECTED") return true;
+  if (report.status === "SUBMITTED") {
+    return (report.inChargeDecision ?? "PENDING") === "PENDING"
+      && (report.hodDecision ?? "PENDING") === "PENDING"
+      && (report.hrDecision ?? "PENDING") === "PENDING";
+  }
+  return false;
+}
+
+// ── Helper: best-effort audit log (never breaks the main operation) ─────────────
+async function logActivity(reportId: number, action: string, byEmpId?: number | null, detail?: string) {
+  try {
+    await prisma.weeklyReportActivity.create({
+      data: { reportId, action, byEmpId: byEmpId ?? null, detail: detail ?? null },
+    });
+  } catch (e) {
+    console.error("logActivity failed:", e);
+  }
+}
+
+// ── Helper: if an already-submitted report is edited, ping the pending approver ──
+async function notifyApproverOfEdit(reportId: number) {
+  try {
+    const report = await prisma.weeklyPerformanceReport.findUnique({
+      where: { id: reportId },
+      select: {
+        status: true, weekLabel: true,
+        employee: { select: { firstName: true, lastName: true, inchargeId: true, reportingManager: true } },
+      },
+    });
+    if (!report || report.status !== "SUBMITTED") return;
+    const notifyId = report.employee.inchargeId || report.employee.reportingManager;
+    if (notifyId) {
+      await createNotification(
+        notifyId,
+        `${report.employee.firstName} ${report.employee.lastName} edited their submitted weekly report (${report.weekLabel ?? ""}). Please review again.`
+      );
+    }
+  } catch (e) {
+    console.error("notifyApproverOfEdit failed:", e);
+  }
+}
+
+// ── Helper: notify all active HR Managers (roleId = 1) ──────────────────────────
+async function notifyHrManagers(message: string) {
+  try {
+    const hr = await prisma.employee.findMany({
+      where: { roleId: 1, employmentStatus: "ACTIVE" },
+      select: { id: true },
+    });
+    for (const h of hr) await createNotification(h.id, message);
+  } catch (e) {
+    console.error("notifyHrManagers failed:", e);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CREATE WEEKLY REPORT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -51,6 +115,7 @@ export const createWeeklyReport = async (req: Request, res: Response) => {
       include: { employee: { select: { employeeCode: true, firstName: true, lastName: true } }, dailyTasks: true },
     });
 
+    await logActivity(report.id, "CREATED", report.employeeId, `Report created for ${report.weekLabel}`);
     return res.status(201).json(report);
   } catch (error: any) {
     console.error("createWeeklyReport error:", error);
@@ -63,12 +128,17 @@ export const createWeeklyReport = async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 export const getWeeklyReports = async (req: Request, res: Response) => {
   try {
-    const { employeeId, departmentId, status, weekStartDate, weekEndDate, page, limit } = req.query;
+    const { employeeId, departmentId, status, weekStartDate, weekEndDate, page, limit, inchargeId, reportingManagerId } = req.query;
 
     const where: any = {};
     if (employeeId) where.employeeId = Number(employeeId);
     if (status) where.status = String(status);
-    if (departmentId) where.employee = { departmentId: Number(departmentId) };
+    // Viewer scoping (incharge / reporting manager see only their own team)
+    const employeeWhere: any = {};
+    if (departmentId) employeeWhere.departmentId = Number(departmentId);
+    if (inchargeId) employeeWhere.inchargeId = Number(inchargeId);
+    if (reportingManagerId) employeeWhere.reportingManager = Number(reportingManagerId);
+    if (Object.keys(employeeWhere).length) where.employee = employeeWhere;
     if (weekStartDate || weekEndDate) {
       where.weekStartDate = {};
       if (weekStartDate) where.weekStartDate.gte = new Date(String(weekStartDate));
@@ -87,6 +157,7 @@ export const getWeeklyReports = async (req: Request, res: Response) => {
               employeeCode: true, firstName: true, lastName: true,
               Department: { select: { name: true } },
               designation: { select: { name: true } },
+              roleId: true, departmentId: true, inchargeId: true, reportingManager: true,
             },
           },
           _count: { select: { dailyTasks: true } },
@@ -125,6 +196,7 @@ export const getWeeklyReportById = async (req: Request, res: Response) => {
           },
         },
         dailyTasks: { orderBy: [{ taskDate: "asc" }, { createdAt: "asc" }] },
+        activities: { orderBy: { createdAt: "desc" } },
       },
     });
 
@@ -137,7 +209,12 @@ export const getWeeklyReportById = async (req: Request, res: Response) => {
       assignedByName: t.assignedById ? (empMap.get(t.assignedById) ?? null) : null,
     }));
 
-    return res.json({ ...report, dailyTasks: tasksWithAssignerName });
+    const activitiesWithName = report.activities.map(a => ({
+      ...a,
+      byName: a.byEmpId ? (empMap.get(a.byEmpId) ?? null) : null,
+    }));
+
+    return res.json({ ...report, dailyTasks: tasksWithAssignerName, activities: activitiesWithName });
   } catch (error: any) {
     console.error("getWeeklyReportById error:", error);
     return res.status(500).json({ error: error.message });
@@ -153,7 +230,7 @@ export const updateWeeklyReport = async (req: Request, res: Response) => {
     const report = await prisma.weeklyPerformanceReport.findUnique({ where: { id } });
 
     if (!report) return res.status(404).json({ error: "Report not found" });
-    if (report.status !== "DRAFT") return res.status(400).json({ error: "Can only edit DRAFT reports" });
+    if (!isReportEditable(report)) return res.status(400).json({ error: "This report can no longer be edited (already under or past review)." });
 
     const { employeeSummary, weekStartDate, weekEndDate } = req.body;
     const data: any = {};
@@ -170,6 +247,8 @@ export const updateWeeklyReport = async (req: Request, res: Response) => {
       include: { dailyTasks: true },
     });
 
+    await logActivity(id, "EDITED", report.employeeId, "Report details updated");
+    await notifyApproverOfEdit(id);
     return res.json(updated);
   } catch (error: any) {
     console.error("updateWeeklyReport error:", error);
@@ -192,12 +271,20 @@ export const submitWeeklyReport = async (req: Request, res: Response) => {
     });
 
     if (!report) return res.status(404).json({ error: "Report not found" });
-    if (report.status !== "DRAFT") return res.status(400).json({ error: "Only DRAFT reports can be submitted" });
+    if (!isReportEditable(report)) return res.status(400).json({ error: "This report can no longer be submitted (already under or past review)." });
     if (report._count.dailyTasks === 0) return res.status(400).json({ error: "Add at least one task before submitting" });
 
+    // (Re)submit — reset any prior decisions so a rejected/edited report restarts the chain cleanly.
     const updated = await prisma.weeklyPerformanceReport.update({
       where: { id },
-      data: { status: "SUBMITTED", submittedAt: new Date() },
+      data: {
+        status: "SUBMITTED",
+        submittedAt: new Date(),
+        inChargeDecision: "PENDING", inChargeDecidedAt: null, inChargeNote: null, inChargeRating: null,
+        hodDecision: "PENDING", hodDecidedAt: null, hodNote: null, hodRating: null,
+        hrDecision: "PENDING", hrDecidedAt: null, hrNote: null, hrRating: null,
+        approvedBy: null, approvedDate: null, declinedBy: null, declinedDate: null, declineReason: null,
+      },
       include: { dailyTasks: true },
     });
 
@@ -211,6 +298,7 @@ export const submitWeeklyReport = async (req: Request, res: Response) => {
       );
     }
 
+    await logActivity(id, report.status === "DRAFT" ? "SUBMITTED" : "RESUBMITTED", report.employeeId, `Sent for approval`);
     return res.json(updated);
   } catch (error: any) {
     console.error("submitWeeklyReport error:", error);
@@ -276,14 +364,18 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
         data.declinedDate = new Date();
         data.declineReason = declineReason || null;
       } else {
-        // Notify reporting manager
+        // Notify reporting manager + inform the employee of progress
+        const empName = `${emp.firstName} ${emp.lastName}`;
         if (emp.reportingManager) {
-          const empName = `${emp.firstName} ${emp.lastName}`;
           await createNotification(
             emp.reportingManager,
             `Weekly performance report of ${empName} (${report.weekLabel}) has been approved by incharge and is pending your review.`
           );
         }
+        await createNotification(
+          report.employeeId,
+          `Your weekly report (${report.weekLabel}) was approved by your incharge and is pending manager review.`
+        );
       }
 
       const updated = await prisma.weeklyPerformanceReport.update({
@@ -430,7 +522,25 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
         `Your weekly performance report (${report.weekLabel}) has been ${data.status.toLowerCase()}.`
       );
     }
+    // Intermediate approval (report stays SUBMITTED) — keep the chain moving + inform employee.
+    else if (approved && (role === "REPORTING_MANAGER" || role === "MANAGEMENT")) {
+      const empName = `${emp.firstName} ${emp.lastName}`;
+      const byWord = role === "MANAGEMENT" ? "management" : "reporting manager";
+      await notifyHrManagers(
+        `Weekly report of ${empName} (${report.weekLabel}) approved by ${byWord} — pending HR review.`
+      );
+      await createNotification(
+        report.employeeId,
+        `Your weekly report (${report.weekLabel}) was approved by ${role === "MANAGEMENT" ? "management" : "your manager"} and is pending HR review.`
+      );
+    }
 
+    await logActivity(
+      reportId,
+      approved ? "APPROVED" : "DECLINED",
+      userId ?? null,
+      `${role}${approved ? (note ? ` — ${note}` : "") : (declineReason ? ` — ${declineReason}` : "")}`
+    );
     return res.json(updated);
   } catch (error: any) {
     console.error("updateWeeklyReportStatus error:", error);
@@ -466,7 +576,7 @@ export const addTaskEntry = async (req: Request, res: Response) => {
     const report = await prisma.weeklyPerformanceReport.findUnique({ where: { id: reportId } });
 
     if (!report) return res.status(404).json({ error: "Report not found" });
-    if (report.status !== "DRAFT") return res.status(400).json({ error: "Can only add tasks to DRAFT reports" });
+    if (!isReportEditable(report)) return res.status(400).json({ error: "Cannot add tasks — this report is under or past review." });
 
     const {
       taskDate, taskDescription, category, priority, taskStatus,
@@ -496,6 +606,8 @@ export const addTaskEntry = async (req: Request, res: Response) => {
       },
     });
 
+    await logActivity(reportId, "TASK_ADDED", report.employeeId, taskDescription);
+    await notifyApproverOfEdit(reportId);
     return res.status(201).json(task);
   } catch (error: any) {
     console.error("addTaskEntry error:", error);
@@ -511,11 +623,11 @@ export const updateTaskEntry = async (req: Request, res: Response) => {
     const taskId = Number(req.params.taskId);
     const task = await prisma.weeklyTaskEntry.findUnique({
       where: { id: taskId },
-      include: { report: { select: { status: true } } },
+      include: { report: { select: { status: true, inChargeDecision: true, hodDecision: true, hrDecision: true } } },
     });
 
     if (!task) return res.status(404).json({ error: "Task not found" });
-    if (task.report.status !== "DRAFT") return res.status(400).json({ error: "Can only edit tasks in DRAFT reports" });
+    if (!isReportEditable(task.report)) return res.status(400).json({ error: "Cannot edit tasks — this report is under or past review." });
 
     const {
       taskDate, taskDescription, category, priority, taskStatus,
@@ -541,6 +653,8 @@ export const updateTaskEntry = async (req: Request, res: Response) => {
     if (remarks !== undefined) data.remarks = remarks;
 
     const updated = await prisma.weeklyTaskEntry.update({ where: { id: taskId }, data });
+    await logActivity(task.reportId, "TASK_UPDATED", null, updated.taskDescription);
+    await notifyApproverOfEdit(task.reportId);
     return res.json(updated);
   } catch (error: any) {
     console.error("updateTaskEntry error:", error);
@@ -556,13 +670,15 @@ export const deleteTaskEntry = async (req: Request, res: Response) => {
     const taskId = Number(req.params.taskId);
     const task = await prisma.weeklyTaskEntry.findUnique({
       where: { id: taskId },
-      include: { report: { select: { status: true } } },
+      include: { report: { select: { status: true, inChargeDecision: true, hodDecision: true, hrDecision: true } } },
     });
 
     if (!task) return res.status(404).json({ error: "Task not found" });
-    if (task.report.status !== "DRAFT") return res.status(400).json({ error: "Can only delete tasks from DRAFT reports" });
+    if (!isReportEditable(task.report)) return res.status(400).json({ error: "Cannot delete tasks — this report is under or past review." });
 
     await prisma.weeklyTaskEntry.delete({ where: { id: taskId } });
+    await logActivity(task.reportId, "TASK_DELETED", null, task.taskDescription);
+    await notifyApproverOfEdit(task.reportId);
     return res.json({ message: "Task deleted" });
   } catch (error: any) {
     console.error("deleteTaskEntry error:", error);
@@ -576,7 +692,7 @@ export const deleteTaskEntry = async (req: Request, res: Response) => {
 export const carryForwardTasks = async (req: Request, res: Response) => {
   try {
     const fromReportId = Number(req.params.id);
-    const { toReportId, taskEntryIds } = req.body as { toReportId?: number; taskEntryIds?: number[] };
+    const { toReportId, taskEntryIds, userId } = req.body as { toReportId?: number; taskEntryIds?: number[]; userId?: number };
 
     const fromReport = await prisma.weeklyPerformanceReport.findUnique({
       where: { id: fromReportId },
@@ -584,6 +700,10 @@ export const carryForwardTasks = async (req: Request, res: Response) => {
     });
 
     if (!fromReport) return res.status(404).json({ error: "Source report not found" });
+    // Ownership: an employee may only carry forward their own tasks.
+    if (userId && Number(userId) !== fromReport.employeeId) {
+      return res.status(403).json({ error: "You can only carry forward your own tasks" });
+    }
 
     // Get incomplete tasks
     let tasksToCarry = fromReport.dailyTasks.filter(
@@ -624,6 +744,22 @@ export const carryForwardTasks = async (req: Request, res: Response) => {
       }
     }
 
+    // Guard the target + skip tasks already carried in (idempotent re-runs).
+    const targetExisting = await prisma.weeklyPerformanceReport.findUnique({
+      where: { id: targetReportId },
+      include: { dailyTasks: { select: { carriedFromEntryId: true } } },
+    });
+    if (targetExisting && !isReportEditable(targetExisting)) {
+      return res.status(400).json({ error: "Next week's report is already under review — cannot add carried tasks." });
+    }
+    const alreadyCarried = new Set(
+      (targetExisting?.dailyTasks ?? []).map(t => t.carriedFromEntryId).filter((v): v is number => v != null)
+    );
+    tasksToCarry = tasksToCarry.filter(t => !alreadyCarried.has(t.id));
+    if (tasksToCarry.length === 0) {
+      return res.status(400).json({ error: "These tasks are already carried forward to next week." });
+    }
+
     // Create carried-forward entries in target report
     for (const task of tasksToCarry) {
       await prisma.weeklyTaskEntry.create({
@@ -655,9 +791,72 @@ export const carryForwardTasks = async (req: Request, res: Response) => {
       include: { dailyTasks: true },
     });
 
+    await logActivity(fromReportId, "CARRIED_FORWARD", fromReport.employeeId,
+      `${tasksToCarry.length} task(s) carried to ${targetReport?.weekLabel ?? "next week"}`);
     return res.json({ message: `${tasksToCarry.length} tasks carried forward`, targetReport });
   } catch (error: any) {
     console.error("carryForwardTasks error:", error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TASK CARRY-FORWARD HISTORY (walk the carriedFromEntryId lineage across weeks)
+// ═══════════════════════════════════════════════════════════════════════════════
+export const getTaskHistory = async (req: Request, res: Response) => {
+  try {
+    const taskId = Number(req.params.taskId);
+    const start = await prisma.weeklyTaskEntry.findUnique({ where: { id: taskId } });
+    if (!start) return res.status(404).json({ error: "Task not found" });
+
+    const chain = new Map<number, any>();
+
+    // Walk backward through the origins.
+    let cur: any = start;
+    while (cur) {
+      chain.set(cur.id, cur);
+      cur = cur.carriedFromEntryId
+        ? await prisma.weeklyTaskEntry.findUnique({ where: { id: cur.carriedFromEntryId } })
+        : null;
+    }
+
+    // Walk forward through descendants (BFS, handles any branching).
+    const queue: number[] = [...chain.keys()];
+    while (queue.length) {
+      const id = queue.shift()!;
+      const children = await prisma.weeklyTaskEntry.findMany({ where: { carriedFromEntryId: id } });
+      for (const c of children) {
+        if (!chain.has(c.id)) { chain.set(c.id, c); queue.push(c.id); }
+      }
+    }
+
+    // Attach each entry's week info, ordered chronologically.
+    const entries = [...chain.values()];
+    const reportIds = [...new Set(entries.map(e => e.reportId))];
+    const reports = await prisma.weeklyPerformanceReport.findMany({
+      where: { id: { in: reportIds } },
+      select: { id: true, weekLabel: true, weekStartDate: true, weekEndDate: true, status: true },
+    });
+    const repMap = new Map(reports.map(r => [r.id, r]));
+
+    const history = entries
+      .map(e => ({
+        id: e.id,
+        reportId: e.reportId,
+        week: repMap.get(e.reportId) ?? null,
+        taskDescription: e.taskDescription,
+        taskStatus: e.taskStatus,
+        percentComplete: e.percentComplete,
+        isCarriedForward: e.isCarriedForward,
+        carriedFromEntryId: e.carriedFromEntryId,
+      }))
+      .sort((a, b) =>
+        new Date(a.week?.weekStartDate ?? 0).getTime() - new Date(b.week?.weekStartDate ?? 0).getTime()
+      );
+
+    return res.json({ history });
+  } catch (error: any) {
+    console.error("getTaskHistory error:", error);
     return res.status(500).json({ error: error.message });
   }
 };
@@ -717,4 +916,72 @@ export const getTrackerDashboard = async (req: Request, res: Response) => {
     console.error("getTrackerDashboard error:", error);
     return res.status(500).json({ error: error.message });
   }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PENDING-WORK REMINDERS (run by the daily cron)
+// Reminds each employee about their NOT_STARTED / IN_PROGRESS tasks (overdue flagged),
+// notifies their incharge + reporting manager per team member, and sends HR a digest.
+// ═══════════════════════════════════════════════════════════════════════════════
+export const sendPendingWorkReminders = async () => {
+  const now = new Date();
+
+  const tasks = await prisma.weeklyTaskEntry.findMany({
+    where: {
+      taskStatus: { in: ["NOT_STARTED", "IN_PROGRESS"] },
+      report: { status: { not: "REJECTED" } },
+    },
+    select: {
+      deadline: true,
+      report: {
+        select: {
+          weekLabel: true, employeeId: true,
+          employee: {
+            select: {
+              id: true, firstName: true, lastName: true,
+              inchargeId: true, reportingManager: true, employmentStatus: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  // Group pending tasks per active employee.
+  const byEmp = new Map<number, { emp: any; total: number; overdue: number }>();
+  for (const t of tasks) {
+    const emp = t.report?.employee;
+    if (!emp || emp.employmentStatus !== "ACTIVE") continue;
+    let g = byEmp.get(emp.id);
+    if (!g) { g = { emp, total: 0, overdue: 0 }; byEmp.set(emp.id, g); }
+    g.total++;
+    if (t.deadline && new Date(t.deadline) < now) g.overdue++;
+  }
+
+  // Notify each employee + their incharge & reporting manager.
+  for (const g of byEmp.values()) {
+    const name = `${g.emp.firstName} ${g.emp.lastName}`;
+    const ov = g.overdue ? ` (${g.overdue} overdue)` : "";
+    await createNotification(
+      g.emp.id,
+      `You have ${g.total} pending task(s)${ov} in your weekly tracker. Please update or complete them.`
+    );
+    if (g.emp.inchargeId) {
+      await createNotification(g.emp.inchargeId, `${name} has ${g.total} pending weekly task(s)${ov}.`);
+    }
+    if (g.emp.reportingManager) {
+      await createNotification(g.emp.reportingManager, `${name} has ${g.total} pending weekly task(s)${ov}.`);
+    }
+  }
+
+  // Single digest to each HR Manager.
+  if (byEmp.size > 0) {
+    const totalTasks = [...byEmp.values()].reduce((s, g) => s + g.total, 0);
+    const totalOverdue = [...byEmp.values()].reduce((s, g) => s + g.overdue, 0);
+    await notifyHrManagers(
+      `Weekly tracker: ${byEmp.size} employee(s) have ${totalTasks} pending task(s)${totalOverdue ? `, ${totalOverdue} overdue` : ""}.`
+    );
+  }
+
+  return { employees: byEmp.size, tasks: tasks.length };
 };

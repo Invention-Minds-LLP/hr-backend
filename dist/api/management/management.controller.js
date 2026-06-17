@@ -12,6 +12,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getPayrollReadiness = exports.getIncentiveOverview = exports.getLoanOverview = exports.getPayrollTrend = exports.getPayrollOverview = exports.getTrainingCalendar = exports.getTrainingInsights = exports.getElInsights = exports.getQualifications = exports.getMobileLoginActivity = exports.getWorkforceInsights = exports.getAbsenteeism = exports.getLeaveUtilization = exports.getLateArrivals = exports.getProbationOverview = exports.getAppraisalEligibility = exports.getSalaryIncrements = exports.getOtVsHire = exports.getPipMonitor = exports.getReliabilityScores = exports.getAppraisalScores = exports.setDeptPlanning = exports.getDeptPlanning = exports.getRecruitmentOps = exports.getWorkedHours = exports.getPunctuality = exports.getOtEligibility = exports.getIncidentsAnalytics = exports.getWeeklyPerfStatus = exports.getLeaveAbuse = exports.getLeaveByTypeWeekly = exports.getOtAnalysis = exports.getKpiDetail = exports.getPerformanceDistribution = exports.getWeeklyTrend = exports.getDeptAttendanceToday = exports.getDeptSnapshot = exports.getDeptRisk = exports.getActionItems = exports.getTrainingByDept = exports.getRecruitmentFunnel = exports.getAttritionTrend = exports.getActivePIPs = exports.getPerformanceRadar = exports.getLeaveCalendar = exports.getAttendanceSummary = exports.getWorkforce = exports.getAttention = exports.getPulse = void 0;
 const prisma_1 = require("../../lib/prisma");
 const date_fns_1 = require("date-fns");
+const config_1 = require("../../config");
 function startOfDayIST(d = new Date()) {
     const ist = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
     ist.setHours(0, 0, 0, 0);
@@ -188,18 +189,18 @@ exports.getPulse = getPulse;
 // without code changes. See ATTENTION_THRESHOLDS below.
 // ═══════════════════════════════════════════════════════════
 const ATTENTION_THRESHOLDS = {
-    attendancePctRed: Number(process.env.ATTN_ATTENDANCE_RED) || 80, // <80% → red
-    attendancePctYellow: Number(process.env.ATTN_ATTENDANCE_YELLOW) || 90, // 80-89% → yellow
-    pendingLeavesYellow: Number(process.env.ATTN_PENDING_LEAVES) || 20,
-    pendingPermsYellow: Number(process.env.ATTN_PENDING_PERMS) || 20,
-    pipRed: Number(process.env.ATTN_PIP_RED) || 5,
-    pipYellow: Number(process.env.ATTN_PIP_YELLOW) || 2,
-    attritionMtdRed: Number(process.env.ATTN_ATTRITION_RED) || 5,
-    attritionMtdYellow: Number(process.env.ATTN_ATTRITION_YELLOW) || 2,
-    otPendingYellow: Number(process.env.ATTN_OT_PENDING) || 30,
-    openJobsYellow: Number(process.env.ATTN_OPEN_JOBS) || 10,
-    trainingPctRed: Number(process.env.ATTN_TRAINING_RED) || 50,
-    trainingPctYellow: Number(process.env.ATTN_TRAINING_YELLOW) || 70,
+    attendancePctRed: config_1.config.attn.attendanceRed, // <80% → red
+    attendancePctYellow: config_1.config.attn.attendanceYellow, // 80-89% → yellow
+    pendingLeavesYellow: config_1.config.attn.pendingLeaves,
+    pendingPermsYellow: config_1.config.attn.pendingPerms,
+    pipRed: config_1.config.attn.pipRed,
+    pipYellow: config_1.config.attn.pipYellow,
+    attritionMtdRed: config_1.config.attn.attritionRed,
+    attritionMtdYellow: config_1.config.attn.attritionYellow,
+    otPendingYellow: config_1.config.attn.otPending,
+    openJobsYellow: config_1.config.attn.openJobs,
+    trainingPctRed: config_1.config.attn.trainingRed,
+    trainingPctYellow: config_1.config.attn.trainingYellow,
 };
 const getAttention = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {

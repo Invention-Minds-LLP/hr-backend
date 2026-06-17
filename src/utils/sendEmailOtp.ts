@@ -1,12 +1,13 @@
 import nodemailer from 'nodemailer';
+import { config } from '../config';
+
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
+  host: config.smtp.host,
+  port: config.smtp.port,
+  secure: config.smtp.secure,
   auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
+    user: config.smtp.user,
+    pass: config.smtp.pass
   }
 });
 
@@ -58,7 +59,7 @@ HR Team
 `;
 
   return transporter.sendMail({
-    from: process.env.SMTP_USER,
+    from: config.smtp.from,
     to,
     subject,
     text,

@@ -2,14 +2,14 @@ import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import nodemailer from "nodemailer";
 import crypto from "crypto";
+import { config } from "../../config";
 
 // ── Email transporter (reuse existing SMTP config) ──────────────────────────
 const transporter = nodemailer.createTransport({
-  service: "gmail",
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
-  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  host: config.smtp.host,
+  port: config.smtp.port,
+  secure: config.smtp.secure,
+  auth: { user: config.smtp.user, pass: config.smtp.pass },
 });
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -77,8 +77,8 @@ function buildPlaceholderData(
     noticePeriodDays: noticeDays.toString(),
     lastWorkingDay,
     currentDate: formatDate(new Date()),
-    hospitalName: process.env.HOSPITAL_NAME ?? "The Organisation",
-    hospitalAddress: process.env.HOSPITAL_ADDRESS ?? "",
+    hospitalName: config.branding.hospitalName || "The Organisation",
+    hospitalAddress: config.branding.hospitalAddress,
     weekNumber: extras.weekNumber ?? "",
     reviewDate: extras.reviewDate ?? "",
     ...extras,
@@ -496,7 +496,7 @@ export const sendWarning = async (req: Request, res: Response) => {
         let errorMessage: string | null = null;
         try {
           await transporter.sendMail({
-            from: process.env.SMTP_USER,
+            from: config.smtp.from,
             to: emp.email,
             cc: template.cc || undefined,
             bcc: template.bcc || undefined,
@@ -736,7 +736,7 @@ export const closePIP = async (req: Request, res: Response) => {
         let emailStatus = "SENT";
         let errorMessage: string | null = null;
         try {
-          await transporter.sendMail({ from: process.env.SMTP_USER, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body });
+          await transporter.sendMail({ from: config.smtp.from, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body });
         } catch (e: any) { emailStatus = "FAILED"; errorMessage = e.message; }
         await prisma.pIPEmailLog.create({
           data: { pipId: id, employeeId: pip.employeeId, templateId: Number(templateId), sentTo: pip.employee.email, subject, body, sentBy: Number(closedBy), status: emailStatus, errorMessage },
@@ -786,7 +786,7 @@ export const extendPIP = async (req: Request, res: Response) => {
         const subject = fillPlaceholders(template.subject, data);
         const body = fillPlaceholders(template.body, data);
         let emailStatus = "SENT"; let errorMessage: string | null = null;
-        try { await transporter.sendMail({ from: process.env.SMTP_USER, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body }); }
+        try { await transporter.sendMail({ from: config.smtp.from, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body }); }
         catch (e: any) { emailStatus = "FAILED"; errorMessage = e.message; }
         await prisma.pIPEmailLog.create({
           data: { pipId: id, employeeId: pip.employeeId, templateId: Number(templateId), sentTo: pip.employee.email, subject, body, sentBy: Number(extendedBy), status: emailStatus, errorMessage },
@@ -844,7 +844,7 @@ export const terminatePIP = async (req: Request, res: Response) => {
         const subject = fillPlaceholders(template.subject, data);
         const body = fillPlaceholders(template.body, data);
         let emailStatus = "SENT"; let errorMessage: string | null = null;
-        try { await transporter.sendMail({ from: process.env.SMTP_USER, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body }); }
+        try { await transporter.sendMail({ from: config.smtp.from, to: pip.employee.email, cc: template.cc || undefined, bcc: template.bcc || undefined, subject, html: body }); }
         catch (e: any) { emailStatus = "FAILED"; errorMessage = e.message; }
         await prisma.pIPEmailLog.create({
           data: { pipId: id, employeeId: pip.employeeId, templateId: Number(templateId), sentTo: pip.employee.email, subject, body, sentBy: Number(sentBy), status: emailStatus, errorMessage },

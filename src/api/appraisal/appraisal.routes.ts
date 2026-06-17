@@ -10,6 +10,9 @@ import {
   toggleReviewQuestion, deleteReviewQuestion,
   submitInchargeAppraisal,
 } from './appraisal-v2.controller';
+import {
+  listEmployeePauses, getActivePause, createPause, updatePause, deletePause,
+} from './appraisal-pause.controller';
 import { authenticateToken } from '../../middleware/authMiddleware';
 
 const router = Router();
@@ -46,6 +49,14 @@ router.post('/:id/edit-request', authenticateToken, requestEdit);
 router.patch('/edit-request/:requestId', authenticateToken, respondEditRequest);
 router.get('/:id/edit-history', authenticateToken, getEditHistory);
 router.get('/:id/insights', authenticateToken, getEmployeeInsights);
+
+// Appraisal pause / resume (maternity, long medical leave, sabbatical).
+// Pausing applies to BOTH managerial appraisal and dept-performance clocks.
+router.get('/employees/:empId/pauses', authenticateToken, listEmployeePauses);
+router.get('/employees/:empId/pauses/active', authenticateToken, getActivePause);
+router.post('/employees/:empId/pauses', authenticateToken, createPause);
+router.patch('/pauses/:pauseId', authenticateToken, updatePause);
+router.delete('/pauses/:pauseId', authenticateToken, deletePause);
 
 // Test/Admin endpoints
 router.post('/admin/test-auto-draft', async (req, res) => {

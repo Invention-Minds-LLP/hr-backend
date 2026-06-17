@@ -11,7 +11,6 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
-var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.evaluateAttempt = exports.reviewAttempt = exports.getAllAttempts = exports.submitAttemptDescriptive = void 0;
 exports.getAssignedTest = getAssignedTest;
@@ -25,11 +24,12 @@ const path_1 = __importDefault(require("path"));
 const basic_ftp_1 = require("basic-ftp");
 // const prisma = new PrismaClient();
 const prisma_1 = require("../../lib/prisma");
+const config_1 = require("../../config");
 const FTP_CONFIG = {
-    host: (_a = process.env.FTP_HOST) !== null && _a !== void 0 ? _a : "",
-    user: (_b = process.env.FTP_USER) !== null && _b !== void 0 ? _b : "",
-    password: (_c = process.env.FTP_PASS) !== null && _c !== void 0 ? _c : "",
-    secure: process.env.FTP_SECURE === "true"
+    host: config_1.config.ftp.host,
+    user: config_1.config.ftp.user,
+    password: config_1.config.ftp.pass,
+    secure: config_1.config.ftp.secure,
 };
 const TEMP_FOLDER = path_1.default.join(__dirname, '../temp'); // absolute path
 if (!fs_1.default.existsSync(TEMP_FOLDER)) {

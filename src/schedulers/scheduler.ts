@@ -10,6 +10,8 @@ import { initAppraisalAutoDraftCron } from "../api/appraisal/appraisal-v2.contro
 import { initDirectorySyncCron } from "./directory-sync.scheduler";
 import { expireStaleOffers, processReferralBonusEligibility } from "../api/recruiting/recruiting.controller";
 import { runIncidentDailyTasks } from "../api/incident/incident.controller";
+import { sendPendingWorkReminders } from "../api/weekly-tracker/weekly-tracker.controller";
+import { initAttendanceReminderCrons } from "./attendance-reminders.scheduler";
 
 export async function startSchedulers() {
   initSurveyScheduler();
@@ -27,6 +29,7 @@ export async function startSchedulers() {
   initNewJoineeLeaveAllocationCron();
 
   initDirectorySyncCron();
+  initAttendanceReminderCrons();
 
   // Daily at 02:00 — flip any unsigned offers past their proposedJoinAt to EXPIRED
   cron.schedule("0 2 * * *", async () => {
@@ -48,6 +51,17 @@ export async function startSchedulers() {
       }
     } catch (e) {
       console.error("[CRON] processReferralBonusEligibility failed", e);
+    }
+  });
+
+  // Daily at 09:00 — remind employees (and their incharge/manager + HR digest)
+  // about pending NOT_STARTED / IN_PROGRESS weekly tasks (overdue flagged).
+  cron.schedule("0 9 * * *", async () => {
+    try {
+      const r = await sendPendingWorkReminders();
+      if (r.employees > 0) console.log(`[CRON] weekly-tracker reminders: ${r.employees} employee(s), ${r.tasks} pending task(s)`);
+    } catch (e) {
+      console.error("[CRON] sendPendingWorkReminders failed", e);
     }
   });
 

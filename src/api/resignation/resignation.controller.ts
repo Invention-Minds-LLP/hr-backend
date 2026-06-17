@@ -10,6 +10,7 @@ import axios from 'axios';
 import QRCode from 'qrcode';
 import { Client } from 'basic-ftp';
 import { AuthenticatedRequest } from '../../middleware/authMiddleware';
+import { config } from '../../config';
 // import { ClearanceType } from '@prisma/client';
 const prisma = new PrismaClient();
 import cron from 'node-cron';
@@ -994,12 +995,12 @@ export async function hrRejectWithdraw(req: Request, res: Response) {
 
 
 
-const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL ?? 'https://example.com';
-const COMPANY_NAME = process.env.COMPANY_NAME ?? 'HR MINDS';
-const COMPANY_LOGO_URL = process.env.COMPANY_LOGO_URL ?? ''; // optional
-const COMPANY_TAGLINE = process.env.COMPANY_TAGLINE ?? '';   // optional
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL ?? 'https://hrproindia.in';
-const FTP_PUBLIC_DIR = process.env.FTP_PUBLIC_DIR ?? '/public_html/certificate'; // remote dir
+const APP_PUBLIC_URL = config.appPublicUrl || 'https://example.com';
+const COMPANY_NAME = config.branding.companyName || 'HR MINDS';
+const COMPANY_LOGO_URL = config.branding.companyLogoUrl; // optional
+const COMPANY_TAGLINE = config.branding.companyTagline;   // optional
+const PUBLIC_BASE_URL = config.publicBaseUrl || 'https://hrproindia.in';
+const FTP_PUBLIC_DIR = config.ftp.publicDir || '/public_html/certificate'; // remote dir
 
 export const generateClearanceCertificate = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
@@ -1383,10 +1384,10 @@ async function generateClearancePdf(input: ClearanceCertInput): Promise<{ filePa
 
 
 const FTP_CONFIG = {
-  host: process.env.FTP_HOST ?? "",
-  user: process.env.FTP_USER ?? "",
-  password: process.env.FTP_PASS ?? "",
-  secure: process.env.FTP_SECURE === "true"
+  host: config.ftp.host,
+  user: config.ftp.user,
+  password: config.ftp.pass,
+  secure: config.ftp.secure,
 }
 export async function uploadToFTP(localFilePath: string, remoteFilePath: string) {
   const client = new Client();
