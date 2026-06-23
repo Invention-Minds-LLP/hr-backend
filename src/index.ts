@@ -307,6 +307,16 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   res.status(500).json({ error: "Internal Server Error" });
 });
 
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      "img-src": ["'self'", "data:", "http:", "https:"],
+    },
+  },
+}));
+
+
 // Start the server
 app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Server running at http://127.0.0.1:${port}/`);
