@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
-import { Client } from 'basic-ftp';
+// Legacy FTP upload (kept for reference / fallback). Files now go to local disk.
+// import { Client } from 'basic-ftp';
+import { saveLocal, publicUrl } from '../../lib/fileStorage';
 import fs from 'fs';
 import multer from 'multer';
 import { createNotification } from '../notifications/notifications.controller';
@@ -8,24 +10,30 @@ import { config } from '../../config';
 
 const prisma = new PrismaClient();
 
-const FTP_CONFIG = {
-  host: config.ftp.host,
-  user: config.ftp.user,
-  password: config.ftp.pass,
-  secure: config.ftp.secure,
-};
+// Legacy FTP credentials — no longer used now that uploads are stored locally.
+// const FTP_CONFIG = {
+//   host: config.ftp.host,
+//   user: config.ftp.user,
+//   password: config.ftp.pass,
+//   secure: config.ftp.secure,
+// };
 
 const upload = multer({ dest: 'uploads/' }); // temp folder
 
 async function uploadToFTP(localFilePath: string, remoteFilePath: string) {
-  const client = new Client();
-  try {
-    await client.access(FTP_CONFIG);
-    await client.ensureDir('/public_html/circulars');
-    await client.uploadFrom(localFilePath, remoteFilePath);
-  } finally {
-    client.close();
-  }
+  // Local disk storage (current). remoteFilePath is a legacy
+  // "/public_html/circulars/<file>" path; saveLocal stores it under UPLOADS_DIR.
+  await saveLocal(localFilePath, remoteFilePath);
+
+  // ── Legacy FTP upload (kept for reference / fallback) ─────────────────────
+  // const client = new Client();
+  // try {
+  //   await client.access(FTP_CONFIG);
+  //   await client.ensureDir('/public_html/circulars');
+  //   await client.uploadFrom(localFilePath, remoteFilePath);
+  // } finally {
+  //   client.close();
+  // }
 }
 
 // Utility: build an Employee where-filter from stored audience JSON
@@ -131,9 +139,10 @@ export async function createAnnouncement(req: Request, res: Response) {
         const remoteFileName = `${Date.now()}-${f.originalname}`;
         const remotePath = `/public_html/circulars/${remoteFileName}`;
         await uploadToFTP(f.path, remotePath);
-        const publicUrl = `https://hrproindia.in/circulars/${remoteFileName}`;
+        // const publicUrl = `https://hrproindia.in/circulars/${remoteFileName}`; // legacy FTP URL
+        const fileUrl = publicUrl(remotePath);
 
-        attachments.push({ name: f.originalname, url: publicUrl });
+        attachments.push({ name: f.originalname, url: fileUrl });
 
         // cleanup local temp file
         try { fs.unlinkSync(f.path); } catch { }

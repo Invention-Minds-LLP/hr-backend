@@ -13,6 +13,7 @@ import {
   carryForwardTasks,
   getTaskHistory,
   getTrackerDashboard,
+  acknowledgeWeeklyReport,
 } from "./weekly-tracker.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -25,6 +26,7 @@ router.get("/:id", authenticateToken, getWeeklyReportById);
 router.put("/:id", authenticateToken, updateWeeklyReport);
 router.patch("/:id/submit", authenticateToken, submitWeeklyReport);
 router.patch("/:id/status", authenticateToken, updateWeeklyReportStatus);
+router.patch("/:id/acknowledge", authenticateToken, acknowledgeWeeklyReport);
 router.delete("/:id", authenticateToken, deleteWeeklyReport);
 
 router.post("/:id/tasks", authenticateToken, addTaskEntry);

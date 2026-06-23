@@ -12,17 +12,20 @@ import * as XLSX from "xlsx";
 import pLimit from "p-limit";
 import { PermissionType } from "@prisma/client";
 import fs from "fs";
-import { Client } from "basic-ftp";
+// Legacy FTP upload (kept for reference / fallback). Files now go to local disk.
+// import { Client } from "basic-ftp";
+import { saveLocal, publicUrl } from "../../lib/fileStorage";
 import path from "path";
 import { max } from "date-fns";
 import { config } from "../../config";
 
-const FTP_CONFIG = {
-  host: config.ftp.host,
-  user: config.ftp.user,
-  password: config.ftp.pass,
-  secure: config.ftp.secure,
-};
+// Legacy FTP credentials — no longer used now that uploads are stored locally.
+// const FTP_CONFIG = {
+//   host: config.ftp.host,
+//   user: config.ftp.user,
+//   password: config.ftp.pass,
+//   secure: config.ftp.secure,
+// };
 
 type Tx = Prisma.TransactionClient;
 
@@ -4125,21 +4128,26 @@ export const triggerFYRollover = async (req: Request, res: Response) => {
 
 
 async function uploadToFTP(localFilePath: string, remoteFileName: string): Promise<any> {
-  const client = new Client();
-  client.ftp.verbose = false;
-  try {
-    await client.access(FTP_CONFIG);
-    const folder = path.dirname(remoteFileName);
-    await client.ensureDir(folder);
-    console.log(remoteFileName)
-    await client.uploadFrom(localFilePath, remoteFileName);
-    await client.close();
+  // Local disk storage (current). remoteFileName is a legacy
+  // "/public_html/<folder>/<file>" path; saveLocal stores it under UPLOADS_DIR.
+  await saveLocal(localFilePath, remoteFileName);
 
-    // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
-  } catch (error) {
-    console.error("FTP Upload Error:", error);
-    throw new Error("FTP upload failed");
-  }
+  // ── Legacy FTP upload (kept for reference / fallback) ─────────────────────
+  // const client = new Client();
+  // client.ftp.verbose = false;
+  // try {
+  //   await client.access(FTP_CONFIG);
+  //   const folder = path.dirname(remoteFileName);
+  //   await client.ensureDir(folder);
+  //   console.log(remoteFileName)
+  //   await client.uploadFrom(localFilePath, remoteFileName);
+  //   await client.close();
+  //
+  //   // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
+  // } catch (error) {
+  //   console.error("FTP Upload Error:", error);
+  //   throw new Error("FTP upload failed");
+  // }
 }
 
 export const uploadPrescription = async (req: Request, res: Response) => {
@@ -4193,7 +4201,8 @@ export const uploadPrescription = async (req: Request, res: Response) => {
       const ext = path.extname(file.originalFilename || "") || ".jpg";
       const safeName = `prescription_${Date.now()}${ext}`;
       const remotePath = `/public_html/leave-prescriptions/${safeName}`;
-      const publicUrl = `https://hrproindia.in/leave-prescriptions/${safeName}`;
+      // const publicUrl = `https://hrproindia.in/leave-prescriptions/${safeName}`; // legacy FTP URL
+      const fileUrl = publicUrl(remotePath);
 
       await uploadToFTP(file.filepath, remotePath);
 
@@ -4201,12 +4210,12 @@ export const uploadPrescription = async (req: Request, res: Response) => {
 
       await prisma.leaveRequest.update({
         where: { id: Number(leaveId) },
-        data: { prescriptionUrl: publicUrl }
+        data: { prescriptionUrl: fileUrl }
       });
 
       return res.status(200).json({
         message: "Prescription uploaded successfully",
-        prescriptionUrl: publicUrl
+        prescriptionUrl: fileUrl
       });
     });
 

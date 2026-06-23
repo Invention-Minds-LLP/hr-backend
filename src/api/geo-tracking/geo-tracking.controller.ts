@@ -4,7 +4,9 @@ import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import fs from "fs";
 import path from "path";
 import formidable, { File as FormidableFile } from "formidable";
-import { Client } from "basic-ftp";
+// Legacy FTP upload (kept for reference / fallback). Files now go to local disk.
+// import { Client } from "basic-ftp";
+import { saveLocal, publicUrl } from "../../lib/fileStorage";
 import { config } from "../../config";
 
 
@@ -270,24 +272,30 @@ export const endLocationSession = async (
 };
 
 
-const FTP_CONFIG = {
-    host: config.ftp.host,
-    user: config.ftp.user,
-    password: config.ftp.pass,
-    secure: config.ftp.secure,
-};
+// Legacy FTP credentials — no longer used now that uploads are stored locally.
+// const FTP_CONFIG = {
+//     host: config.ftp.host,
+//     user: config.ftp.user,
+//     password: config.ftp.pass,
+//     secure: config.ftp.secure,
+// };
 
 async function uploadToFTP(localFilePath: string, remotePath: string): Promise<void> {
-    const client = new Client();
-    client.ftp.verbose = false;
+    // Local disk storage (current). remotePath is a legacy
+    // "/public_html/session-photos/<file>" path; saveLocal stores it under UPLOADS_DIR.
+    await saveLocal(localFilePath, remotePath);
 
-    try {
-        await client.access(FTP_CONFIG);
-        await client.ensureDir("/public_html/session-photos");
-        await client.uploadFrom(localFilePath, remotePath);
-    } finally {
-        await client.close();
-    }
+    // ── Legacy FTP upload (kept for reference / fallback) ─────────────────────
+    // const client = new Client();
+    // client.ftp.verbose = false;
+    //
+    // try {
+    //     await client.access(FTP_CONFIG);
+    //     await client.ensureDir("/public_html/session-photos");
+    //     await client.uploadFrom(localFilePath, remotePath);
+    // } finally {
+    //     await client.close();
+    // }
 }
 
 export const uploadSessionPhotos = async (req: AuthenticatedRequest, res: Response) => {
@@ -340,7 +348,8 @@ export const uploadSessionPhotos = async (req: AuthenticatedRequest, res: Respon
             const safeName = `${sessionId}_${Date.now()}_${Math.random().toString(16).slice(2)}${ext}`;
 
             const remotePath = `/public_html/session-photos/${safeName}`;
-            const publicUrl = `https://hrproindia.in/session-photos/${safeName}`;
+            // const publicUrl = `https://hrproindia.in/session-photos/${safeName}`; // legacy FTP URL
+            const fileUrl = publicUrl(remotePath);
 
             try {
                 await uploadToFTP(localPath, remotePath);
@@ -348,7 +357,7 @@ export const uploadSessionPhotos = async (req: AuthenticatedRequest, res: Respon
                 const row = await prisma.locationSessionPhoto.create({
                     data: {
                         sessionId,
-                        url: publicUrl,
+                        url: fileUrl,
                         fileName: safeName,
                         capturedBy: empId,
                         capturedAt: new Date(),

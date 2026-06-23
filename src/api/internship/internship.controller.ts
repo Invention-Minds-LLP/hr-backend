@@ -5,18 +5,21 @@ import axios from 'axios';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { Client } from 'basic-ftp';
+// Legacy FTP upload (kept for reference / fallback). Files now go to local disk.
+// import { Client } from 'basic-ftp';
+import { saveLocal, publicUrl as buildPublicUrl } from '../../lib/fileStorage';
 import { config } from '../../config';
 
 const COMPANY_NAME = config.branding.companyName || 'RASHTROTTHANA HOSPITAL';
 const COMPANY_LOGO_URL = config.branding.companyLogoUrl || '';
 const COMPANY_TAGLINE = config.branding.companyTagline || '';
-const FTP_CONFIG = {
-    host: config.ftp.host,
-    user: config.ftp.user,
-    password: config.ftp.pass,
-    secure: config.ftp.secure,
-  }
+// Legacy FTP credentials — no longer used now that uploads are stored locally.
+// const FTP_CONFIG = {
+//     host: config.ftp.host,
+//     user: config.ftp.user,
+//     password: config.ftp.pass,
+//     secure: config.ftp.secure,
+//   }
 
 
 const prisma = new PrismaClient();
@@ -454,8 +457,9 @@ export async function completeInternship(req: Request, res: Response) {
   
       // 5) upload to Hostinger
       const remotePath = `/public_html/certificate/${fileName}`;
-      await uploadToFTP(filePath, remotePath, FTP_CONFIG);
-      const publicUrl = `https://hrproindia.in/certificate/${fileName}`;
+      await uploadToFTP(filePath, remotePath, null);
+      // const publicUrl = `https://hrproindia.in/certificate/${fileName}`; // legacy FTP URL
+      const publicUrl = buildPublicUrl(remotePath);
   
       // cleanup
       try { fs.unlinkSync(filePath); } catch {}
@@ -737,15 +741,21 @@ export async function generateCertificatePdf(input: CertInput): Promise<{ filePa
 
   return { filePath, fileName };
 }
-export async function uploadToFTP(localFilePath: string, remoteFilePath: string, FTP_CONFIG: any) {
-    const client = new Client();
-    client.ftp.verbose = false;
-    try {
-      await client.access(FTP_CONFIG);
-      // ensure /public_html/certificate exists
-      await client.ensureDir('/public_html/certificate');
-      await client.uploadFrom(localFilePath, remoteFilePath); // absolute remote path
-    } finally {
-      client.close();
-    }
+export async function uploadToFTP(localFilePath: string, remoteFilePath: string, FTP_CONFIG?: any) {
+    // Local disk storage (current). remoteFilePath is a legacy
+    // "/public_html/certificate/<file>" path; saveLocal stores it under UPLOADS_DIR.
+    // The FTP_CONFIG argument is retained for signature compatibility but unused.
+    await saveLocal(localFilePath, remoteFilePath);
+
+    // ── Legacy FTP upload (kept for reference / fallback) ───────────────────
+    // const client = new Client();
+    // client.ftp.verbose = false;
+    // try {
+    //   await client.access(FTP_CONFIG);
+    //   // ensure /public_html/certificate exists
+    //   await client.ensureDir('/public_html/certificate');
+    //   await client.uploadFrom(localFilePath, remoteFilePath); // absolute remote path
+    // } finally {
+    //   client.close();
+    // }
   }

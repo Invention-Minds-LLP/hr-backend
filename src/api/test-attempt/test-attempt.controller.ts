@@ -3,18 +3,21 @@ import { Request, Response } from 'express';
 import formidable from 'formidable';
 import fs from 'fs';
 import path from 'path';
-import { Client } from 'basic-ftp';
+// Legacy FTP upload (kept for reference / fallback). Files now go to local disk.
+// import { Client } from 'basic-ftp';
+import { saveLocal, publicUrl } from '../../lib/fileStorage';
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
 import { createNotification } from '../notifications/notifications.controller';
 import { config } from '../../config';
 
-const FTP_CONFIG = {
-  host: config.ftp.host,
-  user: config.ftp.user,
-  password: config.ftp.pass,
-  secure: config.ftp.secure,
-}
+// Legacy FTP credentials — no longer used now that uploads are stored locally.
+// const FTP_CONFIG = {
+//   host: config.ftp.host,
+//   user: config.ftp.user,
+//   password: config.ftp.pass,
+//   secure: config.ftp.secure,
+// }
 const TEMP_FOLDER = path.join(__dirname, '../temp'); // absolute path
 
 if (!fs.existsSync(TEMP_FOLDER)) {
@@ -124,21 +127,26 @@ function sanitizeFileName(fileName: string): string {
 }
 
 async function uploadToFTP(localFilePath: string, remoteFileName: string): Promise<any> {
-  const client = new Client();
-  client.ftp.verbose = false;
-  try {
-    await client.access(FTP_CONFIG);
-    const folder = path.dirname(remoteFileName);
-    await client.ensureDir(folder);
-    console.log(remoteFileName)
-    await client.uploadFrom(localFilePath, remoteFileName);
-    await client.close();
+  // Local disk storage (current). remoteFileName is a legacy
+  // "/public_html/<folder>/<file>" path; saveLocal stores it under UPLOADS_DIR.
+  await saveLocal(localFilePath, remoteFileName);
 
-    // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
-  } catch (error) {
-    console.error("FTP Upload Error:", error);
-    throw new Error("FTP upload failed");
-  }
+  // ── Legacy FTP upload (kept for reference / fallback) ─────────────────────
+  // const client = new Client();
+  // client.ftp.verbose = false;
+  // try {
+  //   await client.access(FTP_CONFIG);
+  //   const folder = path.dirname(remoteFileName);
+  //   await client.ensureDir(folder);
+  //   console.log(remoteFileName)
+  //   await client.uploadFrom(localFilePath, remoteFileName);
+  //   await client.close();
+  //
+  //   // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
+  // } catch (error) {
+  //   console.error("FTP Upload Error:", error);
+  //   throw new Error("FTP upload failed");
+  // }
 }
 
 export const submitAttemptDescriptive = async (req: Request, res: Response) => {
@@ -175,7 +183,8 @@ export const submitAttemptDescriptive = async (req: Request, res: Response) => {
 
         const remoteFilePath = `/public_html/test-answers/${fileName}`;
         await uploadToFTP(tempFilePath, remoteFilePath);
-        const fileUrl = `https://hrproindia.in/test-answers/${fileName}`;
+        // const fileUrl = `https://hrproindia.in/test-answers/${fileName}`; // legacy FTP URL
+        const fileUrl = publicUrl(remoteFilePath);
         fs.unlinkSync(tempFilePath);
 
         // inject fileUrl into response

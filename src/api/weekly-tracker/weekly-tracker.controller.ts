@@ -2,6 +2,18 @@ import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
 
+// ── Helper: IST day boundaries for date-range filters ─────────────────────────
+// Reports are stored with weekStartDate = the creator's local (IST) Monday
+// midnight, serialized to UTC (e.g. Mon 15 Jun IST → 2026-06-14T18:30:00Z).
+// A plain `new Date("2026-06-15")` is UTC midnight and would miss that by 5h30m,
+// so we anchor date-only params to the IST day. Full ISO strings pass through.
+function istDayStart(s: string): Date {
+  return s.includes("T") ? new Date(s) : new Date(`${s}T00:00:00+05:30`);
+}
+function istDayEnd(s: string): Date {
+  return s.includes("T") ? new Date(s) : new Date(`${s}T23:59:59.999+05:30`);
+}
+
 // ── Helper: ISO week label (e.g. "2026-W14") ──────────────────────────────────
 function getWeekLabel(date: Date): string {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
@@ -141,8 +153,8 @@ export const getWeeklyReports = async (req: Request, res: Response) => {
     if (Object.keys(employeeWhere).length) where.employee = employeeWhere;
     if (weekStartDate || weekEndDate) {
       where.weekStartDate = {};
-      if (weekStartDate) where.weekStartDate.gte = new Date(String(weekStartDate));
-      if (weekEndDate) where.weekStartDate.lte = new Date(String(weekEndDate));
+      if (weekStartDate) where.weekStartDate.gte = istDayStart(String(weekStartDate));
+      if (weekEndDate) where.weekStartDate.lte = istDayEnd(String(weekEndDate));
     }
 
     const take = Number(limit) || 20;
@@ -544,6 +556,40 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
     return res.json(updated);
   } catch (error: any) {
     console.error("updateWeeklyReportStatus error:", error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MANAGEMENT ACKNOWLEDGE (on an already-APPROVED report)
+// Records a management sign-off + optional remark WITHOUT changing approval status.
+// PATCH /weekly-tracker/:id/acknowledge   body: { userId, remark? }
+// ═══════════════════════════════════════════════════════════════════════════════
+export const acknowledgeWeeklyReport = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { userId, remark } = req.body as { userId?: number; remark?: string };
+
+    const report = await prisma.weeklyPerformanceReport.findUnique({ where: { id } });
+    if (!report) return res.status(404).json({ error: "Report not found" });
+    if (report.status !== "APPROVED") {
+      return res.status(400).json({ error: "Only approved reports can be acknowledged" });
+    }
+
+    const updated = await prisma.weeklyPerformanceReport.update({
+      where: { id },
+      data: {
+        mgmtAcknowledgedAt: new Date(),
+        mgmtAcknowledgedBy: userId ?? null,
+        mgmtRemark: remark?.trim() || null,
+      },
+      include: { employee: { select: { employeeCode: true, firstName: true, lastName: true } }, dailyTasks: true },
+    });
+
+    await logActivity(id, "ACKNOWLEDGED", userId ?? null, remark?.trim() ? `Management remark: ${remark.trim()}` : "Acknowledged by management");
+    return res.json(updated);
+  } catch (error: any) {
+    console.error("acknowledgeWeeklyReport error:", error);
     return res.status(500).json({ error: error.message });
   }
 };

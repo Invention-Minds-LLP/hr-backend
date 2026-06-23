@@ -1600,10 +1600,12 @@ export const getDeptAttendanceToday = async (_req: Request, res: Response) => {
 
     const todayAttendance = await prisma.attendance.findMany({
       where: { date: { gte: todayStart, lte: todayEnd } },
-      select: { employeeId: true, status: true },
+      select: { employeeId: true, status: true, checkIn: true, checkOut: true },
     });
-    const statusByEmp = new Map<number, string>();
-    for (const a of todayAttendance) statusByEmp.set(a.employeeId, (a.status || "").toUpperCase());
+    const attnByEmp = new Map<number, { status: string; checkIn: Date | null; checkOut: Date | null }>();
+    for (const a of todayAttendance) {
+      attnByEmp.set(a.employeeId, { status: (a.status || "").toUpperCase(), checkIn: a.checkIn, checkOut: a.checkOut });
+    }
 
     const holiday = await prisma.holiday.findFirst({
       where: { date: { gte: todayStart, lte: todayEnd } },
@@ -1642,7 +1644,7 @@ export const getDeptAttendanceToday = async (_req: Request, res: Response) => {
       }
     }
 
-    type Emp = { name: string; employeeCode: string; designation: string; status: string };
+    type Emp = { name: string; employeeCode: string; designation: string; status: string; checkIn: string | null; checkOut: string | null };
     const deptMap = new Map<string, {
       dept: string; headcount: number;
       present: number; leave: number; permission: number; absent: number; weekoff: number;
@@ -1657,7 +1659,8 @@ export const getDeptAttendanceToday = async (_req: Request, res: Response) => {
       const row = deptMap.get(dept)!;
       row.headcount++;
 
-      const st = statusByEmp.get(e.id);
+      const rec = attnByEmp.get(e.id);
+      const st = rec?.status;
       let category: string;
       if (st === "PRESENT") { row.present++; category = "Present"; }
       else if (st === "LEAVE") { row.leave++; category = "Leave"; }
@@ -1670,6 +1673,8 @@ export const getDeptAttendanceToday = async (_req: Request, res: Response) => {
         employeeCode: e.employeeCode ?? "",
         designation: e.designation?.name ?? "—",
         status: category,
+        checkIn: rec?.checkIn ? format(rec.checkIn, "HH:mm") : null,
+        checkOut: rec?.checkOut ? format(rec.checkOut, "HH:mm") : null,
       });
     }
 
@@ -1689,6 +1694,192 @@ export const getDeptAttendanceToday = async (_req: Request, res: Response) => {
     res.json({ date: dayStr, isHoliday, holidayTitle: holiday?.title ?? null, totals, depts });
   } catch (err: any) {
     console.error("getDeptAttendanceToday error:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════
+// DEPT-WISE ATTENDANCE (week) — per-department weekly attendance
+// with each employee's day-by-day status for drill-down.
+// GET /api/management/dept-attendance-weekly?weekStartDate=YYYY-MM-DD&weekEndDate=YYYY-MM-DD
+// Defaults to the current Mon–Sun week. Reuses the same
+// approved-weekoff + Sunday-fallback + holiday logic as the daily view.
+// ═══════════════════════════════════════════════════════════
+export const getDeptAttendanceWeekly = async (req: Request, res: Response) => {
+  try {
+    const { weekStartDate, weekEndDate } = req.query;
+    const baseStart = startOfDay(
+      weekStartDate ? new Date(String(weekStartDate)) : startOfWeek(new Date(), { weekStartsOn: 1 }),
+    );
+    const baseEnd = startOfDay(
+      weekEndDate ? new Date(String(weekEndDate)) : addDays(baseStart, 6),
+    );
+
+    // Build the inclusive list of days in range.
+    const days: Date[] = [];
+    for (let d = new Date(baseStart); d <= baseEnd; d = addDays(d, 1)) days.push(new Date(d));
+
+    const rangeStart = startOfDayIST(baseStart);
+    const rangeEnd = endOfDayIST(baseEnd);
+
+    const employees = await prisma.employee.findMany({
+      where: { employmentStatus: { in: ["ACTIVE", "NOTICE_PERIOD"] } },
+      select: {
+        id: true, firstName: true, lastName: true, employeeCode: true,
+        Department: { select: { name: true } },
+        designation: { select: { name: true } },
+      },
+    });
+    const allEmpIds = employees.map(e => e.id);
+
+    // Attendance for the whole range, bucketed by employee + IST day string.
+    const attendance = await prisma.attendance.findMany({
+      where: { date: { gte: rangeStart, lte: rangeEnd } },
+      select: { employeeId: true, status: true, date: true, checkIn: true, checkOut: true },
+    });
+    const attnByEmpDay = new Map<string, { status: string; checkIn: Date | null; checkOut: Date | null }>();
+    for (const a of attendance) {
+      attnByEmpDay.set(`${a.employeeId}|${format(a.date, "yyyy-MM-dd")}`, {
+        status: (a.status || "").toUpperCase(), checkIn: a.checkIn, checkOut: a.checkOut,
+      });
+    }
+
+    // Holidays in range, by day string.
+    const holidays = await prisma.holiday.findMany({
+      where: { date: { gte: rangeStart, lte: rangeEnd } },
+      select: { date: true, title: true },
+    });
+    const holidayByDay = new Map<string, string>();
+    for (const h of holidays) holidayByDay.set(format(h.date, "yyyy-MM-dd"), h.title);
+
+    // Shift approvals for every (year, month) the range touches.
+    const monthKeys = new Set<string>();
+    for (const d of days) monthKeys.add(`${d.getFullYear()}-${d.getMonth() + 1}`);
+    const approvalsByMonth = new Map<string, { employeeId: number; weekOffConfig: any }[]>();
+    for (const key of monthKeys) {
+      const [yr, mo] = key.split("-").map(Number);
+      const aps = await prisma.shiftApproval.findMany({
+        where: { status: "APPROVED", month: mo, year: yr },
+        select: { employeeId: true, weekOffConfig: true },
+      });
+      approvalsByMonth.set(key, aps);
+    }
+
+    // Week-off employee set for a given day (approved config + Sunday fallback).
+    const weekOffEmpsForDay = (day: Date): Set<number> => {
+      const set = new Set<number>();
+      const year = day.getFullYear();
+      const month = day.getMonth() + 1;
+      const dayStr = format(day, "yyyy-MM-dd");
+      const approvals = approvalsByMonth.get(`${year}-${month}`) || [];
+      const approvedEmps = new Set<number>();
+      const monthStart = new Date(year, month - 1, 1);
+      const firstWeekStart = new Date(monthStart);
+      firstWeekStart.setDate(monthStart.getDate() - monthStart.getDay());
+      firstWeekStart.setHours(0, 0, 0, 0);
+      for (const ap of approvals) {
+        approvedEmps.add(ap.employeeId);
+        const cfg = ap.weekOffConfig as { weeks?: Record<string, number> } | null;
+        if (!cfg?.weeks) continue;
+        for (const [wkStr, dow] of Object.entries(cfg.weeks)) {
+          const wk = Number(wkStr);
+          if (Number.isNaN(wk) || typeof dow !== "number") continue;
+          const wo = new Date(firstWeekStart);
+          wo.setDate(firstWeekStart.getDate() + wk * 7 + dow);
+          if (format(wo, "yyyy-MM-dd") === dayStr) set.add(ap.employeeId);
+        }
+      }
+      if (day.getDay() === 0) {
+        for (const id of allEmpIds) if (!approvedEmps.has(id)) set.add(id);
+      }
+      return set;
+    };
+
+    // Precompute per-day holiday flag + week-off sets.
+    const dayMeta = days.map(day => {
+      const dayStr = format(day, "yyyy-MM-dd");
+      const holidayTitle = holidayByDay.get(dayStr) ?? null;
+      return { day, dayStr, holidayTitle, isHoliday: !!holidayTitle, weekOff: holidayTitle ? new Set<number>() : weekOffEmpsForDay(day) };
+    });
+
+    type Emp = {
+      name: string; employeeCode: string; designation: string;
+      statuses: { date: string; status: string; checkIn: string | null; checkOut: string | null }[];
+      presentDays: number;
+    };
+    const deptMap = new Map<string, {
+      dept: string; headcount: number;
+      present: number; leave: number; permission: number; absent: number; weekoff: number;
+      employees: Emp[];
+    }>();
+
+    for (const e of employees) {
+      const dept = e.Department?.name || "Unassigned";
+      if (!deptMap.has(dept)) {
+        deptMap.set(dept, { dept, headcount: 0, present: 0, leave: 0, permission: 0, absent: 0, weekoff: 0, employees: [] });
+      }
+      const row = deptMap.get(dept)!;
+      row.headcount++;
+
+      const empRow: Emp = {
+        name: `${e.firstName ?? ""} ${e.lastName ?? ""}`.trim(),
+        employeeCode: e.employeeCode ?? "",
+        designation: e.designation?.name ?? "—",
+        statuses: [],
+        presentDays: 0,
+      };
+
+      for (const meta of dayMeta) {
+        const rec = attnByEmpDay.get(`${e.id}|${meta.dayStr}`);
+        const st = rec?.status;
+        let category: string;
+        if (st === "PRESENT") { row.present++; empRow.presentDays++; category = "Present"; }
+        else if (st === "LEAVE") { row.leave++; category = "Leave"; }
+        else if (st === "PERMISSION") { row.permission++; category = "Permission"; }
+        else if (meta.isHoliday) { row.weekoff++; category = "Holiday"; }
+        else if (meta.weekOff.has(e.id)) { row.weekoff++; category = "Week Off"; }
+        else { row.absent++; category = "Absent"; }
+        empRow.statuses.push({
+          date: meta.dayStr,
+          status: category,
+          checkIn: rec?.checkIn ? format(rec.checkIn, "HH:mm") : null,
+          checkOut: rec?.checkOut ? format(rec.checkOut, "HH:mm") : null,
+        });
+      }
+
+      row.employees.push(empRow);
+    }
+
+    const depts = Array.from(deptMap.values())
+      .map(d => {
+        const workingSlots = d.present + d.leave + d.permission + d.absent;
+        return { ...d, attendancePct: workingSlots > 0 ? Math.round((d.present / workingSlots) * 100) : 0 };
+      })
+      .sort((a, b) => b.headcount - a.headcount);
+
+    const totals = depts.reduce(
+      (t, d) => ({
+        headcount: t.headcount + d.headcount,
+        present: t.present + d.present,
+        leave: t.leave + d.leave,
+        permission: t.permission + d.permission,
+        absent: t.absent + d.absent,
+        weekoff: t.weekoff + d.weekoff,
+      }),
+      { headcount: 0, present: 0, leave: 0, permission: 0, absent: 0, weekoff: 0 },
+    );
+    const totalWorkingSlots = totals.present + totals.leave + totals.permission + totals.absent;
+    const attendancePct = totalWorkingSlots > 0 ? Math.round((totals.present / totalWorkingSlots) * 100) : 0;
+
+    res.json({
+      weekStartDate: format(baseStart, "yyyy-MM-dd"),
+      weekEndDate: format(baseEnd, "yyyy-MM-dd"),
+      days: dayMeta.map(m => ({ date: m.dayStr, isHoliday: m.isHoliday, holidayTitle: m.holidayTitle })),
+      totals: { ...totals, attendancePct },
+      depts,
+    });
+  } catch (err: any) {
+    console.error("getDeptAttendanceWeekly error:", err);
     res.status(500).json({ error: err.message });
   }
 };

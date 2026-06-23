@@ -8,7 +8,9 @@ import * as os from 'os';
 import * as path from 'path';
 import axios from 'axios';
 import QRCode from 'qrcode';
-import { Client } from 'basic-ftp';
+// Legacy FTP upload (kept for reference / fallback). Files now go to local disk.
+// import { Client } from 'basic-ftp';
+import { saveLocal, publicUrl as buildPublicUrl } from '../../lib/fileStorage';
 import { AuthenticatedRequest } from '../../middleware/authMiddleware';
 import { config } from '../../config';
 // import { ClearanceType } from '@prisma/client';
@@ -1111,10 +1113,11 @@ export const generateClearanceCertificate = async (req: Request, res: Response) 
   await uploadToFTP(filePath, remotePath);
 
   // 6) Public URL to return & persist
-  // If your Hostinger public dir maps to https://hrproindia.in/certificate/
-  // ensure your FTP_PUBLIC_DIR is /public_html/certificate
-  const filePublicPath = remotePath.replace('/public_html', ''); // -> /certificate/xxx.pdf
-  const publicUrl = `${PUBLIC_BASE_URL}${filePublicPath}`;
+  // Files are stored on the server's local disk and served at
+  // <PUBLIC_BASE_URL>/uploads/certificate/xxx.pdf. buildPublicUrl strips the
+  // legacy "/public_html/" prefix from remotePath and prepends "/uploads/".
+  // Legacy FTP URL was: `${PUBLIC_BASE_URL}${remotePath.replace('/public_html', '')}`
+  const publicUrl = buildPublicUrl(remotePath);
 
   // 7) Persist URL + code
   await prisma.resignationDocument.upsert({
@@ -1383,25 +1386,31 @@ async function generateClearancePdf(input: ClearanceCertInput): Promise<{ filePa
 }
 
 
-const FTP_CONFIG = {
-  host: config.ftp.host,
-  user: config.ftp.user,
-  password: config.ftp.pass,
-  secure: config.ftp.secure,
-}
+// Legacy FTP credentials — no longer used now that uploads are stored locally.
+// const FTP_CONFIG = {
+//   host: config.ftp.host,
+//   user: config.ftp.user,
+//   password: config.ftp.pass,
+//   secure: config.ftp.secure,
+// }
 export async function uploadToFTP(localFilePath: string, remoteFilePath: string) {
-  const client = new Client();
-  client.ftp.verbose = false;
-  try {
-    await client.access(FTP_CONFIG);
-    // Ensure parent dir exists (e.g., /public_html/certificate)
-    const lastSlash = remoteFilePath.lastIndexOf('/');
-    const remoteDir = remoteFilePath.substring(0, lastSlash);
-    if (remoteDir) await client.ensureDir(remoteDir);
-    await client.uploadFrom(localFilePath, remoteFilePath);
-  } finally {
-    client.close();
-  }
+  // Local disk storage (current). remoteFilePath is a legacy
+  // "/public_html/certificate/<file>" path; saveLocal stores it under UPLOADS_DIR.
+  await saveLocal(localFilePath, remoteFilePath);
+
+  // ── Legacy FTP upload (kept for reference / fallback) ─────────────────────
+  // const client = new Client();
+  // client.ftp.verbose = false;
+  // try {
+  //   await client.access(FTP_CONFIG);
+  //   // Ensure parent dir exists (e.g., /public_html/certificate)
+  //   const lastSlash = remoteFilePath.lastIndexOf('/');
+  //   const remoteDir = remoteFilePath.substring(0, lastSlash);
+  //   if (remoteDir) await client.ensureDir(remoteDir);
+  //   await client.uploadFrom(localFilePath, remoteFilePath);
+  // } finally {
+  //   client.close();
+  // }
 }
 // export async function listResignationsWithClearances(req: AuthenticatedRequest, res: Response) {
 //   try {

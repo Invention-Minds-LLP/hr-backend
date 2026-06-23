@@ -26,6 +26,7 @@ import {
   getKpiDetail,
   getDeptSnapshot,
   getDeptAttendanceToday,
+  getDeptAttendanceWeekly,
   getWeeklyTrend,
   getPerformanceDistribution,
   getDeptRisk,
@@ -78,6 +79,7 @@ router.get("/action-items", authenticateToken, getActionItems);
 router.get("/kpi-detail", authenticateToken, getKpiDetail);
 router.get("/dept-snapshot", authenticateToken, getDeptSnapshot);
 router.get("/dept-attendance-today", authenticateToken, getDeptAttendanceToday);
+router.get("/dept-attendance-weekly", authenticateToken, getDeptAttendanceWeekly);
 router.get("/weekly-trend", authenticateToken, getWeeklyTrend);
 router.get("/performance-distribution", authenticateToken, getPerformanceDistribution);
 router.get("/dept-risk", authenticateToken, getDeptRisk);

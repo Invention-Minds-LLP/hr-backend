@@ -60,6 +60,7 @@ import weeklyRatingRoutes from "./api/weekly-rating/weekly-rating.routes";
 import pipRoutes, { respondViaToken } from "./api/pip/pip.routes";
 import managementRoutes from "./api/management/management.routes";
 import { authenticateToken } from "./middleware/authMiddleware";
+import { UPLOADS_DIR } from "./lib/fileStorage";
 
 
 
@@ -137,6 +138,13 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: "2mb" }));
+
+// Serve uploaded files from the server's local disk. Files written by the
+// upload helpers (src/lib/fileStorage.ts) land under UPLOADS_DIR and are exposed
+// at <PUBLIC_BASE_URL>/uploads/<folder>/<file>. In production nginx also serves
+// /uploads directly from the shared volume; this route is the in-process
+// fallback (and what's used when running the backend without nginx).
+app.use("/uploads", express.static(UPLOADS_DIR, { fallthrough: false, maxAge: "1d" }));
 
 // Routes
 app.use("/api/employees", employeeRoutes);
@@ -290,7 +298,7 @@ app.get("/", (req, res) => {
   res.send("✅ HR Management API is running!");
 });
 
-startSchedulers();
+// startSchedulers();
 
 
 // Error handler middleware (optional, but good practice)

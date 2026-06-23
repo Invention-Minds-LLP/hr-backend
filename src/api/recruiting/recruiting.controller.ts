@@ -3,7 +3,9 @@ import { Request, Response, NextFunction } from 'express';
 import { PrismaClient, JobStatus, ApplicationStatus, OfferStatus, JoinOutcome, RejectReason, EmploymentType, EmploymentStatus, Gender } from '@prisma/client';
 import formidable, { File as FormidableFile } from "formidable";
 import fs from "fs";
-import { Client } from 'basic-ftp';
+// Legacy FTP upload (kept for reference / fallback). Files now go to local disk.
+// import { Client } from 'basic-ftp';
+import { saveLocal, publicUrl } from '../../lib/fileStorage';
 import bcrypt from "bcryptjs";
 import nodemailer from "nodemailer";
 import { createNotification } from '../notifications/notifications.controller';
@@ -13,19 +15,20 @@ import { config } from '../../config';
 
 const prisma = new PrismaClient();
 
+// Legacy FTP credentials — no longer used now that uploads are stored locally.
 // FTP credentials come from this client's .env via src/config (FTP_HOST /
 // FTP_USER / FTP_PASS / FTP_SECURE).
-const FTP_CONFIG = {
-  host: config.ftp.host,
-  user: config.ftp.user,
-  password: config.ftp.pass,
-  secure: config.ftp.secure,
-};
-if (!FTP_CONFIG.host || !FTP_CONFIG.user || !FTP_CONFIG.password) {
-  console.warn(
-    "⚠️  [recruiting] FTP_HOST / FTP_USER / FTP_PASS not set in env — file uploads will fail",
-  );
-}
+// const FTP_CONFIG = {
+//   host: config.ftp.host,
+//   user: config.ftp.user,
+//   password: config.ftp.pass,
+//   secure: config.ftp.secure,
+// };
+// if (!FTP_CONFIG.host || !FTP_CONFIG.user || !FTP_CONFIG.password) {
+//   console.warn(
+//     "⚠️  [recruiting] FTP_HOST / FTP_USER / FTP_PASS not set in env — file uploads will fail",
+//   );
+// }
 
 // Default IDs that used to be hard-coded throughout this file. Override per
 // client by setting these in the .env (see src/config).
@@ -97,21 +100,26 @@ const transporter = nodemailer.createTransport({
 });
 
 async function uploadToFTP(localFilePath: string, remoteFileName: string): Promise<any> {
-  const client = new Client();
-  client.ftp.verbose = false;
-  try {
-    await client.access(FTP_CONFIG);
-    const remoteDir = "/public_html/resume";
-    await client.ensureDir(remoteDir); // Change folder for HR docs
-    console.log(remoteFileName)
-    await client.uploadFrom(localFilePath, remoteFileName);
-    await client.close();
+  // Local disk storage (current). remoteFileName is a legacy
+  // "/public_html/resume/<file>" path; saveLocal stores it under UPLOADS_DIR.
+  await saveLocal(localFilePath, remoteFileName);
 
-    // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
-  } catch (error) {
-    console.error("FTP Upload Error:", error);
-    throw new Error("FTP upload failed");
-  }
+  // ── Legacy FTP upload (kept for reference / fallback) ─────────────────────
+  // const client = new Client();
+  // client.ftp.verbose = false;
+  // try {
+  //   await client.access(FTP_CONFIG);
+  //   const remoteDir = "/public_html/resume";
+  //   await client.ensureDir(remoteDir); // Change folder for HR docs
+  //   console.log(remoteFileName)
+  //   await client.uploadFrom(localFilePath, remoteFileName);
+  //   await client.close();
+  //
+  //   // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
+  // } catch (error) {
+  //   console.error("FTP Upload Error:", error);
+  //   throw new Error("FTP upload failed");
+  // }
 }
 
 /** Small helper to catch async errors */
@@ -366,7 +374,8 @@ export class RecruitingController {
           const remoteFilePath = `/public_html/resume/${fileName}`;
 
           await uploadToFTP(filePath, remoteFilePath);
-          resumeUrl = `https://hrproindia.in/resume/${fileName}`;
+          // resumeUrl = `https://hrproindia.in/resume/${fileName}`; // legacy FTP URL
+          resumeUrl = publicUrl(remoteFilePath);
           console.log("Uploaded resume URL:", resumeUrl);
 
           fs.unlinkSync(filePath);

@@ -3327,6 +3327,11 @@ model WeeklyPerformanceReport {
   declinedDate  DateTime?
   declineReason String?
 
+  // Management acknowledgement of an already-APPROVED report (separate from the approval chain).
+  mgmtAcknowledgedAt DateTime?
+  mgmtAcknowledgedBy Int?
+  mgmtRemark         String?   @db.Text
+
   submittedAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @default(now()) @updatedAt

@@ -6,7 +6,9 @@ import type { Prisma } from "@prisma/client";
 const prisma = new PrismaClient();
 import formidable from "formidable";
 import fs from "fs";
-import { Client } from "basic-ftp";
+// Legacy FTP upload (kept for reference / fallback). Files now go to local disk.
+// import { Client } from "basic-ftp";
+import { saveLocal, publicUrl, deleteLocal } from "../../lib/fileStorage";
 import path from "path";
 import { $Enums } from '@prisma/client';
 import { createNotification } from "../notifications/notifications.controller";
@@ -21,12 +23,13 @@ import { allocateNewJoineeLeave, getLeaveStartMode } from "../leave/leave.contro
 import { config } from "../../config";
 
 
-const FTP_CONFIG = {
-  host: config.ftp.host,
-  user: config.ftp.user,
-  password: config.ftp.pass,
-  secure: config.ftp.secure,
-}
+// Legacy FTP credentials — no longer used now that uploads are stored locally.
+// const FTP_CONFIG = {
+//   host: config.ftp.host,
+//   user: config.ftp.user,
+//   password: config.ftp.pass,
+//   secure: config.ftp.secure,
+// }
 const TEMP_FOLDER = path.join(__dirname, '../temp'); // absolute path
 
 if (!fs.existsSync(TEMP_FOLDER)) {
@@ -1151,21 +1154,27 @@ function sanitizeFileName(fileName: string): string {
 }
 
 async function uploadToFTP(localFilePath: string, remoteFileName: string): Promise<any> {
-  const client = new Client();
-  client.ftp.verbose = false;
-  try {
-    await client.access(FTP_CONFIG);
-    const folder = path.dirname(remoteFileName);
-    await client.ensureDir(folder);
-    console.log(remoteFileName)
-    await client.uploadFrom(localFilePath, remoteFileName);
-    await client.close();
+  // ── Local disk storage (current) ──────────────────────────────────────────
+  // remoteFileName is a legacy "/public_html/<folder>/<file>" path; saveLocal
+  // strips the prefix and stores it under UPLOADS_DIR/<folder>/<file>.
+  await saveLocal(localFilePath, remoteFileName);
 
-    // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
-  } catch (error) {
-    console.error("FTP Upload Error:", error);
-    throw new Error("FTP upload failed");
-  }
+  // ── Legacy FTP upload (kept for reference / fallback) ─────────────────────
+  // const client = new Client();
+  // client.ftp.verbose = false;
+  // try {
+  //   await client.access(FTP_CONFIG);
+  //   const folder = path.dirname(remoteFileName);
+  //   await client.ensureDir(folder);
+  //   console.log(remoteFileName)
+  //   await client.uploadFrom(localFilePath, remoteFileName);
+  //   await client.close();
+  //
+  //   // return `https://hrproindia.in/documents/${remoteFileName}`; // public URL
+  // } catch (error) {
+  //   console.error("FTP Upload Error:", error);
+  //   throw new Error("FTP upload failed");
+  // }
 }
 
 // API Handler
@@ -1652,13 +1661,14 @@ export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
             );
 
             const remotePath = `/public_html/documents/${safeName}`;
-            await uploadToFTP(file.filepath, remotePath);
+            await uploadToFTP(file.filepath, remotePath); // now stores to local disk
 
             try {
               fs.unlinkSync(file.filepath);
             } catch { }
 
-            newFileUrl = `https://hrproindia.in/documents/${safeName}`;
+            // newFileUrl = `https://hrproindia.in/documents/${safeName}`; // legacy FTP URL
+            newFileUrl = publicUrl(remotePath);
           }
 
           /* ---------- UPDATE EXISTING DOCUMENT ---------- */
@@ -1742,7 +1752,8 @@ export const uploadEmployeePhoto = async (req: Request, res: Response) => {
 
       const remoteFilePath = `/public_html/photos/${fileName}`;
       await uploadToFTP(tempFilePath, remoteFilePath);
-      const fileUrl = `https://hrproindia.in/photos/${fileName}`;
+      // const fileUrl = `https://hrproindia.in/photos/${fileName}`; // legacy FTP URL
+      const fileUrl = publicUrl(remoteFilePath);
 
       fs.unlinkSync(tempFilePath); // cleanup temp file
 
@@ -1793,7 +1804,8 @@ export const uploadEmployeeDisabilityProof = async (req: Request, res: Response)
 
       const remoteFilePath = `/public_html/disability/${fileName}`;
       await uploadToFTP(tempFilePath, remoteFilePath);
-      const fileUrl = `https://hrproindia.in/disability/${fileName}`;
+      // const fileUrl = `https://hrproindia.in/disability/${fileName}`; // legacy FTP URL
+      const fileUrl = publicUrl(remoteFilePath);
 
       // cleanup local temp file
       fs.unlinkSync(tempFilePath);
@@ -2201,7 +2213,8 @@ export const uploadVaccineProof = async (req: Request, res: Response) => {
 
       const remoteFilePath = `/public_html/vaccine-proofs/${fileName}`;
       await uploadToFTP(tempFilePath, remoteFilePath);
-      const fileUrl = `https://hrproindia.in/vaccine-proofs/${fileName}`;
+      // const fileUrl = `https://hrproindia.in/vaccine-proofs/${fileName}`; // legacy FTP URL
+      const fileUrl = publicUrl(remoteFilePath);
 
       fs.unlinkSync(tempFilePath);
 
@@ -3334,21 +3347,27 @@ export const deleteEmployeeDocument = async (req: Request, res: Response) => {
   }
 };
 export async function deleteFromFTP(remotePath: string) {
-  const client = new Client();
-  client.ftp.verbose = false;
+  // ── Local disk delete (current) ───────────────────────────────────────────
+  // remotePath is a legacy "/public_html/<folder>/<file>"; deleteLocal strips
+  // the prefix and removes UPLOADS_DIR/<folder>/<file> (missing file is a no-op).
+  await deleteLocal(remotePath);
 
-  try {
-    await client.access({
-      host: FTP_CONFIG.host!,
-      user: FTP_CONFIG.user!,
-      password: FTP_CONFIG.password!,
-      secure: FTP_CONFIG.secure,
-    });
-
-    await client.remove(remotePath);
-  } finally {
-    client.close();
-  }
+  // ── Legacy FTP delete (kept for reference / fallback) ─────────────────────
+  // const client = new Client();
+  // client.ftp.verbose = false;
+  //
+  // try {
+  //   await client.access({
+  //     host: FTP_CONFIG.host!,
+  //     user: FTP_CONFIG.user!,
+  //     password: FTP_CONFIG.password!,
+  //     secure: FTP_CONFIG.secure,
+  //   });
+  //
+  //   await client.remove(remotePath);
+  // } finally {
+  //   client.close();
+  // }
 }
 // controllers/employee.controller.ts
 

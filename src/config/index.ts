@@ -100,6 +100,10 @@ export const config = {
   appPublicUrl: optional("APP_PUBLIC_URL"),
   publicBaseUrl: optional("PUBLIC_BASE_URL"),
   candidatePortalUrl: optional("CANDIDATE_PORTAL_URL"),
+  // Directory on the server's disk where uploaded files are stored. Empty =
+  // <cwd>/uploads (see src/lib/fileStorage.ts). In Docker set to the mounted
+  // volume path, e.g. /usr/src/app/uploads.
+  uploadsDir: optional("UPLOADS_DIR"),
 
   // ── CORS ──────────────────────────────────────────────────────────────────
   // Allowed browser origins. Default is the previous hardcoded list (dev +
