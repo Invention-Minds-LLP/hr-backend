@@ -81,7 +81,22 @@ const app = express();
 // Behind a single reverse proxy (nginx). Lets express-rate-limit / req.ip use
 // the real client IP from X-Forwarded-For without trusting arbitrary hops.
 app.set("trust proxy", 1);
-app.use(helmet());
+// Allow uploaded files (served from /uploads) to be loaded by a cross-origin
+// page. Some clients (e.g. JMRH on LAN) serve the frontend on a different
+// origin/port (:4300) than the backend (:3002); helmet's default
+// Cross-Origin-Resource-Policy: same-origin blocks <img src> from /uploads in
+// that case. CORS still governs API access — this only affects how static
+// resources may be embedded. Also widen img-src so an img can load from any
+// http/https host if the page ever carries a CSP (images aren't an XSS vector).
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      "img-src": ["'self'", "data:", "http:", "https:"],
+    },
+  },
+}));
 
 // Global API rate limit (per IP). Blanket protection against scraping/abuse.
 app.use("/api/", rateLimit({
