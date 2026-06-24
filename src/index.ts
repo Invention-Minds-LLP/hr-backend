@@ -253,17 +253,33 @@ app.post("/api/biometric/backfill-employee", authenticateToken, async (req, res)
  * background and returns immediately. Watch the server console for progress.
  */
 app.post("/api/biometric/run-sync", authenticateToken, async (req, res) => {
-  const isFinalRun = !!(req.body || {}).isFinalRun;
-  console.log(`[manual] biometric sync requested | isFinalRun=${isFinalRun}`);
+  const body = req.body || {};
+  const isFinalRun = !!body.isFinalRun;
+
+  // Optional backfill: pass { "date": "YYYY-MM-DD" } to re-sync a past day from
+  // the device. Omit to sync today. The whole day is re-pulled; upsert is
+  // idempotent so re-running never duplicates.
+  let targetDate: Date | undefined;
+  if (body.date) {
+    const d = new Date(`${body.date}T00:00:00`);
+    if (isNaN(d.getTime())) {
+      return res.status(400).json({ error: `Invalid date "${body.date}". Use YYYY-MM-DD.` });
+    }
+    targetDate = d;
+  }
+
+  const label = targetDate ? targetDate.toDateString() : "today";
+  console.log(`[manual] biometric sync requested | isFinalRun=${isFinalRun} | date=${label}`);
 
   // Fire-and-forget so the caller isn't blocked. Errors are logged.
-  runBiometricSync(isFinalRun)
-    .then(() => console.log(`[manual] biometric sync finished | isFinalRun=${isFinalRun}`))
+  runBiometricSync(isFinalRun, targetDate)
+    .then(() => console.log(`[manual] biometric sync finished | isFinalRun=${isFinalRun} | date=${label}`))
     .catch((err) => console.error("[manual] biometric sync failed:", err));
 
   res.status(202).json({
     started: true,
     isFinalRun,
+    date: label,
     message: "Biometric sync started in the background. Watch server logs for progress.",
   });
 });

@@ -253,13 +253,13 @@ export async function debugFetchCosec(opts: {
    MAIN BIOMETRIC SYNC
 ---------------------------------- */
 
-export async function runBiometricSync(isFinalRun: boolean) {
-  const today = startOfDay(new Date());
-  const yesterday = startOfDay(new Date(Date.now() - 86400000));
-  // const today = startOfDay(date);
-  // const yesterday = startOfDay(
-  //   new Date(date.getTime() - 86400000)
-  // );
+export async function runBiometricSync(isFinalRun: boolean, targetDate?: Date) {
+  // Live crons call this with no targetDate → syncs "now". Pass a date to
+  // backfill a past day (re-pulls that whole day from the device; upsert is
+  // idempotent so re-running never duplicates).
+  const base = targetDate ?? new Date();
+  const today = startOfDay(base);
+  const yesterday = startOfDay(new Date(base.getTime() - 86400000));
 
   console.log(`🔄 Starting biometric sync | Date: ${today.toDateString()} | Final: ${isFinalRun}`);
   console.log(`🔄 Yesterday date: ${yesterday.toDateString()}`);
