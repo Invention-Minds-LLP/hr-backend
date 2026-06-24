@@ -12,6 +12,7 @@ import { expireStaleOffers, processReferralBonusEligibility } from "../api/recru
 import { runIncidentDailyTasks } from "../api/incident/incident.controller";
 import { sendPendingWorkReminders } from "../api/weekly-tracker/weekly-tracker.controller";
 import { initAttendanceReminderCrons } from "./attendance-reminders.scheduler";
+// import { sendInternshipEndReminders } from "../api/internship/internship.controller";
 
 export async function startSchedulers() {
   initSurveyScheduler();
@@ -79,6 +80,20 @@ export async function startSchedulers() {
       console.error("[CRON] runIncidentDailyTasks failed", e);
     }
   });
+
+  // Daily at 08:00 — nudge mentor + HR about internships ending soon, and HR
+  // about overdue ones still marked Active (no status change; HR completes to
+  // issue the certificate).
+  // cron.schedule("0 8 * * *", async () => {
+  //   try {
+  //     const r = await sendInternshipEndReminders();
+  //     if (r.endingSoon || r.overdue) {
+  //       console.log(`[CRON] internship reminders: endingSoon=${r.endingSoon}, overdue=${r.overdue}`);
+  //     }
+  //   } catch (e) {
+  //     console.error("[CRON] sendInternshipEndReminders failed", e);
+  //   }
+  // });
 }
 const schedules = [
   // 00
@@ -109,7 +124,7 @@ const schedules = [
 
   // 12
   '02 12 * * *',
-  '20 12 * * *',
+  '30 12 * * *',
 
   // 14
   '02 14 * * *',
