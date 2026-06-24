@@ -215,8 +215,8 @@ app.use("/api/management", managementRoutes);
 app.post("/api/pip-respond/:token", respondViaToken);
 
 // Public endpoint — no auth required (certificate verification via QR / link)
-import { verifyCertificate } from "./api/internship/internship.controller";
-app.get("/api/public/verify/certificate/:code", verifyCertificate);
+// import { verifyCertificate } from "./api/internship/internship.controller";
+// app.get("/api/public/verify/certificate/:code", verifyCertificate);
 
 // Utility: backfill biometric attendance for one employee across a date range
 import { backfillEmployeeAttendance, runBiometricSync, debugFetchCosec } from "./api/biometric/biometric.controller";
