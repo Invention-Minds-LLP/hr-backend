@@ -214,6 +214,10 @@ app.use("/api/management", managementRoutes);
 // Public endpoint — no auth required (employee responds via token link in email)
 app.post("/api/pip-respond/:token", respondViaToken);
 
+// Public endpoint — no auth required (certificate verification via QR / link)
+import { verifyCertificate } from "./api/internship/internship.controller";
+app.get("/api/public/verify/certificate/:code", verifyCertificate);
+
 // Utility: backfill biometric attendance for one employee across a date range
 import { backfillEmployeeAttendance, runBiometricSync, debugFetchCosec } from "./api/biometric/biometric.controller";
 app.post("/api/biometric/backfill-employee", authenticateToken, async (req, res) => {
@@ -313,7 +317,7 @@ app.get("/", (req, res) => {
   res.send("✅ HR Management API is running!");
 });
 
-// startSchedulers();
+startSchedulers();
 
 
 // Error handler middleware (optional, but good practice)
