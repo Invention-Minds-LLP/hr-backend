@@ -95,18 +95,15 @@ export const createRequisition = async (req: Request, res: Response) => {
       autoApproval.approvedByHoDComments = firstNonEmpty(approvedByHoDComments, autoNote);
       autoApproval.approvedByHoDEmpId   = raiser?.id ?? null;
     } else if (raiserRoleId === 4) {
-      // Management raising → skip both HOD AND COO steps.
-      initialStatus = 'COO_APPROVED';
+      // Management/COO raising → skip the HOD step only. HR must still review
+      // (mandatory per policy) and the FINAL COO approval — which generates the
+      // job openings — stays a human action, so it is NOT auto-stamped here.
+      initialStatus = 'HOD_APPROVED';
       autoApproval.approvedByHoD        = firstNonEmpty(approvedByHoD, raiserDisplayName, raisedBy);
       autoApproval.hodSign              = firstNonEmpty(hodSign, raisedBySign);
       autoApproval.approvedByHoDDate    = approvedByHoDDate    ? new Date(approvedByHoDDate) : now;
       autoApproval.approvedByHoDComments = firstNonEmpty(approvedByHoDComments, autoNote);
       autoApproval.approvedByHoDEmpId   = raiser?.id ?? null;
-      autoApproval.approvedBySMO        = firstNonEmpty(approvedBySMO, raiserDisplayName, raisedBy);
-      autoApproval.smoSign              = firstNonEmpty(smoSign, raisedBySign);
-      autoApproval.approvedBySMODate    = approvedBySMODate    ? new Date(approvedBySMODate) : now;
-      autoApproval.approvedBySMOComments = firstNonEmpty(approvedBySMOComments, autoNote);
-      autoApproval.approvedBySMOEmpId   = raiser?.id ?? null;
     }
 
     // Step 2: Create Requisition
@@ -169,7 +166,7 @@ export const createRequisition = async (req: Request, res: Response) => {
     );
     // ── Notify the NEXT approver ─────────────────────────────────
     // Approval ladder (low → high):
-    //   Incharge (role 5) → HOD (role 3) → Management/COO (role 4) → HR (role 1)
+    //   Incharge (role 5) → HOD (role 3) → HR (role 1) → COO/Management (role 4)
     // Reuse the `raiser` lookup performed above. Decision matrix matches
     // the auto-approval block — whichever steps were pre-stamped, the
     // notification jumps to the FIRST step that still needs human action.
@@ -179,14 +176,8 @@ export const createRequisition = async (req: Request, res: Response) => {
 
       let nextLevelEmployees: { id: number }[] = [];
 
-      if (raiserRoleId === 3) {
-        // HOD raised → HOD step auto-approved → next is Management.
-        nextLevelEmployees = await prisma.employee.findMany({
-          where: { roleId: 4, employmentStatus: 'ACTIVE' },
-          select: { id: true },
-        });
-      } else if (raiserRoleId === 4) {
-        // Management raised → HOD + COO auto-approved → next is HR.
+      if (raiserRoleId === 3 || raiserRoleId === 4) {
+        // HOD or Management raised → HOD step auto-approved → next is HR review.
         nextLevelEmployees = await prisma.employee.findMany({
           where: { roleId: 1, employmentStatus: 'ACTIVE' },
           select: { id: true },
@@ -317,66 +308,17 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
         break;
 
       case "COO":
-        updateData = reject
-          ? {
+        if (reject) {
+          updateData = {
             smoRejectedBy: approverName,
             smoRejectedDate: now,
             smoRejectedComments: comments,
             status: "REJECTED",
-          }
-          : {
-            approvedBySMO: approverName,
-            smoSign: signature,
-            approvedBySMODate: now,
-            approvedBySMOComments: comments,
-            status: "COO_APPROVED",
-            ...(approverEmpIdSafe ? { approvedBySMOEmpId: approverEmpIdSafe } : {}),
-          };
-        break;
-
-      // case "HR":
-      //   if (reject) {
-      //     updateData = {
-      //       hrRejectedBy: approverName,
-      //       hrRejectedDate: now,
-      //       hrRejectedComments: comments,
-      //       status: "REJECTED",
-      //     };
-      //   } else {
-      //     const requisition = await prisma.manpowerRequisition.findUnique({ where: { id: Number(id) } });
-      //     if (!requisition) return res.status(404).json({ message: "Requisition not found" });
-
-      //     await prisma.job.create({
-      //       data: {
-      //         title: title || requisition.title || "Untitled",
-      //         departmentId: requisition.departmentId ?? 0, // coerce null to undefined
-      //         location,
-      //         headcount: requisition.vacancies || 0,
-      //         createdBy: 1,
-      //       },
-      //     });
-
-
-
-
-      //     updateData = {
-      //       receivedByHR: approverName,
-      //       hrSign: signature,
-      //       receivedByHRDate: now,
-      //       receivedByHRComments: comments,
-      //       status: "HR_RECEIVED",
-      //     };
-      //   }
-      //   break;
-      case "HR":
-        if (reject) {
-          updateData = {
-            hrRejectedBy: approverName,
-            hrRejectedDate: now,
-            hrRejectedComments: comments,
-            status: "REJECTED",
           };
         } else {
+          // COO is the FINAL approval. On approval the system generates the
+          // formal requisition output: one Job opening per breakdown row (or a
+          // single job when there is no breakdown). Moved here from the HR step.
           const requisition = await prisma.manpowerRequisition.findUnique({
             where: { id: Number(id) },
           });
@@ -435,16 +377,69 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
             }
           }
 
-          // ✅ Update requisition status
           updateData = {
+            approvedBySMO: approverName,
+            smoSign: signature,
+            approvedBySMODate: now,
+            approvedBySMOComments: comments,
+            status: "COO_APPROVED",
+            ...(approverEmpIdSafe ? { approvedBySMOEmpId: approverEmpIdSafe } : {}),
+          };
+        }
+        break;
+
+      // case "HR":
+      //   if (reject) {
+      //     updateData = {
+      //       hrRejectedBy: approverName,
+      //       hrRejectedDate: now,
+      //       hrRejectedComments: comments,
+      //       status: "REJECTED",
+      //     };
+      //   } else {
+      //     const requisition = await prisma.manpowerRequisition.findUnique({ where: { id: Number(id) } });
+      //     if (!requisition) return res.status(404).json({ message: "Requisition not found" });
+
+      //     await prisma.job.create({
+      //       data: {
+      //         title: title || requisition.title || "Untitled",
+      //         departmentId: requisition.departmentId ?? 0, // coerce null to undefined
+      //         location,
+      //         headcount: requisition.vacancies || 0,
+      //         createdBy: 1,
+      //       },
+      //     });
+
+
+
+
+      //     updateData = {
+      //       receivedByHR: approverName,
+      //       hrSign: signature,
+      //       receivedByHRDate: now,
+      //       receivedByHRComments: comments,
+      //       status: "HR_RECEIVED",
+      //     };
+      //   }
+      //   break;
+      case "HR":
+        // HR review/verification step — now BEFORE the COO. HR confirms the
+        // requirement; no job is created here (that happens on COO approval).
+        updateData = reject
+          ? {
+            hrRejectedBy: approverName,
+            hrRejectedDate: now,
+            hrRejectedComments: comments,
+            status: "REJECTED",
+          }
+          : {
             receivedByHR: approverName,
             hrSign: signature,
             receivedByHRDate: now,
             receivedByHRComments: comments,
-            status: "HR_RECEIVED",
+            status: "HR_APPROVED",
             ...(approverEmpIdSafe ? { receivedByHREmpId: approverEmpIdSafe } : {}),
           };
-        }
         break;
 
       case "HR_USE_ONLY": // 👈 new step for final closure
@@ -477,25 +472,25 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
         }
       });
 
-      // HOD approved → notify COO
+      // HOD approved → notify HR (HR now reviews before the COO)
       if (step === "HOD" && !reject) {
-        const coo = await prisma.employee.findFirst({
-          where: { role: { id: 4 } },
-          select: { id: true }
-        });
-        if (coo) {
-          await createNotification(coo.id, "A manpower requisition has been approved by HOD and needs your approval.");
-        }
-      }
-
-      // COO approved → notify HR
-      if (step === "COO" && !reject) {
         const hrs = await prisma.employee.findMany({
           where: { role: { id: 1 } },
           select: { id: true }
         });
         for (const hr of hrs) {
-          await createNotification(hr.id, "A manpower requisition has been approved by COO and is ready for HR processing.");
+          await createNotification(hr.id, "A manpower requisition has been approved by HOD and needs HR review.");
+        }
+      }
+
+      // HR reviewed → notify COO for final approval
+      if (step === "HR" && !reject) {
+        const coo = await prisma.employee.findFirst({
+          where: { role: { id: 4 } },
+          select: { id: true }
+        });
+        if (coo) {
+          await createNotification(coo.id, "A manpower requisition has been reviewed by HR and needs your final approval.");
         }
       }
 
@@ -504,9 +499,9 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
         await createNotification(Number(createdBy), "Your manpower requisition has been rejected.");
       }
 
-      // HR processed → notify creator
-      if (step === "HR" && !reject && createdBy) {
-        await createNotification(Number(createdBy), "Your manpower requisition has been processed by HR and a job opening has been created.");
+      // COO gave final approval → notify creator (job opening generated)
+      if (step === "COO" && !reject && createdBy) {
+        await createNotification(Number(createdBy), "Your manpower requisition has received final COO approval and a job opening has been created.");
       }
 
     } catch (notifyErr) {
@@ -617,11 +612,11 @@ export const listRequisitions = async (req: Request, res: Response) => {
      • Raiser themselves                 → status must be RAISED
      • HOD / Mgmt who auto-approved      → status can be HOD_APPROVED
        (their own auto-approval, before SMO/HR has acted)
-     • HR / Admin (force-withdraw)       → any status before COO_APPROVED
+     • HR / Admin (force-withdraw)       → any status before HR_APPROVED
                                             (used to clean up orphans)
 
-   After COO_APPROVED or RECEIVED_BY_HR, withdraw is no longer allowed
-   — only an approver can REJECT from there.
+   After HR_APPROVED (pending COO final) or COO_APPROVED, withdraw is no
+   longer allowed — only an approver can REJECT from there.
    ════════════════════════════════════════════════════════════════════ */
 export const withdrawRequisition = async (req: any, res: Response) => {
   try {
@@ -649,8 +644,9 @@ export const withdrawRequisition = async (req: any, res: Response) => {
       return res.status(400).json({ message: `Already ${existing.status}` });
     }
 
-    // After COO has approved, raiser can no longer pull back
-    const NON_WITHDRAWABLE = ['COO_APPROVED', 'RECEIVED_BY_HR', 'CLOSED'];
+    // Once HR has reviewed (pending COO final) or COO has approved, raiser can
+    // no longer pull back — only the appropriate approver can REJECT from there.
+    const NON_WITHDRAWABLE = ['HR_APPROVED', 'COO_APPROVED', 'RECEIVED_BY_HR', 'CLOSED'];
     if (NON_WITHDRAWABLE.includes(existing.status)) {
       return res.status(400).json({
         message: `Cannot withdraw at status "${existing.status}" — request the appropriate approver to reject if it should not proceed.`,
