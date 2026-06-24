@@ -213,6 +213,10 @@ export class RecruitingController {
       location: j.location,
       headcount: j.headcount,
       status: j.status,
+      // Requirements for the public career form (null on jobs created before
+      // these were added). Experience stays encoded in the title.
+      skills: j.skills,
+      education: j.education,
       createdAt: j.createdAt,
       updatedAt: j.updatedAt,
       applicationsCount: j._count.applications,

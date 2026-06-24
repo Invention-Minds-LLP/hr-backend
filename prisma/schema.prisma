@@ -1235,6 +1235,12 @@ model Job {
   // Minimum professional references the candidate must supply before HR
   // can extend a final offer. Per-job so senior/regulated roles can demand more.
   minReferencesRequired Int                  @default(2)
+  // Requirements snapshotted from the source ManpowerRequisition at job-creation
+  // time (the breakdown-created jobs aren't linked back to a requisition, so we
+  // denormalize here). Used to show requirements on the public career form.
+  // Null for jobs created before this was added.
+  skills                String?              @db.LongText
+  education             String?
   createdAt             DateTime             @default(now())
   updatedAt             DateTime             @default(now()) @updatedAt
   applications          Application[]
@@ -1576,12 +1582,50 @@ model Internship {
   certificateIssuedAt DateTime?
   Department          Department?      @relation(fields: [departmentId], references: [id])
   employee            Employee?        @relation(fields: [employeeId], references: [id])
+  evaluations         InternshipEvaluation[]
+  stipends            InternshipStipend[]
 
   @@index([status])
   @@index([startDate])
   @@index([mentorId])
   @@index([departmentId])
   @@index([employeeId], map: "Internship_employeeId_fkey")
+}
+
+model InternshipEvaluation {
+  id             Int                       @id @default(autoincrement())
+  internshipId   Int
+  evaluatorId    Int?                      // employee (mentor/HR) who evaluated; bare Int like Internship.mentorId
+  periodLabel    String?                   // e.g. "Week 2", "Month 1", "Final"
+  evaluationDate DateTime                  @default(now())
+  rating         Int?                      // 1-5
+  strengths      String?
+  areasToImprove String?
+  comments       String?
+  recommendation InternshipRecommendation?
+  createdAt      DateTime                  @default(now())
+  updatedAt      DateTime                  @default(now()) @updatedAt
+  internship     Internship                @relation(fields: [internshipId], references: [id], onDelete: Cascade)
+
+  @@index([internshipId])
+  @@index([evaluatorId])
+}
+
+model InternshipStipend {
+  id           Int            @id @default(autoincrement())
+  internshipId Int
+  periodMonth  DateTime       // first day of the month this disbursement covers
+  amount       Int
+  status       StipendStatus  @default(PENDING)
+  paidAt       DateTime?
+  notes        String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @default(now()) @updatedAt
+  internship   Internship     @relation(fields: [internshipId], references: [id], onDelete: Cascade)
+
+  @@unique([internshipId, periodMonth])
+  @@index([internshipId])
+  @@index([status])
 }
 
 model CandidateAssignedTest {
@@ -3142,6 +3186,19 @@ enum InternshipStatus {
   COMPLETED
   CONVERTED
   DROPPED
+}
+
+enum InternshipRecommendation {
+  RETAIN    // performing well — recommend converting to employee
+  EXTEND    // extend the internship period
+  COMPLETE  // complete as planned
+  TERMINATE // recommend dropping early
+}
+
+enum StipendStatus {
+  PENDING
+  PAID
+  CANCELLED
 }
 
 enum InterviewFeedbackStatus {

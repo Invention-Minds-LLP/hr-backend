@@ -254,6 +254,20 @@ function buildJobTitle(item: any, fallbackTitle?: string) {
   return `${designation}${expPart}${typeLabel ? " – " + typeLabel : ""}`;
 }
 
+// Build a human-readable education requirement from the requisition's edu flags
+// (with their detail text), falling back to the free-text `education` field.
+// Snapshotted onto each Job so the public career form can show it.
+function composeEducation(r: any): string | null {
+  const parts: string[] = [];
+  if (r.eduSSC) parts.push(r.eduSSCDetail ? `SSC (${r.eduSSCDetail})` : "SSC");
+  if (r.eduDiploma) parts.push(r.eduDiplomaDetail ? `Diploma (${r.eduDiplomaDetail})` : "Diploma");
+  if (r.eduBachelor) parts.push(r.eduBachelorDetail ? `Bachelor's (${r.eduBachelorDetail})` : "Bachelor's");
+  if (r.eduMaster) parts.push(r.eduMasterDetail ? `Master's (${r.eduMasterDetail})` : "Master's");
+  if (r.eduOther && typeof r.eduOther === "string" && r.eduOther.trim()) parts.push(r.eduOther.trim());
+  if (parts.length) return parts.join(", ");
+  return r.education && String(r.education).trim() ? String(r.education).trim() : null;
+}
+
 export const updateRequisitionStatus = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -384,6 +398,11 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
             breakdown = [];
           }
 
+          // Requirements snapshotted onto every job created from this requisition
+          // (skills are requisition-level; education composed from the edu flags).
+          const jobSkills = requisition.skills ?? null;
+          const jobEducation = composeEducation(requisition);
+
           // ✅ If no breakdown, still create one job (fallback to old logic)
           if (!breakdown.length) {
             await prisma.job.create({
@@ -393,6 +412,8 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
                 location,
                 headcount: requisition.vacancies || 1,
                 createdBy: createdBy || 1,
+                skills: jobSkills,
+                education: jobEducation,
               },
             });
           } else {
@@ -407,6 +428,8 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
                   headcount: item.count || 1,
                   createdBy: createdBy || 1,
                   backfillForEmployeeId: null, // optional if you have that field
+                  skills: jobSkills,
+                  education: jobEducation,
                 },
               });
             }
