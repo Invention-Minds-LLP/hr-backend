@@ -2936,6 +2936,7 @@ enum EmploymentStatus {
   NOTICE_PERIOD
   RESIGNED
   SABBATICAL
+  DEACTIVATED
 }
 
 enum LeaveStatus {

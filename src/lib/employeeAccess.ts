@@ -12,7 +12,7 @@
  *
  * Status semantics:
  *   ACTIVE / NOTICE_PERIOD  →  full access
- *   RESIGNED / TERMINATED / SUSPENDED / SABBATICAL  →  blocked
+ *   RESIGNED / TERMINATED / SUSPENDED / SABBATICAL / DEACTIVATED  →  blocked
  */
 
 import { prisma } from './prisma';
