@@ -256,6 +256,37 @@ export const config = {
     phone: optional("PLAY_REVIEW_PHONE"),
   },
 
+  // ── Security: API access logging + alerting ───────────────────────────────
+  // Every API request is logged (file + ApiAccessLog table) by the accessLogger
+  // middleware. Requests that trip a rule (anonymous hit on a sensitive route,
+  // 401/403, brute-force from one IP) are emailed — aggregated — to the
+  // addresses below. See src/middleware/accessLog.ts + src/lib/securityAlert.ts.
+  security: {
+    // Master switch. Set ACCESS_LOG_ENABLED=false to disable logging+alerting.
+    accessLogEnabled: bool("ACCESS_LOG_ENABLED", true),
+    // Who receives security alerts. Comma-separated. If empty, alerts are still
+    // logged to the console but no email is sent.
+    alertEmails: list("SECURITY_ALERT_EMAILS", []),
+    // Route prefixes considered sensitive — an anonymous request to any of these
+    // is flagged. Override per client via SENSITIVE_PREFIXES (comma-separated).
+    sensitivePrefixes: list("SENSITIVE_PREFIXES", [
+      "/api/payroll",
+      "/api/employees",
+      "/api/management",
+      "/api/export",
+      "/api/loans",
+      "/api/incentives",
+    ]),
+    // Persist EVERY request to the DB table, not just flagged ones. The file log
+    // always captures everything regardless. Default true (your choice: DB+file).
+    logAllToDb: bool("ACCESS_LOG_ALL_TO_DB", true),
+    // ≥ this many 401/403 from one IP within the alert window triggers a
+    // brute-force alert.
+    bruteForceThreshold: int("SECURITY_BRUTEFORCE_THRESHOLD", 10),
+    // Days to keep ApiAccessLog rows; a daily cron prunes older rows.
+    retentionDays: int("ACCESS_LOG_RETENTION_DAYS", 90),
+  },
+
   // ── Feature flags ─────────────────────────────────────────────────────────
   // Per-client on/off switches for *the same* feature (vs. config values above).
   // Add booleans here as features start to differ between clients, e.g.

@@ -12,6 +12,9 @@ import { expireStaleOffers, processReferralBonusEligibility } from "../api/recru
 import { runIncidentDailyTasks } from "../api/incident/incident.controller";
 import { sendPendingWorkReminders } from "../api/weekly-tracker/weekly-tracker.controller";
 import { initAttendanceReminderCrons } from "./attendance-reminders.scheduler";
+import { flushSecurityAlerts } from "../lib/securityAlert";
+import { config } from "../config";
+import { prisma } from "../lib/prisma";
 // import { sendInternshipEndReminders } from "../api/internship/internship.controller";
 
 export async function startSchedulers() {
@@ -31,6 +34,32 @@ export async function startSchedulers() {
 
   initDirectorySyncCron();
   initAttendanceReminderCrons();
+
+  // Every 5 min — flush the security alert buffer. Sends ONE aggregated email
+  // per IP/rule group of flagged API requests (anonymous hits on sensitive
+  // routes, 401/403, brute force) accumulated since the last flush.
+  if (config.security.accessLogEnabled) {
+    cron.schedule("*/5 * * * *", async () => {
+      try {
+        const r = await flushSecurityAlerts();
+        if (r.events > 0) console.log(`[CRON] security alerts: ${r.events} flagged request(s), emailed=${r.sent}`);
+      } catch (e) {
+        console.error("[CRON] flushSecurityAlerts failed", e);
+      }
+    });
+
+    // Daily at 03:30 — prune ApiAccessLog rows older than the retention window
+    // so the table doesn't grow unbounded.
+    cron.schedule("30 3 * * *", async () => {
+      try {
+        const cutoff = new Date(Date.now() - config.security.retentionDays * 24 * 60 * 60 * 1000);
+        const r = await prisma.apiAccessLog.deleteMany({ where: { createdAt: { lt: cutoff } } });
+        if (r.count > 0) console.log(`[CRON] pruned ${r.count} ApiAccessLog row(s) older than ${config.security.retentionDays}d`);
+      } catch (e) {
+        console.error("[CRON] ApiAccessLog prune failed", e);
+      }
+    });
+  }
 
   // Daily at 02:00 — flip any unsigned offers past their proposedJoinAt to EXPIRED
   cron.schedule("0 2 * * *", async () => {

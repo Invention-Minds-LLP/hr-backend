@@ -3776,6 +3776,33 @@ model EmployeeAuditLog {
 }
 
 /// ──────────────────────────────────────────────────────────────────────
+///  API ACCESS LOG — one row per API request (security/forensics trail).
+///  Written by the accessLogger middleware (src/middleware/accessLog.ts).
+///  `isAnonymous` = no valid JWT was presented; `suspicious` = a security
+///  rule flagged it (anonymous hit on a sensitive route, 401/403, etc.).
+///  A daily retention cron prunes rows older than ACCESS_LOG_RETENTION_DAYS.
+/// ──────────────────────────────────────────────────────────────────────
+model ApiAccessLog {
+  id          BigInt   @id @default(autoincrement())
+  createdAt   DateTime @default(now())
+  method      String                                       // GET / POST / PUT / DELETE / PATCH
+  path        String   @db.Text                            // request path (no query string)
+  statusCode  Int                                          // final HTTP status
+  durationMs  Int                                          // server processing time
+  ip          String?                                      // client IP (X-Forwarded-For aware)
+  userAgent   String?  @db.Text
+  userId      Int?                                         // empId from a valid token, null if anonymous
+  isAnonymous Boolean  @default(true)                      // true = no valid JWT presented
+  suspicious  Boolean  @default(false)                     // true = a security rule flagged it
+  reason      String?                                      // which rule(s) flagged it
+
+  @@index([createdAt])
+  @@index([ip])
+  @@index([suspicious])
+  @@index([userId])
+}
+
+/// ──────────────────────────────────────────────────────────────────────
 ///  COMMITTEE — POSH ICC and Grievance Redressal Committee.
 ///  One row per committee instance (e.g. "ICC 2026", "Grievance Committee").
 ///  Active members come via CommitteeMember.

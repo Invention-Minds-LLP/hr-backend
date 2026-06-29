@@ -60,6 +60,7 @@ import weeklyRatingRoutes from "./api/weekly-rating/weekly-rating.routes";
 import pipRoutes, { respondViaToken } from "./api/pip/pip.routes";
 import managementRoutes from "./api/management/management.routes";
 import { authenticateToken } from "./middleware/authMiddleware";
+import { softAuth, accessLogger } from "./middleware/accessLog";
 import { UPLOADS_DIR } from "./lib/fileStorage";
 
 
@@ -153,6 +154,14 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: "2mb" }));
+
+// Security access logging. softAuth decodes a token if present (without
+// rejecting) so the logger knows authenticated-vs-anonymous on every route;
+// accessLogger records each /api request (file + ApiAccessLog) and feeds
+// flagged requests (anonymous hits on sensitive routes, 401/403, brute force)
+// into the aggregated email-alert buffer flushed by the scheduler.
+app.use(softAuth);
+app.use(accessLogger);
 
 // Serve uploaded files from the server's local disk. Files written by the
 // upload helpers (src/lib/fileStorage.ts) land under UPLOADS_DIR and are exposed

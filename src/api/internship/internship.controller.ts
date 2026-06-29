@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import { PrismaClient, Prisma, InternshipStatus } from '@prisma/client';
 import PDFDocument from 'pdfkit';
+import QRCode from 'qrcode';
+import nodemailer from 'nodemailer';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -23,6 +25,19 @@ const COMPANY_TAGLINE = config.branding.companyTagline || '';
 
 
 const prisma = new PrismaClient();
+
+const mailer = nodemailer.createTransport({
+    host: config.smtp.host,
+    port: config.smtp.port,
+    secure: config.smtp.secure,
+    auth: { user: config.smtp.user, pass: config.smtp.pass },
+});
+
+/** Public URL where a certificate can be verified (used in the QR + email). */
+function certVerifyUrl(code: string): string {
+    const base = (config.publicBaseUrl || config.appPublicUrl || '').replace(/\/+$/, '');
+    return `${base}/api/public/verify/certificate/${encodeURIComponent(code)}`;
+}
 
 const toDate = (v?: string | Date | null) => (v ? new Date(v) : undefined);
 const parseStatuses = (csv?: string): InternshipStatus[] | undefined =>
@@ -100,11 +115,10 @@ export async function createInternship(req: Request, res: Response) {
         });
 
         const mentorMap = await buildNameMap([created.mentorId]);
-               const message = `A intern ${created.candidateName} has been assigned to you. Please check the details and provide necessary guidance.`;
-            //    if(created.mentorId){
-            //     await createNotification(created.mentorId, message);
-            //    }
-        // await createNotification(created.mentorId, message);
+        if (created.mentorId) {
+            const message = `Intern ${created.candidateName} has been assigned to you. Please check the details and provide necessary guidance.`;
+            await createNotification(created.mentorId, message);
+        }
         return res.status(201).json({
             ...created,
             employeeName: created.employee ? `${created.employee.firstName} ${created.employee.lastName}` : null,
@@ -251,6 +265,74 @@ export async function listInternships(req: Request, res: Response) {
 }
 
 
+/** GET /api/internships/analytics — aggregate stats for the module */
+export async function getInternshipAnalytics(_req: Request, res: Response) {
+    try {
+        const [total, grouped, byDept, byMentorRaw, durationRows] = await Promise.all([
+            prisma.internship.count(),
+            prisma.internship.groupBy({ by: ['status'], _count: { _all: true } }),
+            prisma.internship.groupBy({ by: ['departmentId'], _count: { _all: true } }),
+            prisma.internship.groupBy({
+                by: ['mentorId'],
+                _count: { _all: true },
+                where: { mentorId: { not: null } },
+            }),
+            prisma.internship.findMany({
+                where: { endDate: { not: null } },
+                select: { startDate: true, endDate: true },
+            }),
+        ]);
+
+        const byStatus: Record<string, number> = {};
+        for (const g of grouped) byStatus[g.status] = g._count._all;
+
+        const completed = byStatus['COMPLETED'] ?? 0;
+        const converted = byStatus['CONVERTED'] ?? 0;
+        const dropped = byStatus['DROPPED'] ?? 0;
+        const outcomes = completed + converted + dropped; // resolved internships
+        const pct = (n: number) => (outcomes ? Math.round((n / outcomes) * 1000) / 10 : 0);
+
+        // Average duration (days) over internships that have an end date.
+        const avgDurationDays = durationRows.length
+            ? Math.round(
+                durationRows.reduce((sum, r) => sum + (r.endDate!.getTime() - r.startDate.getTime()) / 86_400_000, 0) /
+                durationRows.length,
+            )
+            : 0;
+
+        // Resolve department + mentor names.
+        const deptIds = byDept.map(d => d.departmentId).filter((x): x is number => x != null);
+        const depts = deptIds.length
+            ? await prisma.department.findMany({ where: { id: { in: deptIds } }, select: { id: true, name: true } })
+            : [];
+        const deptMap = new Map(depts.map(d => [d.id, d.name]));
+        const byDepartment = byDept
+            .filter(d => d.departmentId != null)
+            .map(d => ({ departmentId: d.departmentId!, name: deptMap.get(d.departmentId!) ?? '—', count: d._count._all }))
+            .sort((a, b) => b.count - a.count);
+
+        const mentorMap = await buildNameMap(byMentorRaw.map(m => m.mentorId));
+        const topMentors = byMentorRaw
+            .map(m => ({ mentorId: m.mentorId!, name: mentorMap.get(m.mentorId!) ?? '—', count: m._count._all }))
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 5);
+
+        return res.json({
+            total,
+            byStatus,
+            active: byStatus['ACTIVE'] ?? 0,
+            conversionRate: pct(converted), // % of resolved internships that converted
+            dropRate: pct(dropped),         // % of resolved internships that dropped
+            avgDurationDays,
+            byDepartment,
+            topMentors,
+        });
+    } catch (e) {
+        console.error(e);
+        return res.status(500).json({ error: 'Failed to load internship analytics' });
+    }
+}
+
 /** GET /api/internships/:id */
 export async function getInternship(req: Request, res: Response) {
     try {
@@ -293,6 +375,11 @@ export async function updateInternship(req: Request, res: Response) {
             status,
         } = req.body || {};
 
+        // Capture previous mentor so we can notify only on an actual (re)assignment.
+        const prev = mentorId !== undefined
+            ? await prisma.internship.findUnique({ where: { id }, select: { mentorId: true } })
+            : null;
+
         const updated = await prisma.internship.update({
             where: { id },
             data: {
@@ -311,6 +398,12 @@ export async function updateInternship(req: Request, res: Response) {
             },
             select: internshipSelect,
         });
+
+        // Notify the mentor only when this update actually (re)assigned them.
+        if (updated.mentorId && prev && prev.mentorId !== updated.mentorId) {
+            const message = `Intern ${updated.candidateName} has been assigned to you. Please check the details and provide necessary guidance.`;
+            await createNotification(updated.mentorId, message);
+        }
 
         const mentorMap = await buildNameMap([updated.mentorId]);
         return res.json({
@@ -362,6 +455,10 @@ export async function activateInternship(req: Request, res: Response) {
             },
             select: internshipSelect,
         });
+        if (updated.mentorId) {
+            const message = `Internship of ${updated.candidateName} is now active. Please provide the necessary guidance.`;
+            await createNotification(updated.mentorId, message);
+        }
         return res.json(updated);
     } catch (e: any) {
         console.error(e);
@@ -407,7 +504,7 @@ export async function completeInternship(req: Request, res: Response) {
         where: { id },
         select: {
           id: true, status: true, startDate: true, endDate: true,
-          candidateName: true, title: true,
+          candidateName: true, title: true, email: true,
           Department: { select: { name: true } },
           certificateCode: true, certificateIssuedAt: true,
         },
@@ -460,7 +557,24 @@ export async function completeInternship(req: Request, res: Response) {
       await uploadToFTP(filePath, remotePath, null);
       // const publicUrl = `https://hrproindia.in/certificate/${fileName}`; // legacy FTP URL
       const publicUrl = buildPublicUrl(remotePath);
-  
+
+      // Best-effort: email the certificate to the intern. Never fail completion
+      // if the mail send errors (SMTP down, bad address, etc.).
+      if (existing.email) {
+        try {
+          const pdfBuffer = fs.readFileSync(filePath);
+          await sendCertificateEmail({
+            to: existing.email,
+            candidateName: existing.candidateName,
+            verifyUrl: certVerifyUrl(code),
+            pdfBuffer,
+            fileName,
+          });
+        } catch (mailErr) {
+          console.error('[internship] failed to email certificate', mailErr);
+        }
+      }
+
       // cleanup
       try { fs.unlinkSync(filePath); } catch {}
   
@@ -520,30 +634,52 @@ export async function convertInternship(req: Request, res: Response) {
         const id = Number(req.params.id);
         const {
             employeeId,
-            createEmployee, // { firstName,lastName,email?,departmentId?,branchId?,dateOfJoining? }
+            // createEmployee carries the new-hire fields. Required Employee columns
+            // (employeeCode/gender/dob/branchId/employmentType/roleId) must still be
+            // supplied here; the internship only fills the gaps below.
+            createEmployee,
         }: {
             employeeId?: number;
-            createEmployee?: {
+            createEmployee?: Record<string, any> & {
                 firstName: string;
                 lastName: string;
                 email?: string;
+                phone?: string;
                 departmentId?: number;
                 branchId?: number;
                 dateOfJoining?: string | Date;
             };
         } = req.body || {};
 
+        // Pull the internship's own fields so a converted intern doesn't lose the
+        // contact/department/mentor info already captured during the internship.
+        const intern = await prisma.internship.findUnique({
+            where: { id },
+            select: { email: true, phone: true, departmentId: true, mentorId: true, endDate: true },
+        });
+        if (!intern) return res.status(404).json({ error: 'Not found' });
+
         let newEmpId = employeeId;
 
         if (!newEmpId && createEmployee) {
+            const inheritedDeptId = createEmployee.departmentId ?? intern.departmentId ?? null;
+            const { firstName, lastName, email, phone, departmentId, dateOfJoining, ...rest } = createEmployee;
             const emp = await prisma.employee.create({
                 data: {
-                    firstName: createEmployee.firstName,
-                    lastName: createEmployee.lastName,
-                    email: createEmployee.email ?? null,
-                    departmentId: createEmployee.departmentId ?? null,
-                    branchId: createEmployee.branchId ?? null,
-                    dateOfJoining: createEmployee.dateOfJoining ? new Date(createEmployee.dateOfJoining) : new Date(),
+                    // pass through any other Employee fields the caller provided
+                    // (employeeCode, gender, dob, employmentType, roleId, branchId, …)
+                    ...rest,
+                    firstName,
+                    lastName,
+                    // carry over from the internship when not explicitly provided
+                    email: email ?? intern.email ?? null,
+                    phone: phone ?? intern.phone ?? null,
+                    departmentId: inheritedDeptId,
+                    // the mentor becomes the new employee's reporting manager / incharge
+                    reportingManager: rest.reportingManager ?? intern.mentorId ?? null,
+                    inchargeId: rest.inchargeId ?? intern.mentorId ?? null,
+                    // default joining date to the internship end date, else today
+                    dateOfJoining: dateOfJoining ? new Date(dateOfJoining) : (intern.endDate ?? new Date()),
                     employmentStatus: 'ACTIVE',
                 } as any,
                 select: { id: true },
@@ -551,7 +687,7 @@ export async function convertInternship(req: Request, res: Response) {
             newEmpId = emp.id;
             await prisma.internship.update({
                 where: { id },
-                data: { departmentId: createEmployee.departmentId ?? null },
+                data: { departmentId: inheritedDeptId },
             });
         }
 
@@ -579,6 +715,169 @@ export async function convertInternship(req: Request, res: Response) {
 
 import { randomBytes } from 'crypto';
 import { createNotification } from '../notifications/notifications.controller';
+
+// How many days ahead we start nudging ("ending soon"), and how long after the
+// end date we keep nudging an overdue internship before going quiet.
+const ENDING_SOON_DAYS = 3;
+const OVERDUE_GRACE_DAYS = 14;
+
+/** Active HR staff (HR Manager / HR Executive) who should receive HR-side nudges. */
+async function hrStaffIds(): Promise<number[]> {
+  const staff = await prisma.employee.findMany({
+    where: { departmentId: 1, employmentStatus: 'ACTIVE', roleId: { in: [1, 2] } },
+    select: { id: true },
+  });
+  return staff.map(s => s.id);
+}
+
+/**
+ * Daily reminder pass for internships (no status mutation):
+ *   - ENDING SOON: ACTIVE and endDate within the next ENDING_SOON_DAYS → nudge mentor + HR.
+ *   - OVERDUE: ACTIVE but endDate already passed (within OVERDUE_GRACE_DAYS) → nudge HR to
+ *     complete it (which issues the certificate). HR closes it via the Complete action.
+ * Returns a summary for cron logging.
+ */
+export async function sendInternshipEndReminders(): Promise<{ endingSoon: number; overdue: number }> {
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const soonCutoff = new Date(startToday); soonCutoff.setDate(soonCutoff.getDate() + ENDING_SOON_DAYS + 1); // exclusive
+  const overdueFloor = new Date(startToday); overdueFloor.setDate(overdueFloor.getDate() - OVERDUE_GRACE_DAYS);
+
+  const [endingSoon, overdue] = await Promise.all([
+    prisma.internship.findMany({
+      where: { status: 'ACTIVE', endDate: { gte: startToday, lt: soonCutoff } },
+      select: { id: true, candidateName: true, endDate: true, mentorId: true },
+    }),
+    prisma.internship.findMany({
+      where: { status: 'ACTIVE', endDate: { gte: overdueFloor, lt: startToday } },
+      select: { id: true, candidateName: true, endDate: true, mentorId: true },
+    }),
+  ]);
+
+  if (!endingSoon.length && !overdue.length) return { endingSoon: 0, overdue: 0 };
+
+  const hrIds = await hrStaffIds();
+
+  for (const i of endingSoon) {
+    const msg = `Internship of ${i.candidateName} ends on ${fmtDate(i.endDate)}. Please prepare to complete it and issue the certificate.`;
+    if (i.mentorId) await createNotification(i.mentorId, msg);
+    for (const hrId of hrIds) await createNotification(hrId, msg);
+  }
+
+  for (const i of overdue) {
+    const msg = `Internship of ${i.candidateName} ended on ${fmtDate(i.endDate)} and is still marked Active. Please complete it to issue the certificate.`;
+    for (const hrId of hrIds) await createNotification(hrId, msg);
+  }
+
+  return { endingSoon: endingSoon.length, overdue: overdue.length };
+}
+
+/** Best-effort email of the completion certificate to the intern. */
+async function sendCertificateEmail(args: {
+  to: string;
+  candidateName: string;
+  verifyUrl: string;
+  pdfBuffer: Buffer;
+  fileName: string;
+}) {
+  const company = COMPANY_NAME;
+  const html = `
+    <p>Dear ${args.candidateName},</p>
+    <p>Congratulations on completing your internship at <strong>${company}</strong>.
+    Your completion certificate is attached.</p>
+    <p>You (or anyone) can verify this certificate online here:<br>
+    <a href="${args.verifyUrl}">${args.verifyUrl}</a></p>
+    <br>
+    <p>Best regards,<br>HR Team</p>`;
+  await mailer.sendMail({
+    from: config.smtp.from,
+    to: args.to,
+    subject: `Internship Completion Certificate – ${company}`,
+    html,
+    attachments: [
+      { filename: args.fileName, content: args.pdfBuffer, contentType: 'application/pdf' },
+    ],
+  });
+}
+
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+function renderVerifyHtml(found: null | {
+  candidateName: string;
+  title?: string | null;
+  departmentName?: string | null;
+  startDate: Date;
+  endDate?: Date | null;
+  status: InternshipStatus;
+  certificateCode: string;
+  certificateIssuedAt?: Date | null;
+}): string {
+  const shell = (inner: string) => `<!doctype html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Certificate Verification – ${escapeHtml(COMPANY_NAME)}</title>
+    <style>
+      body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f3f4f6;margin:0;padding:40px}
+      .card{max-width:560px;margin:0 auto;background:#fff;border-radius:14px;padding:32px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+      .brand{font-weight:700;font-size:18px;color:#111827;margin-bottom:4px}
+      .badge{display:inline-block;padding:4px 12px;border-radius:999px;font-size:13px;font-weight:600}
+      .ok{background:#dcfce7;color:#166534}.bad{background:#fee2e2;color:#991b1b}
+      .row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f3f4f6;font-size:14px}
+      .row span:first-child{color:#6b7280}.row span:last-child{color:#111827;font-weight:600;text-align:right}
+      h1{font-size:20px;margin:12px 0 16px}
+    </style></head><body><div class="card">
+    <div class="brand">${escapeHtml(COMPANY_NAME)}</div>${inner}</div></body></html>`;
+
+  const fmt = (d?: Date | null) => (d ? d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
+
+  if (!found) {
+    return shell(`<span class="badge bad">Not verified</span>
+      <h1>Certificate not found</h1>
+      <p>No certificate matches this code. Please check the code and try again.</p>`);
+  }
+  const valid = found.status === 'COMPLETED' || found.status === 'CONVERTED';
+  return shell(`<span class="badge ${valid ? 'ok' : 'bad'}">${valid ? 'Verified ✓' : found.status}</span>
+    <h1>Internship Completion Certificate</h1>
+    <div class="row"><span>Name</span><span>${escapeHtml(found.candidateName)}</span></div>
+    ${found.title ? `<div class="row"><span>Role</span><span>${escapeHtml(found.title)}</span></div>` : ''}
+    ${found.departmentName ? `<div class="row"><span>Department</span><span>${escapeHtml(found.departmentName)}</span></div>` : ''}
+    <div class="row"><span>Period</span><span>${fmt(found.startDate)} — ${fmt(found.endDate)}</span></div>
+    <div class="row"><span>Certificate ID</span><span>${escapeHtml(found.certificateCode)}</span></div>
+    <div class="row"><span>Issued on</span><span>${fmt(found.certificateIssuedAt)}</span></div>`);
+}
+
+/** GET /api/public/verify/certificate/:code — public, no auth. Renders an HTML page. */
+export async function verifyCertificate(req: Request, res: Response) {
+  try {
+    const code = String(req.params.code || '').trim();
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (!code) return res.status(400).send(renderVerifyHtml(null));
+
+    const found = await prisma.internship.findUnique({
+      where: { certificateCode: code },
+      select: {
+        candidateName: true, title: true, startDate: true, endDate: true,
+        status: true, certificateCode: true, certificateIssuedAt: true,
+        Department: { select: { name: true } },
+      },
+    });
+    if (!found || !found.certificateCode) return res.status(404).send(renderVerifyHtml(null));
+
+    return res.status(200).send(renderVerifyHtml({
+      candidateName: found.candidateName,
+      title: found.title,
+      departmentName: found.Department?.name ?? null,
+      startDate: found.startDate,
+      endDate: found.endDate,
+      status: found.status,
+      certificateCode: found.certificateCode,
+      certificateIssuedAt: found.certificateIssuedAt,
+    }));
+  } catch (e) {
+    console.error('[internship] verifyCertificate failed', e);
+    return res.status(500).send(renderVerifyHtml(null));
+  }
+}
 
 
 function genCertCode() {
@@ -731,6 +1030,23 @@ export async function generateCertificatePdf(input: CertInput): Promise<{ filePa
   doc.font('Helvetica').fontSize(10).fillColor('#374151')
      .text('HR Manager', 90, sigY + 6, { width: 150, align: 'center' })
      .text('Department Head', w - 240, sigY + 6, { width: 150, align: 'center' });
+
+  // Verification QR (centered between the signature lines). Only drawn when a
+  // public base URL is configured — a relative URL would be unscannable.
+  const verifyUrl = certVerifyUrl(input.code);
+  if (config.publicBaseUrl || config.appPublicUrl) {
+    try {
+      const qrBuf = await QRCode.toBuffer(verifyUrl, { width: 160, margin: 0 });
+      const qrSize = 64;
+      const qrX = (w - qrSize) / 2;
+      const qrY = sigY - 28;
+      doc.image(qrBuf, qrX, qrY, { width: qrSize });
+      doc.font('Helvetica').fontSize(8).fillColor('#6b7280')
+         .text('Scan to verify', qrX - 18, qrY + qrSize + 2, { width: qrSize + 36, align: 'center' });
+    } catch {
+      // QR is best-effort; never block certificate generation on it.
+    }
+  }
 
   doc.end();
 
