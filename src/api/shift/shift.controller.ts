@@ -2728,6 +2728,14 @@ export const getEmployeeWeeklyShiftsForMonth = async (req: Request, res: Respons
     const lastWeekEnd = new Date(startOfWeek(monthEnd));
     lastWeekEnd.setDate(lastWeekEnd.getDate() + 6);
 
+    // Per-week off day (weekIndex → dayOfWeek, 0=Sun..6=Sat). When no monthly
+    // week-off config is approved, default to Sunday off (→ Mon..Sat display).
+    const weekOffApproval = await prisma.shiftApproval.findFirst({
+      where: { employeeId, month, year, status: "APPROVED", weekOffConfig: { not: Prisma.DbNull } },
+    });
+    const weekOffByIndex = parseWeekOffConfig(weekOffApproval?.weekOffConfig)?.weeks ?? {};
+    const offDowFor = (weekIndex: number) => weekOffByIndex[weekIndex] ?? 0;
+
     // 1️⃣ First check approved monthly rotational shift
     const monthlyApproval = await prisma.shiftApproval.findFirst({
       where: {
@@ -2782,11 +2790,13 @@ export const getEmployeeWeeklyShiftsForMonth = async (req: Request, res: Respons
         weekEnd.setDate(weekStart.getDate() + 6);
 
         if (!weekMap.has(weekIndex)) {
+          const { fromDate, toDate, weekOff } = workWeekRange(weekStart, offDowFor(weekIndex));
           weekMap.set(weekIndex, {
             weekIndex,
             label: `Week ${weekIndex + 1}`,
-            fromDate: formatDate(weekStart),
-            toDate: formatDate(weekEnd),
+            fromDate,
+            toDate,
+            weekOff,
             shiftId: item.shift.id,
             shiftName: item.shift.name,
             startTime: item.shift.startTime,
@@ -2827,11 +2837,13 @@ export const getEmployeeWeeklyShiftsForMonth = async (req: Request, res: Respons
         weekEnd.setDate(weekEnd.getDate() + 6);
 
         if (weekEnd >= monthStart && weekStart <= monthEnd) {
+          const { fromDate, toDate, weekOff } = workWeekRange(weekStart, offDowFor(weekIndex));
           weeks.push({
             weekIndex,
             label: `Week ${weekIndex + 1}`,
-            fromDate: formatDate(weekStart),
-            toDate: formatDate(weekEnd),
+            fromDate,
+            toDate,
+            weekOff,
             shiftId: setting.fixedShift.id,
             shiftName: setting.fixedShift.name,
             startTime: setting.fixedShift.startTime,
@@ -2863,4 +2875,31 @@ export const getEmployeeWeeklyShiftsForMonth = async (req: Request, res: Respons
 
 function formatDate(d: Date) {
   return d.toISOString().slice(0, 10);
+}
+
+// Local YYYY-MM-DD (no UTC shift — toISOString() would roll an IST midnight
+// back to the previous day).
+function formatLocalDate(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+
+// The shift weeks are anchored to Sunday (see startOfWeek); each block runs
+// Sun..Sat and carries ONE off day (offDow: 0=Sun..6=Sat). The displayed range
+// stays inside the block (so weeks never overlap and the shown shift always
+// matches), trimming the off day only when it's at the block's edge:
+//   off=Sun → Mon..Sat,  off=Sat → Sun..Fri,  mid-week off → full Sun..Sat.
+// Returns local date strings (toISOString() would roll IST midnight back a day).
+function workWeekRange(weekStartSunday: Date, offDow: number) {
+  const fromOffset = offDow === 0 ? 1 : 0; // Sunday off → start Monday
+  const toOffset = offDow === 6 ? 5 : 6;   // Saturday off → end Friday
+  const from = new Date(weekStartSunday);
+  from.setDate(weekStartSunday.getDate() + fromOffset);
+  const to = new Date(weekStartSunday);
+  to.setDate(weekStartSunday.getDate() + toOffset);
+  const off = new Date(weekStartSunday);
+  off.setDate(weekStartSunday.getDate() + offDow); // the off date within the block
+  return { fromDate: formatLocalDate(from), toDate: formatLocalDate(to), weekOff: formatLocalDate(off) };
 }

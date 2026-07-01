@@ -14,6 +14,16 @@ function istDayEnd(s: string): Date {
   return s.includes("T") ? new Date(s) : new Date(`${s}T23:59:59.999+05:30`);
 }
 
+// Current IST week's Monday at 00:00 IST — matches how weekStartDate is stored.
+export function istWeekStart(now: Date = new Date()): Date {
+  const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const back = (ist.getDay() + 6) % 7; // days since Monday (0=Sun..6=Sat)
+  const mon = new Date(ist);
+  mon.setDate(ist.getDate() - back);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return new Date(`${mon.getFullYear()}-${pad(mon.getMonth() + 1)}-${pad(mon.getDate())}T00:00:00+05:30`);
+}
+
 // ── Helper: ISO week label (e.g. "2026-W14") ──────────────────────────────────
 function getWeekLabel(date: Date): string {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
@@ -144,7 +154,20 @@ export const getWeeklyReports = async (req: Request, res: Response) => {
 
     const where: any = {};
     if (employeeId) where.employeeId = Number(employeeId);
-    if (status) where.status = String(status);
+
+    // Draft visibility: only the employee's own "my tracker" view (which passes
+    // employeeId) may see DRAFT reports. Incharge / reporting manager / HR
+    // manager / management views (no employeeId) must never see other people's
+    // drafts — they only see submitted / approved / rejected reports.
+    const isOwnerView = !!employeeId;
+    if (isOwnerView) {
+      if (status) where.status = String(status);
+    } else if (status && String(status).toUpperCase() !== "DRAFT") {
+      where.status = String(status);
+    } else {
+      where.status = { not: "DRAFT" };
+    }
+
     // Viewer scoping (incharge / reporting manager see only their own team)
     const employeeWhere: any = {};
     if (departmentId) employeeWhere.departmentId = Number(departmentId);
@@ -533,6 +556,24 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
         report.employeeId,
         `Your weekly performance report (${report.weekLabel}) has been ${data.status.toLowerCase()}.`
       );
+      // On final approval, carry any still IN_PROGRESS tasks into next week so
+      // unfinished work isn't stranded on the now-locked report. Best-effort —
+      // never fail the approval if the carry hits an issue.
+      if (data.status === "APPROVED") {
+        try {
+          const carried = await autoCarryInProgressToNextWeek(updated);
+          if (carried > 0) {
+            console.log(`[weekly-tracker] report ${reportId} approved — auto-carried ${carried} in-progress task(s) to next week`);
+            await createNotification(
+              report.employeeId,
+              `${carried} in-progress task(s) from your approved weekly report (${report.weekLabel}) were automatically carried forward to next week.`,
+              "📅 Tasks Carried Forward",
+            );
+          }
+        } catch (e) {
+          console.error(`[weekly-tracker] auto-carry on approval failed for report ${reportId}`, e);
+        }
+      }
     }
     // Intermediate approval (report stays SUBMITTED) — keep the chain moving + inform employee.
     else if (approved && (role === "REPORTING_MANAGER" || role === "MANAGEMENT")) {
@@ -735,6 +776,77 @@ export const deleteTaskEntry = async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // CARRY FORWARD INCOMPLETE TASKS TO NEXT WEEK
 // ═══════════════════════════════════════════════════════════════════════════════
+/**
+ * On final approval, copy a report's still IN_PROGRESS tasks into next week's
+ * report — kept IN_PROGRESS (progress preserved) — and mark the originals
+ * CARRIED_FORWARD. Only IN_PROGRESS tasks are carried (NOT_STARTED/BLOCKED are
+ * left as-is). Idempotent: tasks already carried into the target are skipped.
+ * Returns the number of tasks carried.
+ */
+async function autoCarryInProgressToNextWeek(report: any): Promise<number> {
+  const tasks = (report.dailyTasks ?? []).filter((t: any) => t.taskStatus === "IN_PROGRESS");
+  if (!tasks.length) return 0;
+
+  const nextStart = new Date(report.weekStartDate);
+  nextStart.setDate(nextStart.getDate() + 7);
+  const nextEnd = new Date(report.weekEndDate);
+  nextEnd.setDate(nextEnd.getDate() + 7);
+
+  let target = await prisma.weeklyPerformanceReport.findUnique({
+    where: { employeeId_weekStartDate: { employeeId: report.employeeId, weekStartDate: nextStart } },
+    include: { dailyTasks: { select: { carriedFromEntryId: true } } },
+  });
+
+  // If next week's report already moved into review/approval, don't mutate it.
+  if (target && !isReportEditable(target)) {
+    console.warn(`[weekly-tracker] auto-carry skipped: next week's report ${target.id} for emp ${report.employeeId} is under/past review`);
+    return 0;
+  }
+
+  if (!target) {
+    target = await prisma.weeklyPerformanceReport.create({
+      data: {
+        employeeId: report.employeeId,
+        weekStartDate: nextStart,
+        weekEndDate: nextEnd,
+        weekLabel: getWeekLabel(nextStart),
+        previousWeekId: report.id,
+      },
+      include: { dailyTasks: { select: { carriedFromEntryId: true } } },
+    });
+  }
+
+  const alreadyCarried = new Set(
+    (target.dailyTasks ?? []).map((t: any) => t.carriedFromEntryId).filter((v: any): v is number => v != null)
+  );
+  const fresh = tasks.filter((t: any) => !alreadyCarried.has(t.id));
+  if (!fresh.length) return 0;
+
+  for (const task of fresh) {
+    await prisma.weeklyTaskEntry.create({
+      data: {
+        reportId: target.id,
+        taskDate: task.taskDate,
+        taskDescription: task.taskDescription,
+        category: task.category,
+        priority: task.priority,
+        taskStatus: "IN_PROGRESS", // keep in-progress (progress carries over)
+        percentComplete: task.percentComplete,
+        assignedById: task.assignedById,
+        deadline: task.deadline,
+        remarks: `Carried forward from ${report.weekLabel ?? "previous week"}`,
+        isCarriedForward: true,
+        carriedFromEntryId: task.id,
+      },
+    });
+    await prisma.weeklyTaskEntry.update({
+      where: { id: task.id },
+      data: { taskStatus: "CARRIED_FORWARD" },
+    });
+  }
+  return fresh.length;
+}
+
 export const carryForwardTasks = async (req: Request, res: Response) => {
   try {
     const fromReportId = Number(req.params.id);
@@ -1030,4 +1142,36 @@ export const sendPendingWorkReminders = async () => {
   }
 
   return { employees: byEmp.size, tasks: tasks.length };
+};
+
+// Saturday-5pm reminder: nudge every ACTIVE employee who has NOT submitted their
+// weekly performance report for the current (IST) week — i.e. no report at all,
+// or a report still in DRAFT.
+export const sendWeeklyReportSubmissionReminders = async () => {
+  const start = istWeekStart();
+  const end = new Date(start);
+  end.setDate(start.getDate() + 7);
+
+  // Employees who already submitted (anything past DRAFT) for this week.
+  const submitted = await prisma.weeklyPerformanceReport.findMany({
+    where: { weekStartDate: { gte: start, lt: end }, status: { not: "DRAFT" } },
+    select: { employeeId: true },
+  });
+  const submittedSet = new Set(submitted.map(r => r.employeeId));
+
+  const employees = await prisma.employee.findMany({
+    where: { employmentStatus: "ACTIVE" },
+    select: { id: true },
+  });
+
+  let notified = 0;
+  for (const e of employees) {
+    if (submittedSet.has(e.id)) continue;
+    await createNotification(
+      e.id,
+      "Reminder: you haven't submitted your weekly performance report for this week. Please submit it."
+    );
+    notified++;
+  }
+  return { notified };
 };

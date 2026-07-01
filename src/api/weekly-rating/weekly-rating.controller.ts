@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
+import { createNotification } from "../notifications/notifications.controller";
 
 // ── Helper: ISO week label ──────────────────────────────────────────────
 function getWeekLabel(date: Date): string {
@@ -9,6 +10,51 @@ function getWeekLabel(date: Date): string {
   const weekNo = Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
   return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
 }
+
+// Current IST week's Monday at 00:00 IST — matches how weekStartDate is stored.
+function istWeekStart(now: Date = new Date()): Date {
+  const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const back = (ist.getDay() + 6) % 7; // days since Monday (0=Sun..6=Sat)
+  const mon = new Date(ist);
+  mon.setDate(ist.getDate() - back);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return new Date(`${mon.getFullYear()}-${pad(mon.getMonth() + 1)}-${pad(mon.getDate())}T00:00:00+05:30`);
+}
+
+// Saturday-5pm reminder: nudge every ACTIVE employee who has NOT submitted their
+// weekly SELF rating for the current (IST) week — i.e. no self rating row, or
+// one still in DRAFT.
+export const sendSelfRatingSubmissionReminders = async () => {
+  const start = istWeekStart();
+  const end = new Date(start);
+  end.setDate(start.getDate() + 7);
+
+  const submitted = await prisma.weeklyPerformanceRating.findMany({
+    where: {
+      raterType: "SELF",
+      status: "SUBMITTED",
+      weekStartDate: { gte: start, lt: end },
+    },
+    select: { employeeId: true },
+  });
+  const submittedSet = new Set(submitted.map(r => r.employeeId));
+
+  const employees = await prisma.employee.findMany({
+    where: { employmentStatus: "ACTIVE" },
+    select: { id: true },
+  });
+
+  let notified = 0;
+  for (const e of employees) {
+    if (submittedSet.has(e.id)) continue;
+    await createNotification(
+      e.id,
+      "Reminder: you haven't submitted your weekly self rating for this week. Please submit it."
+    );
+    notified++;
+  }
+  return { notified };
+};
 
 const DEFAULT_QUESTIONS = [
   { text: "Quality of Work", displayOrder: 1 },
@@ -173,7 +219,8 @@ export const seedDefaultQuestions = async (_req: Request, res: Response) => {
 export const getTeamForRating = async (req: Request, res: Response) => {
   try {
     const managerId = Number(req.query.managerId);
-    const weekStartDate = req.query.weekStartDate ? new Date(String(req.query.weekStartDate)) : null;
+    // Normalize so the exact-match lookup below finds the canonically-stored row.
+    const weekStartDate = req.query.weekStartDate ? istWeekStart(new Date(String(req.query.weekStartDate))) : null;
 
     if (!managerId) return res.status(400).json({ error: "managerId is required" });
 
@@ -241,8 +288,13 @@ export const submitRating = async (req: Request, res: Response) => {
       }
     }
 
-    const start = new Date(weekStartDate);
-    const end = new Date(weekEndDate);
+    // Normalize to the canonical IST week-start (Monday 00:00 IST) so SELF and
+    // MANAGER rows for the same week share an identical weekStartDate regardless
+    // of how the client serialized it (date-only vs full ISO). weekEndDate is
+    // derived as Monday+6 (Sunday) for the same reason.
+    const start = istWeekStart(new Date(weekStartDate));
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
     const raterType = Number(employeeId) === Number(ratedBy) ? "SELF" : "MANAGER";
     const overallScore = Math.round((answers.reduce((sum: number, a: any) => sum + a.score, 0) / answers.length) * 10);
 
@@ -358,7 +410,7 @@ export const getAllRatings = async (req: Request, res: Response) => {
     if (employeeId) where.employeeId = Number(employeeId);
     if (ratedBy) where.ratedBy = Number(ratedBy);
     if (status) where.status = String(status);
-    if (weekStartDate) where.weekStartDate = new Date(String(weekStartDate));
+    if (weekStartDate) where.weekStartDate = istWeekStart(new Date(String(weekStartDate)));
     if (departmentId) where.employee = { departmentId: Number(departmentId) };
 
     const ratings = await prisma.weeklyPerformanceRating.findMany({
@@ -419,7 +471,7 @@ export const getMySelfRatingForWeek = async (req: Request, res: Response) => {
   try {
     const empId = Number((req as any).user?.empId);
     if (!empId) return res.status(401).json({ error: "Unauthorized" });
-    const weekStartDate = req.query.weekStartDate ? new Date(String(req.query.weekStartDate)) : null;
+    const weekStartDate = req.query.weekStartDate ? istWeekStart(new Date(String(req.query.weekStartDate))) : null;
     if (!weekStartDate) return res.status(400).json({ error: "weekStartDate is required" });
 
     const rating = await prisma.weeklyPerformanceRating.findUnique({

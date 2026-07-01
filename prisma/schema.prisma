@@ -965,6 +965,7 @@ model HRAppraisal {
 model Notification {
   id         Int                 @id @default(autoincrement())
   employeeId Int?
+  title      String?
   message    String
   channel    NotificationChannel
   isRead     Boolean             @default(false)
@@ -2472,6 +2473,19 @@ model LateLoginLog {
   @@unique([employeeId, date])
   @@index([employeeId])
   @@index([date])
+}
+
+// One row per employee per month once their cumulative late minutes cross the
+// monthly threshold (so the "meet HR" alert is sent only once that month).
+model LateThresholdNotice {
+  id          Int      @id @default(autoincrement())
+  employeeId  Int
+  yearMonth   String   // "YYYY-MM" (IST)
+  lateMinutes Int      // cumulative late minutes at the time of notice
+  createdAt   DateTime @default(now())
+
+  @@unique([employeeId, yearMonth])
+  @@index([employeeId])
 }
 
 model MobileAuthSession {

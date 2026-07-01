@@ -67,7 +67,35 @@ export const broadcastNotification = (notification: { employeeId: number | null;
 // CRUD CONTROLLERS
 // -------------------------
 
-export const createNotification = async (employeeId: number, message: string) => {
+/**
+ * Pick a short, emoji-led title from the message content so notifications no
+ * longer all show a generic "New Notification". Callers may pass an explicit
+ * title to override this. Order matters — more specific keywords come first.
+ */
+export const deriveNotificationTitle = (message: string): string => {
+  const m = (message || '').toLowerCase();
+  const rules: [RegExp, string][] = [
+    [/\bmeet\s+(the\s+)?hr\b|late by|late arrival|coming late/, '⏰ Attendance Alert'],
+    [/self\s*rating|weekly self/, '⭐ Weekly Rating'],
+    [/weekly|tracker|\btask(s)?\b/, '📅 Weekly Tracker'],
+    [/intern/, '🎓 Internship'],
+    [/leave/, '🌴 Leave Update'],
+    [/appraisal/, '📊 Appraisal'],
+    [/offer|candidate|recruit|interview|application|referral/, '📄 Recruitment'],
+    [/incident/, '⚠️ Incident'],
+    [/resign|notice period/, '📝 Resignation'],
+    [/payroll|salary|stipend|incentive|\bloan\b|encash/, '💰 Payroll'],
+    [/grievance|posh|complaint/, '🛡️ Grievance'],
+    [/certificate/, '📜 Certificate'],
+    [/survey/, '📋 Survey'],
+    [/training/, '🎯 Training'],
+    [/attendance|present|absent|regulari[sz]e|shift|biometric/, '🕒 Attendance'],
+  ];
+  for (const [re, title] of rules) if (re.test(m)) return title;
+  return '🔔 HR Minds';
+};
+
+export const createNotification = async (employeeId: number, message: string, title?: string) => {
   try {
     // Don't write notifications for ex-employees / suspended / sabbatical.
     // They can't see them (auth gate blocks login) and storing them just
@@ -80,9 +108,12 @@ export const createNotification = async (employeeId: number, message: string) =>
       return null;
     }
 
+    const finalTitle = title || deriveNotificationTitle(message);
+
     const notification = await prisma.notification.create({
       data: {
         employeeId,
+        title: finalTitle,
         message,
         isRead: false,
         channel: 'PUSH'
@@ -92,7 +123,7 @@ export const createNotification = async (employeeId: number, message: string) =>
     // Immediately broadcast it to the correct employee
     broadcastNotification(notification);
     // 🔹 Mobile Push
-    await sendPushNotification(employeeId, message);
+    await sendPushNotification(employeeId, message, finalTitle);
     return notification;
   } catch (error) {
     console.error("❌ Failed to create notification:", error);
@@ -185,7 +216,8 @@ import admin from '../../lib/firebase';
 
 export const sendPushNotification = async (
   employeeId: number,
-  message: string
+  message: string,
+  title?: string
 ) => {
   // Belt-and-braces — if someone calls this directly (bypassing
   // createNotification), still refuse to push to inactive accounts.
@@ -205,7 +237,7 @@ export const sendPushNotification = async (
 
   const payload = {
     notification: {
-      title: 'New Notification',
+      title: title || deriveNotificationTitle(message),
       body: message,
     },
     data: {

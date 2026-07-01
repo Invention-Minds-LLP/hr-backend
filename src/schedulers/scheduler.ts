@@ -10,7 +10,9 @@ import { initAppraisalAutoDraftCron } from "../api/appraisal/appraisal-v2.contro
 import { initDirectorySyncCron } from "./directory-sync.scheduler";
 import { expireStaleOffers, processReferralBonusEligibility } from "../api/recruiting/recruiting.controller";
 import { runIncidentDailyTasks } from "../api/incident/incident.controller";
-import { sendPendingWorkReminders } from "../api/weekly-tracker/weekly-tracker.controller";
+import { sendPendingWorkReminders, sendWeeklyReportSubmissionReminders } from "../api/weekly-tracker/weekly-tracker.controller";
+import { sendSelfRatingSubmissionReminders } from "../api/weekly-rating/weekly-rating.controller";
+import { runMonthlyLateThresholdCheck } from "../api/attendance/late-threshold.controller";
 import { initAttendanceReminderCrons } from "./attendance-reminders.scheduler";
 import { flushSecurityAlerts } from "../lib/securityAlert";
 import { config } from "../config";
@@ -107,6 +109,31 @@ export async function startSchedulers() {
       }
     } catch (e) {
       console.error("[CRON] runIncidentDailyTasks failed", e);
+    }
+  });
+
+  // Saturdays at 17:00 IST — remind employees who haven't submitted this week's
+  // weekly performance report and/or weekly self rating.
+  cron.schedule("0 17 * * 6", async () => {
+    try {
+      const tracker = await sendWeeklyReportSubmissionReminders();
+      const rating = await sendSelfRatingSubmissionReminders();
+      console.log(`[CRON] weekly submission reminders: tracker=${tracker.notified}, selfRating=${rating.notified}`);
+    } catch (e) {
+      console.error("[CRON] weekly submission reminders failed", e);
+    }
+  });
+
+  // Daily at 10:00 IST — alert any employee whose cumulative late minutes this
+  // month crossed the limit, plus HR and their reporting manager (once per
+  // employee per month). Runs in the morning (not late at night) so the alert
+  // arrives during work hours; the prior day's attendance is already synced.
+  cron.schedule("0 10 * * *", async () => {
+    try {
+      const r = await runMonthlyLateThresholdCheck();
+      if (r.notified > 0) console.log(`[CRON] monthly late threshold: ${r.notified} employee(s) alerted`);
+    } catch (e) {
+      console.error("[CRON] runMonthlyLateThresholdCheck failed", e);
     }
   });
 
