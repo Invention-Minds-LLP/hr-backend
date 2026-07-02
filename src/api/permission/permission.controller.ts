@@ -651,7 +651,7 @@ export const updatePermissionStatus = async (req: Request, res: Response) => {
     // L1 = MANAGEMENT
     // L2 = HR_MANAGER
     // ---------------------------------------------------------------
-    else if (roleId === 3 || roleId === 5) {
+    else if (roleId === 3 ) {
 
       // Level 1
       if (role === "MANAGEMENT") {
@@ -694,7 +694,7 @@ export const updatePermissionStatus = async (req: Request, res: Response) => {
     // L1 = REPORTING_MANAGER
     // L2 = HR_MANAGER
     // ---------------------------------------------------------------
-    else if (roleId === 2) {
+    else if (roleId === 2 || roleId === 5) {
 
       // Level 1
       if (role === "REPORTING_MANAGER") {
