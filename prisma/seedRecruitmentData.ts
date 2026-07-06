@@ -515,7 +515,7 @@ async function main() {
   // ── 12. Manpower Requisitions ─────────────────────────
   console.log("\n📋 Manpower requisitions…");
   let mrCount = 0;
-  const mrStatuses = ["RAISED", "HOD_APPROVED", "COO_APPROVED", "HR_RECEIVED", "REJECTED"];
+  const mrStatuses = ["RAISED", "HOD_APPROVED", "HR_APPROVED", "COO_APPROVED", "REJECTED"];
   for (let i = 0; i < 6; i++) {
     const t = pick(JOB_TITLES);
     const dept = deptByName.get(t.deptName.toLowerCase()) ?? departments[0];

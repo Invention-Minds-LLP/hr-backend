@@ -167,6 +167,178 @@ const inchargeDone = (a: {
   employee?: { inchargeId?: number | null } | null;
 }) => !inchargeRequired(a) || !!a?.inchargeAppraisalSubmittedAt;
 
+type EditLevel = "SELF" | "INCHARGE" | "MANAGER" | "MANAGEMENT";
+
+const editTypeForLevel: Record<EditLevel, string> = {
+  SELF: "SELF_APPRAISAL",
+  INCHARGE: "INCHARGE_APPRAISAL",
+  MANAGER: "MANAGER_APPRAISAL",
+  MANAGEMENT: "MANAGEMENT_APPRAISAL",
+};
+
+/** The submittedAt timestamp that marks a given level as already filled. */
+const levelSubmittedAt = (level: EditLevel, a: any): Date | null => {
+  switch (level) {
+    case "SELF": return a?.selfAppraisalSubmittedAt ?? null;
+    case "INCHARGE": return a?.inchargeAppraisalSubmittedAt ?? null;
+    case "MANAGER": return a?.managerAppraisalSubmittedAt ?? null;
+    case "MANAGEMENT": return a?.managementAppraisalSubmittedAt ?? null;
+  }
+};
+
+/**
+ * Decide whether a non-draft (re)submit is allowed, and whether it flows
+ * through the edit-request path.
+ *
+ * Rules:
+ *  - First-time fill: allowed until the due date passes (blocked after — no
+ *    late first-fill). A null due date does not block first fill.
+ *  - Re-edit before the due date: free, unlimited, no request needed.
+ *  - Re-edit after the due date, or with no due date set: needs an APPROVED
+ *    edit request for that level.
+ *  - An APPROVED (unconsumed) edit request always unlocks a submit regardless
+ *    of the due date; the caller consumes it on success.
+ */
+const resolveEditGate = async (
+  appraisalId: number,
+  level: EditLevel,
+  appraisal: any,
+): Promise<{ allowed: boolean; message?: string; requestId?: number; request?: any }> => {
+  const now = new Date();
+
+  const approvedReq = await prisma.appraisalEditRequest.findFirst({
+    where: { appraisalFormId: appraisalId, requestType: level, status: "APPROVED" },
+    orderBy: [{ approvedAt: "desc" }, { id: "desc" }],
+  });
+  if (approvedReq) return { allowed: true, requestId: approvedReq.id, request: approvedReq };
+
+  const dueSet = appraisal.dueDate != null;
+  const duePassed = dueSet && new Date(appraisal.dueDate) <= now;
+  const alreadySubmitted = !!levelSubmittedAt(level, appraisal);
+
+  if (!alreadySubmitted) {
+    if (duePassed) return { allowed: false, message: "Due date has passed. You can no longer submit." };
+    return { allowed: true };
+  }
+
+  // Re-edit of an already-submitted level.
+  if (dueSet && !duePassed) return { allowed: true }; // free edit window
+
+  return {
+    allowed: false,
+    message: dueSet
+      ? "Due date has passed. Please submit an edit request to make changes."
+      : "The edit window is closed. Please submit an edit request to make changes.",
+  };
+};
+
+/**
+ * Write the audit trail for an edit. Called on every non-draft submit; only
+ * actual re-edits are logged (isEdit === true), never the first submission.
+ * A free edit records editReason/approvedBy = null; a request-based edit
+ * carries the reason and approver from the approved request.
+ */
+const recordAppraisalEdit = async (params: {
+  appraisalFormId: number;
+  level: EditLevel;
+  editedBy: number;
+  isEdit: boolean;
+  previousValues: any;
+  newValues: any;
+  editReason?: string | null;
+  approvedBy?: number | null;
+}): Promise<void> => {
+  console.log(`[appraisal-edit] recordAppraisalEdit called for ${params.level} appraisal=${params.appraisalFormId} by=${params.editedBy} isEdit=${params.isEdit}`);
+  if (!params.isEdit) return;
+  try {
+    await prisma.appraisalEditHistory.create({
+      data: {
+        appraisalFormId: params.appraisalFormId,
+        editedBy: params.editedBy,
+        editType: editTypeForLevel[params.level],
+        previousValues: params.previousValues,
+        newValues: params.newValues,
+        editReason: params.editReason ?? null,
+        approvedBy: params.approvedBy ?? null,
+      },
+    });
+  } catch (err) {
+    // Never let audit logging break the submit — surface it in the console.
+    console.error(`[appraisal-edit] FAILED to log ${params.level} edit for appraisal=${params.appraisalFormId}:`, err);
+  }
+};
+
+// ── Edit-history diff (what changed, before → after) ─────────────────────────
+const scalarChangeLabels: Record<string, string> = {
+  overallScore: "Overall Score",
+  comments: "Comments",
+  recommendations: "Recommendations",
+  inchargeOverallScore: "Overall Score",
+  inchargeOverallComments: "Overall Comments",
+  achievements: "Key Achievements",
+  goalsObjective: "Goals & Objectives",
+  challenges: "Challenges",
+  trainingNeeds: "Training Needs",
+};
+
+/** Per-question answer array out of a stored snapshot, per level. */
+const snapshotAnswers = (vals: any, editType: string): any[] => {
+  if (!vals) return [];
+  if (editType === "INCHARGE_APPRAISAL") return Array.isArray(vals.inchargeAnswers) ? vals.inchargeAnswers : [];
+  return Array.isArray(vals.answers) ? vals.answers : []; // SELF / MANAGER / MANAGEMENT
+};
+
+/** Scalar (non-question) fields out of a stored snapshot, per level. */
+const snapshotScalars = (vals: any, editType: string): Record<string, any> => {
+  if (!vals) return {};
+  if (editType === "SELF_APPRAISAL") {
+    const s = vals.selfAppraisal ?? {};
+    return { achievements: s.achievements, goalsObjective: s.goalsObjective, challenges: s.challenges, trainingNeeds: s.trainingNeeds };
+  }
+  if (editType === "INCHARGE_APPRAISAL") {
+    return { inchargeOverallScore: vals.inchargeOverallScore, inchargeOverallComments: vals.inchargeOverallComments };
+  }
+  const m = vals.managerAppraisal ?? vals.managementAppraisal ?? {};
+  return { overallScore: m.overallScore, comments: m.comments, recommendations: m.recommendations };
+};
+
+const displayVal = (v: any): string => (v === null || v === undefined || v === "" ? "—" : String(v));
+
+/**
+ * Field-level change list (before → after) for one edit-history row. Per-question
+ * rating/comment changes are labelled with the question text; scalar overall
+ * fields use friendly labels. Older rows without an `answers` snapshot simply
+ * yield scalar-only diffs.
+ */
+const computeEditChanges = (
+  h: any,
+  reviewQMap: Map<number, string>,
+  selfQMap: Map<number, string>,
+): { label: string; from: string; to: string }[] => {
+  const changes: { label: string; from: string; to: string }[] = [];
+  const qMap = h.editType === "SELF_APPRAISAL" ? selfQMap : reviewQMap;
+
+  const prevByQ = new Map<number, any>(snapshotAnswers(h.previousValues, h.editType).map((a: any) => [a.questionId, a]));
+  const nextByQ = new Map<number, any>(snapshotAnswers(h.newValues, h.editType).map((a: any) => [a.questionId, a]));
+  for (const qid of new Set<number>([...prevByQ.keys(), ...nextByQ.keys()])) {
+    const p = prevByQ.get(qid), n = nextByQ.get(qid);
+    const label = qMap.get(qid) || `Question #${qid}`;
+    const pr = p?.rating ?? null, nr = n?.rating ?? null;
+    if (pr !== nr) changes.push({ label, from: displayVal(pr), to: displayVal(nr) });
+    const pc = p?.comments ?? "", nc = n?.comments ?? "";
+    if (pc !== nc) changes.push({ label: `${label} (comment)`, from: displayVal(pc), to: displayVal(nc) });
+  }
+
+  const prevSc = snapshotScalars(h.previousValues, h.editType);
+  const nextSc = snapshotScalars(h.newValues, h.editType);
+  for (const key of new Set([...Object.keys(prevSc), ...Object.keys(nextSc)])) {
+    if (displayVal(prevSc[key]) !== displayVal(nextSc[key])) {
+      changes.push({ label: scalarChangeLabels[key] || key, from: displayVal(prevSc[key]), to: displayVal(nextSc[key]) });
+    }
+  }
+  return changes;
+};
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // EMPLOYEE: SUBMIT SELF-APPRAISAL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -192,10 +364,19 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Self-appraisal cannot be submitted at this stage" });
     }
 
-    // Check due date (allow drafts even after due date)
-    if (!isDraft && appraisal.dueDate && new Date(appraisal.dueDate) < new Date()) {
-      return res.status(400).json({ error: "Due date has passed. You can no longer submit self-appraisal." });
+    // Gate: unlimited free edits before the due date; after it (or with no due
+    // date) a re-edit needs an APPROVED edit request. Drafts are never gated.
+    let selfGate: { allowed: boolean; message?: string; requestId?: number; request?: any } = { allowed: true };
+    if (!isDraft) {
+      selfGate = await resolveEditGate(id, "SELF", appraisal);
+      if (!selfGate.allowed) {
+        return res.status(400).json({ error: selfGate.message });
+      }
     }
+
+    // Snapshot prior values for the audit trail before the upsert overwrites them.
+    const prevSelf = await prisma.selfAppraisal.findUnique({ where: { appraisalFormId: id } });
+    const prevSelfAnswers = await prisma.selfAppraisalAnswer.findMany({ where: { appraisalFormId: id } });
 
     // Upsert SelfAppraisal (free-text fields)
     await prisma.selfAppraisal.upsert({
@@ -253,17 +434,25 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
         },
       });
 
-      // Update edit history with new values (if this is a re-submission after edit approval)
-      const latestEditHistory = await prisma.appraisalEditHistory.findFirst({
-        where: { appraisalFormId: id, editType: "SELF_APPRAISAL", newValues: { equals: {} } },
-        orderBy: { editedAt: "desc" },
+      // Audit trail: fill the request-based row, or log a free edit.
+      const selfData = await prisma.selfAppraisal.findUnique({ where: { appraisalFormId: id } });
+      const answerData = await prisma.selfAppraisalAnswer.findMany({ where: { appraisalFormId: id } });
+      await recordAppraisalEdit({
+        appraisalFormId: id,
+        level: "SELF",
+        editedBy: Number(callerEmpId) || appraisal.employeeId,
+        isEdit: !!appraisal.selfAppraisalSubmittedAt || !!selfGate.requestId,
+        previousValues: { selfAppraisal: prevSelf, answers: prevSelfAnswers },
+        newValues: { selfAppraisal: selfData, answers: answerData },
+        editReason: selfGate.request?.reason ?? null,
+        approvedBy: selfGate.request?.approvedBy ?? null,
       });
-      if (latestEditHistory) {
-        const selfData = await prisma.selfAppraisal.findUnique({ where: { appraisalFormId: id } });
-        const answerData = await prisma.selfAppraisalAnswer.findMany({ where: { appraisalFormId: id } });
-        await prisma.appraisalEditHistory.update({
-          where: { id: latestEditHistory.id },
-          data: { newValues: { selfAppraisal: selfData, answers: answerData } },
+
+      // Consume the approved edit request, if this submit used one.
+      if (selfGate.requestId) {
+        await prisma.appraisalEditRequest.update({
+          where: { id: selfGate.requestId },
+          data: { status: "COMPLETED" },
         });
       }
 
@@ -315,6 +504,17 @@ export const submitManagerAppraisalV2 = async (req: Request, res: Response) => {
     if (!["PENDING_FILL", "SELF_APPRAISAL_SUBMITTED", "MANAGER_APPRAISAL_PENDING", "MANAGER_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
       return res.status(400).json({ error: "Manager appraisal cannot be submitted at this stage" });
     }
+
+    // Gate: unlimited free edits before the due date; after it (or with no due
+    // date) a re-edit needs an APPROVED edit request. Drafts are never gated.
+    let mgrGate: { allowed: boolean; message?: string; requestId?: number; request?: any } = { allowed: true };
+    if (!isDraft) {
+      mgrGate = await resolveEditGate(id, "MANAGER", appraisal);
+      if (!mgrGate.allowed) return res.status(400).json({ error: mgrGate.message });
+    }
+
+    // Snapshot prior per-question answers for the audit diff (before overwrite).
+    const prevMgrAnswers = await prisma.appraisalReviewAnswer.findMany({ where: { appraisalFormId: id, level: "MANAGER" } });
 
     // New dynamic form sends an `answers` array. Persist to the unified
     // AppraisalReviewAnswer table (level=MANAGER) in addition to the legacy
@@ -375,16 +575,23 @@ export const submitManagerAppraisalV2 = async (req: Request, res: Response) => {
         },
       });
 
-      // Update edit history with new values (if re-submission after edit approval)
-      const latestMgrEditHistory = await prisma.appraisalEditHistory.findFirst({
-        where: { appraisalFormId: id, editType: "MANAGER_APPRAISAL", newValues: { equals: {} } },
-        orderBy: { editedAt: "desc" },
+      // Audit trail: fill the request-based row, or log a free edit.
+      const mgrData = await prisma.managerAppraisal.findUnique({ where: { appraisalFormId: id } });
+      const newMgrAnswers = await prisma.appraisalReviewAnswer.findMany({ where: { appraisalFormId: id, level: "MANAGER" } });
+      await recordAppraisalEdit({
+        appraisalFormId: id,
+        level: "MANAGER",
+        editedBy: Number(callerEmpId) || appraisal.managerId || 0,
+        isEdit: !!appraisal.managerAppraisalSubmittedAt || !!mgrGate.requestId,
+        previousValues: { managerAppraisal: existing, answers: prevMgrAnswers },
+        newValues: { managerAppraisal: mgrData, answers: newMgrAnswers },
+        editReason: mgrGate.request?.reason ?? null,
+        approvedBy: mgrGate.request?.approvedBy ?? null,
       });
-      if (latestMgrEditHistory) {
-        const mgrData = await prisma.managerAppraisal.findUnique({ where: { appraisalFormId: id } });
-        await prisma.appraisalEditHistory.update({
-          where: { id: latestMgrEditHistory.id },
-          data: { newValues: { managerAppraisal: mgrData } },
+      if (mgrGate.requestId) {
+        await prisma.appraisalEditRequest.update({
+          where: { id: mgrGate.requestId },
+          data: { status: "COMPLETED" },
         });
       }
 
@@ -435,6 +642,18 @@ export const submitManagementAppraisal = async (req: Request, res: Response) => 
       return res.status(400).json({ error: "Management appraisal cannot be submitted at this stage" });
     }
 
+    // Gate: unlimited free edits before the due date; after it (or with no due
+    // date) a re-edit needs an APPROVED edit request. Drafts are never gated.
+    let mgmtGate: { allowed: boolean; message?: string; requestId?: number; request?: any } = { allowed: true };
+    if (!isDraft) {
+      mgmtGate = await resolveEditGate(id, "MANAGEMENT", appraisal);
+      if (!mgmtGate.allowed) return res.status(400).json({ error: mgmtGate.message });
+    }
+    const existingMgmt = await prisma.managementAppraisal.findUnique({ where: { appraisalFormId: id } });
+
+    // Snapshot prior per-question answers for the audit diff (before overwrite).
+    const prevMgmtAnswers = await prisma.appraisalReviewAnswer.findMany({ where: { appraisalFormId: id, level: "MANAGEMENT" } });
+
     // New dynamic form sends an `answers` array. Persist to AppraisalReviewAnswer
     // (level=MANAGEMENT) in addition to the legacy column upsert below.
     const mgmtAnswers = (req.body as any)?.answers;
@@ -483,16 +702,23 @@ export const submitManagementAppraisal = async (req: Request, res: Response) => 
         data: { status: newStatus, managementAppraisalSubmittedAt: new Date() },
       });
 
-      // Update edit history newValues if this is re-submission after edit approval
-      const latestMgmtEditHistory = await prisma.appraisalEditHistory.findFirst({
-        where: { appraisalFormId: id, editType: "MANAGEMENT_APPRAISAL", newValues: { equals: {} } },
-        orderBy: { editedAt: "desc" },
+      // Audit trail: fill the request-based row, or log a free edit.
+      const mgmtData = await prisma.managementAppraisal.findUnique({ where: { appraisalFormId: id } });
+      const newMgmtAnswers = await prisma.appraisalReviewAnswer.findMany({ where: { appraisalFormId: id, level: "MANAGEMENT" } });
+      await recordAppraisalEdit({
+        appraisalFormId: id,
+        level: "MANAGEMENT",
+        editedBy: Number(callerEmpId) || 0,
+        isEdit: !!appraisal.managementAppraisalSubmittedAt || !!mgmtGate.requestId,
+        previousValues: { managementAppraisal: existingMgmt, answers: prevMgmtAnswers },
+        newValues: { managementAppraisal: mgmtData, answers: newMgmtAnswers },
+        editReason: mgmtGate.request?.reason ?? null,
+        approvedBy: mgmtGate.request?.approvedBy ?? null,
       });
-      if (latestMgmtEditHistory) {
-        const mgmtData = await prisma.managementAppraisal.findUnique({ where: { appraisalFormId: id } });
-        await prisma.appraisalEditHistory.update({
-          where: { id: latestMgmtEditHistory.id },
-          data: { newValues: { managementAppraisal: mgmtData } },
+      if (mgmtGate.requestId) {
+        await prisma.appraisalEditRequest.update({
+          where: { id: mgmtGate.requestId },
+          data: { status: "COMPLETED" },
         });
       }
 
@@ -651,50 +877,10 @@ export const respondEditRequest = async (req: Request, res: Response) => {
       : "manager review";
 
     if (action === "APPROVE") {
-      // Save current values as edit history snapshot
+      // The before/after audit row is written when the requester actually
+      // re-submits (see recordAppraisalEdit in the submit handlers), carrying
+      // this request's reason and approver. Approval only unlocks the edit.
       const appraisal = editReq.appraisalForm;
-      let previousValues: any = {};
-
-      if (editReq.requestType === "SELF") {
-        const selfData = await prisma.selfAppraisal.findUnique({ where: { appraisalFormId: appraisal.id } });
-        const answers = await prisma.selfAppraisalAnswer.findMany({ where: { appraisalFormId: appraisal.id } });
-        previousValues = { selfAppraisal: selfData, answers };
-      } else if (editReq.requestType === "INCHARGE") {
-        // In-charge lives entirely on the new unified answers table.
-        const inchargeAnswers = await prisma.appraisalReviewAnswer.findMany({
-          where: { appraisalFormId: appraisal.id, level: "INCHARGE" },
-        });
-        previousValues = {
-          inchargeAnswers,
-          inchargeOverallScore: appraisal.inchargeOverallScore,
-          inchargeOverallComments: appraisal.inchargeOverallComments,
-        };
-      } else if (editReq.requestType === "MANAGER") {
-        const managerData = await prisma.managerAppraisal.findUnique({ where: { appraisalFormId: appraisal.id } });
-        previousValues = { managerAppraisal: managerData };
-      } else {
-        const mgmtData = await prisma.managementAppraisal.findUnique({ where: { appraisalFormId: appraisal.id } });
-        previousValues = { managementAppraisal: mgmtData };
-      }
-
-      const editTypeMap: Record<string, string> = {
-        SELF: "SELF_APPRAISAL",
-        INCHARGE: "INCHARGE_APPRAISAL",
-        MANAGER: "MANAGER_APPRAISAL",
-        MANAGEMENT: "MANAGEMENT_APPRAISAL",
-      };
-
-      await prisma.appraisalEditHistory.create({
-        data: {
-          appraisalFormId: appraisal.id,
-          editedBy: editReq.requestedBy,
-          editType: editTypeMap[editReq.requestType] || "MANAGER_APPRAISAL",
-          previousValues,
-          newValues: {},
-          editReason: editReq.reason,
-          approvedBy: approvedBy ? Number(approvedBy) : null,
-        },
-      });
 
       const clearData: any = { status: "PENDING_FILL" };
       if (editReq.requestType === "SELF") {
@@ -781,7 +967,39 @@ export const getAppraisalDetail = async (req: Request, res: Response) => {
       requestedByName: requesterMap.get(r.requestedBy) || `Employee #${r.requestedBy}`,
     }));
 
-    const result = { ...appraisal, editRequests: enrichedEditRequests };
+    // Enrich edit history with editor names for the audit-log display.
+    const editorIds = [...new Set(appraisal.editHistory.map(h => h.editedBy).filter(Boolean))];
+    const editors = await prisma.employee.findMany({
+      where: { id: { in: editorIds } },
+      select: { id: true, firstName: true, lastName: true, employeeCode: true },
+    });
+    const editorMap = new Map(editors.map(e => [e.id, `${e.firstName} ${e.lastName} (${e.employeeCode})`]));
+
+    // Collect question ids referenced by the history snapshots to label the diff.
+    const selfQids = new Set<number>();
+    const reviewQids = new Set<number>();
+    for (const h of appraisal.editHistory) {
+      for (const arr of [snapshotAnswers(h.previousValues, h.editType), snapshotAnswers(h.newValues, h.editType)]) {
+        for (const a of arr) {
+          if (a?.questionId == null) continue;
+          (h.editType === "SELF_APPRAISAL" ? selfQids : reviewQids).add(a.questionId);
+        }
+      }
+    }
+    const [selfQs, reviewQs] = await Promise.all([
+      prisma.selfAppraisalQuestion.findMany({ where: { id: { in: [...selfQids] } }, select: { id: true, text: true } }),
+      prisma.appraisalReviewQuestion.findMany({ where: { id: { in: [...reviewQids] } }, select: { id: true, title: true } }),
+    ]);
+    const selfQMap = new Map<number, string>(selfQs.map(q => [q.id, q.text]));
+    const reviewQMap = new Map<number, string>(reviewQs.map(q => [q.id, q.title]));
+
+    const enrichedEditHistory = appraisal.editHistory.map(h => ({
+      ...h,
+      editedByName: editorMap.get(h.editedBy) || `Employee #${h.editedBy}`,
+      changes: computeEditChanges(h, reviewQMap, selfQMap),
+    }));
+
+    const result = { ...appraisal, editRequests: enrichedEditRequests, editHistory: enrichedEditHistory };
 
     // Manager/Management cannot see self-appraisal
     if (viewerRole === "MANAGER") {
@@ -1112,16 +1330,30 @@ export const submitInchargeAppraisal = async (req: Request, res: Response) => {
         data: { inchargeId: effectiveInchargeId },
       });
     }
-    if (appraisal.inchargeAppraisalSubmittedAt) {
-      return res.status(400).json({ error: "In-charge review already submitted" });
-    }
     if (!["PENDING_FILL", "SELF_APPRAISAL_SUBMITTED"].includes(appraisal.status)) {
       return res.status(400).json({ error: "In-charge review cannot be submitted at this stage" });
+    }
+
+    // Gate: unlimited free edits before the due date; after it (or with no due
+    // date) a re-edit needs an APPROVED edit request. Drafts are never gated.
+    let inchargeGate: { allowed: boolean; message?: string; requestId?: number; request?: any } = { allowed: true };
+    if (!isDraft) {
+      inchargeGate = await resolveEditGate(id, "INCHARGE", appraisal);
+      if (!inchargeGate.allowed) return res.status(400).json({ error: inchargeGate.message });
     }
 
     if (!Array.isArray(answers)) {
       return res.status(400).json({ error: "answers array is required" });
     }
+
+    // Snapshot prior in-charge values for the audit trail before overwrite.
+    const prevInchargeAnswers = await prisma.appraisalReviewAnswer.findMany({
+      where: { appraisalFormId: id, level: "INCHARGE" },
+    });
+    const prevInchargeOverall = {
+      inchargeOverallScore: appraisal.inchargeOverallScore,
+      inchargeOverallComments: appraisal.inchargeOverallComments,
+    };
     await saveReviewAnswers(id, "INCHARGE", answers);
 
     // Persist In-charge's supplementary summary (score + comments) on both
@@ -1152,6 +1384,27 @@ export const submitInchargeAppraisal = async (req: Request, res: Response) => {
           ...(newStatus !== appraisal.status ? { status: newStatus } : {}),
         },
       });
+
+      // Audit trail: fill the request-based row, or log a free edit.
+      const newInchargeAnswers = await prisma.appraisalReviewAnswer.findMany({
+        where: { appraisalFormId: id, level: "INCHARGE" },
+      });
+      await recordAppraisalEdit({
+        appraisalFormId: id,
+        level: "INCHARGE",
+        editedBy: Number(callerEmpId) || effectiveInchargeId,
+        isEdit: !!appraisal.inchargeAppraisalSubmittedAt || !!inchargeGate.requestId,
+        previousValues: { inchargeAnswers: prevInchargeAnswers, ...prevInchargeOverall },
+        newValues: { inchargeAnswers: newInchargeAnswers, inchargeOverallScore, inchargeOverallComments },
+        editReason: inchargeGate.request?.reason ?? null,
+        approvedBy: inchargeGate.request?.approvedBy ?? null,
+      });
+      if (inchargeGate.requestId) {
+        await prisma.appraisalEditRequest.update({
+          where: { id: inchargeGate.requestId },
+          data: { status: "COMPLETED" },
+        });
+      }
 
       // Notify the manager that it's their turn.
       const empName = `${appraisal.employee?.firstName ?? ""} ${appraisal.employee?.lastName ?? ""}`.trim();

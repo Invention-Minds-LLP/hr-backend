@@ -278,6 +278,7 @@ model Department {
   appraisalCalendarMonth  Int?
   employees               Employee[]
   Internship              Internship[]
+  shiftTemplates          ShiftTemplate[]
   Job                     Job[]
   PerformanceFinalReview  PerformanceFinalReview[]
   PerformanceFormTemplate PerformanceFormTemplate[]
@@ -519,6 +520,7 @@ model ShiftTemplate {
   shiftApprovals       ShiftApproval[]
   ShiftAssignment      ShiftAssignment[]
   ShiftRotationItem    ShiftRotationItem[]
+  departments          Department[]           // shifts are assignable to any number of departments
 }
 
 model ShiftAssignment {
@@ -2569,6 +2571,16 @@ model ShiftApproval {
   appliedAt           DateTime?
   hrRejectReason      String?               @db.Text
   rmRejectReason      String?               @db.Text
+  // Post-approval edit workflow: once fully APPROVED, the creator asks HR for
+  // permission to edit; HR approves; the creator may then edit UPCOMING weeks,
+  // which re-enters the RM → HR approval chain.
+  editStatus          ShiftEditStatus       @default(NONE)
+  editRequestedBy     Int?
+  editRequestedAt     DateTime?
+  editReason          String?               @db.Text
+  editDecidedBy       Int?
+  editDecidedAt       DateTime?
+  editRejectReason    String?               @db.Text
   employee            Employee              @relation(fields: [employeeId], references: [id])
   fixedShift          ShiftTemplate?        @relation(fields: [fixedShiftId], references: [id])
   pattern             ShiftRotationPattern? @relation(fields: [patternId], references: [id])
@@ -2578,6 +2590,24 @@ model ShiftApproval {
   @@index([fixedShiftId])
   @@index([patternId])
   @@index([requestedBy])
+}
+
+enum ShiftEditStatus {
+  NONE
+  REQUESTED
+  APPROVED
+  REJECTED
+}
+
+// HR "month closed" lock — one row per month/year locks shift edits org-wide.
+model ShiftMonthLock {
+  id       Int      @id @default(autoincrement())
+  month    Int
+  year     Int
+  closedBy Int?
+  closedAt DateTime @default(now())
+
+  @@unique([month, year])
 }
 
 model Sabbatical {

@@ -59,6 +59,7 @@ import loanRoutes from "./api/loan/loan.routes";
 import weeklyRatingRoutes from "./api/weekly-rating/weekly-rating.routes";
 import pipRoutes, { respondViaToken } from "./api/pip/pip.routes";
 import managementRoutes from "./api/management/management.routes";
+import moduleUsageRoutes from "./api/module-usage/module-usage.routes";
 import { authenticateToken } from "./middleware/authMiddleware";
 import { softAuth, accessLogger } from "./middleware/accessLog";
 import { UPLOADS_DIR } from "./lib/fileStorage";
@@ -220,6 +221,7 @@ app.use("/api/loans", loanRoutes);
 app.use("/api/weekly-rating", weeklyRatingRoutes);
 app.use("/api/pip", pipRoutes);
 app.use("/api/management", managementRoutes);
+app.use("/api/module-usage", moduleUsageRoutes);
 // Public endpoint — no auth required (employee responds via token link in email)
 app.post("/api/pip-respond/:token", respondViaToken);
 

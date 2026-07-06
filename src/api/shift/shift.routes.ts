@@ -32,6 +32,17 @@ import {
   getApprovedWeekOffs,
   getEmployeeWeeklyShiftsForMonth,
   generateFixedShiftsForMonthHandler,
+  getMonthlyRequestEditability,
+  editMonthlyShiftRequest,
+  requestShiftEdit,
+  decideShiftEditRequest,
+  closeShiftMonth,
+  reopenShiftMonth,
+  getShiftMonthLock,
+  getMonthlyShiftAttendanceReport,
+  exportMonthlyShiftAttendanceReport,
+  getShiftAdherenceReport,
+  exportShiftAdherenceReport,
 } from "./shift.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -104,6 +115,25 @@ router.get(
   authenticateToken,
   getEmployeeWeeklyShiftsForMonth
 );
+
+/* Monthly-shift edit workflow */
+router.get('/monthly-request/:id/editability', authenticateToken, getMonthlyRequestEditability);
+router.put('/monthly-request/:id', authenticateToken, editMonthlyShiftRequest);
+router.post('/monthly-request/:id/edit-request', authenticateToken, requestShiftEdit);
+router.post('/monthly-request/:id/edit-request/decide', authenticateToken, decideShiftEditRequest);
+
+/* HR month lock (org-wide) */
+router.get('/month-lock', authenticateToken, getShiftMonthLock);
+router.post('/month-lock', authenticateToken, closeShiftMonth);
+router.delete('/month-lock', authenticateToken, reopenShiftMonth);
+
+/* HR monthly shift + attendance report */
+router.get('/attendance-report', authenticateToken, getMonthlyShiftAttendanceReport);
+router.get('/attendance-report/export', authenticateToken, exportMonthlyShiftAttendanceReport);
+
+/* HR shift adherence report (allotted vs actual shift) */
+router.get('/adherence-report', authenticateToken, getShiftAdherenceReport);
+router.get('/adherence-report/export', authenticateToken, exportShiftAdherenceReport);
 
 
 export default router;
