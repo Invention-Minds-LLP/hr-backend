@@ -11,6 +11,7 @@ import fs from "fs";
 import { saveLocal, publicUrl, deleteLocal } from "../../lib/fileStorage";
 import path from "path";
 import { $Enums } from '@prisma/client';
+// import { writeAuditRow } from "../../lib/employeeAudit"; 
 import { createNotification } from "../notifications/notifications.controller";
 import { ShiftAssignMode } from "@prisma/client";
 import XLSX from "xlsx";
@@ -564,10 +565,10 @@ export const getEmployees = async (req: Request, res: Response) => {
     // pickers in HR Corrections, leave-apply, etc. — which only send `search`.)
     if (search && !filter) {
       where.OR = [
-        { firstName:    { contains: search } },
-        { lastName:     { contains: search } },
+        { firstName: { contains: search } },
+        { lastName: { contains: search } },
         { employeeCode: { contains: search } },
-        { email:        { contains: search } },
+        { email: { contains: search } },
       ];
     }
 
@@ -966,15 +967,15 @@ export const updateEmployee = async (req: Request, res: Response) => {
 
         const compareRel = (key: string, fields: string[]) => {
           const before = normaliseRel((beforeRow as any)[key], fields);
-          const after  = normaliseRel((afterRow as any)[key], fields);
+          const after = normaliseRel((afterRow as any)[key], fields);
           if (JSON.stringify(before) !== JSON.stringify(after)) {
             (diff.changes as any)[key] = { from: before, to: after };
             diff.changedFields.push(key);
           }
         };
-        compareRel('Address',           ['type', 'line1', 'line2', 'city', 'state', 'zipCode', 'country']);
+        compareRel('Address', ['type', 'line1', 'line2', 'city', 'state', 'zipCode', 'country']);
         compareRel('emergencyContacts', ['name', 'phone', 'relationship']);
-        compareRel('qualifications',    ['degree', 'institution', 'year']);
+        compareRel('qualifications', ['degree', 'institution', 'year']);
 
         if (diff.changedFields.length > 0) {
           const ctx = auditCtxFromReq(req, { source: 'WEB' });
@@ -1106,7 +1107,7 @@ export const updateEmployee = async (req: Request, res: Response) => {
     // terminate / sabbatical endpoints.
     const ACTIVE = new Set(['ACTIVE', 'NOTICE_PERIOD']);
     const wasActive = ACTIVE.has(String(beforeStatus));
-    const isActive  = ACTIVE.has(String(updatedEmployee.employmentStatus));
+    const isActive = ACTIVE.has(String(updatedEmployee.employmentStatus));
     if (wasActive && !isActive) {
       try {
         await revokeEmployeeAccess(
@@ -1893,7 +1894,7 @@ export const getActiveEmployees = async (req: Request, res: Response) => {
       where: {
         employmentStatus: 'ACTIVE'
       },
-      select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true, employeeCode: true, roleId: true}
+      select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true, employeeCode: true, roleId: true }
     });
     res.json(employees);
   } catch (error) {
@@ -4262,12 +4263,12 @@ export const getEmployeeAuditLog = async (req: Request, res: Response) => {
     const { field, source, changedBy, from, to, page = '1', pageSize = '50' } = req.query as any;
 
     const where: any = { employeeId };
-    if (source)    where.source = String(source);
+    if (source) where.source = String(source);
     if (changedBy) where.changedBy = Number(changedBy);
     if (from || to) {
       where.changedAt = {};
       if (from) where.changedAt.gte = new Date(String(from));
-      if (to)   where.changedAt.lte = new Date(String(to));
+      if (to) where.changedAt.lte = new Date(String(to));
     }
 
     const take = Math.min(200, Number(pageSize) || 50);
@@ -4305,12 +4306,12 @@ export const queryAuditLog = async (req: Request, res: Response) => {
     const { field, source, changedBy, from, to, page = '1', pageSize = '50' } = req.query as any;
 
     const where: any = {};
-    if (source)    where.source = String(source);
+    if (source) where.source = String(source);
     if (changedBy) where.changedBy = Number(changedBy);
     if (from || to) {
       where.changedAt = {};
       if (from) where.changedAt.gte = new Date(String(from));
-      if (to)   where.changedAt.lte = new Date(String(to));
+      if (to) where.changedAt.lte = new Date(String(to));
     }
 
     const take = Math.min(200, Number(pageSize) || 50);
@@ -4340,4 +4341,71 @@ export const queryAuditLog = async (req: Request, res: Response) => {
     console.error("queryAuditLog error:", err);
     return res.status(500).json({ error: err?.message || "Failed to load audit log" });
   }
+};
+
+
+export const updateAge = async () => {
+  const employees = await prisma.employee.findMany({
+    where: { employmentStatus: 'ACTIVE', },
+    select: {
+      id: true,
+      dob: true,
+      age: true
+    }
+  });
+
+  let updatedCount = 0;
+
+  for (const e of employees) {
+    if (!e.dob) continue;
+
+    const today = new Date();
+
+    // gets today year and dob year, subtract to get age
+    let age = today.getFullYear() - e.dob.getFullYear(); 
+
+    // 
+    const birthdayInThisYear = new Date(
+      today.getFullYear(),
+      e.dob.getMonth(),
+      e.dob.getDate()
+    );
+
+    if (today < birthdayInThisYear) {
+      age--;
+    }
+
+    if (e.age !== age) {
+      await prisma.employee.update({
+        where: { id: e.id },
+        data: { age }
+      });
+
+      updatedCount++;
+    }
+
+ 
+
+    const diff = { changedFields: [], changes: {}, ip:{} }; // Initialize diff object
+
+    // Logic to populate diff with changes goes here
+
+    if (diff.changedFields.length > 0) {
+      const ctx = ( { source: 'CRON' });
+      await (prisma as any).employeeAuditLog.create({
+        data: {// fields to list changes
+          employeeId: Number(e.id),
+          action: 'UPDATE',
+          changes: diff.changes,
+          changedFields: diff.changedFields,
+          changedBy: 'system',
+          source: ctx.source ?? 'CRON',
+          ipAddress: diff.ip ?? null,
+        },
+      });
+    }
+  }
+
+  console.log(`Updated ${updatedCount} employee ages`);
+  return updatedCount;
 };
