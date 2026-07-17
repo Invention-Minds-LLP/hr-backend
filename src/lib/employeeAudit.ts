@@ -99,7 +99,6 @@ async function writeAuditRow(
     action: 'CREATE' | 'UPDATE' | 'DELETE';
     changes: any;
     changedFields: string[] | null;
-    ip?: string | null;
   },
 ) {
   await (tx as any).employeeAuditLog.create({
