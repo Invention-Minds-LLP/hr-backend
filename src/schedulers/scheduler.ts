@@ -18,6 +18,7 @@ import { flushSecurityAlerts } from "../lib/securityAlert";
 import { config } from "../config";
 import { prisma } from "../lib/prisma";
 // import { sendInternshipEndReminders } from "../api/internship/internship.controller";
+import { updateAge } from "../api/employee/employee.controller";
 
 export async function startSchedulers() {
   initSurveyScheduler();
@@ -244,3 +245,14 @@ async function runBiometricBackfill() {
 
   console.log('✅ Backfill completed for all dates');
 }
+
+// for automatic age update scheduled at 2:00 AM everyday
+cron.schedule("0 2 * * *", async () => {
+  try {
+    const ageUpdated = await updateAge(); // Ensure updateAge is defined or imported
+    console.log('[CRON]Age updated for employees:', ageUpdated);
+  }
+  catch (e) {
+    console.error("[CRON] Age updating failed", e);
+  } 
+});
