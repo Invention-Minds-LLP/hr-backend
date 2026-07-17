@@ -92,13 +92,14 @@ export function buildEmployeeDiff(before: Record<string, any>, after: Record<str
 
 /* ── Helpers ─────────────────────────────────────────────────── */
 
-async function writeAuditRow(
+export async function writeAuditRow(
   tx: Prisma.TransactionClient,
   args: AuditContext & {
     employeeId: number;
     action: 'CREATE' | 'UPDATE' | 'DELETE';
     changes: any;
     changedFields: string[] | null;
+    ip?: string | null;
   },
 ) {
   await (tx as any).employeeAuditLog.create({

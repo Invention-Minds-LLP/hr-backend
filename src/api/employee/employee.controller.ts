@@ -11,7 +11,7 @@ import fs from "fs";
 import { saveLocal, publicUrl, deleteLocal } from "../../lib/fileStorage";
 import path from "path";
 import { $Enums } from '@prisma/client';
-// import { writeAuditRow } from "../../lib/employeeAudit"; 
+import { writeAuditRow } from "../../lib/employeeAudit";
 import { createNotification } from "../notifications/notifications.controller";
 import { ShiftAssignMode } from "@prisma/client";
 import XLSX from "xlsx";
@@ -4362,7 +4362,7 @@ export const updateAge = async () => {
     const today = new Date();
 
     // gets today year and dob year, subtract to get age
-    let age = today.getFullYear() - e.dob.getFullYear(); 
+    let age = today.getFullYear() - e.dob.getFullYear();
 
     // 
     const birthdayInThisYear = new Date(
@@ -4376,33 +4376,33 @@ export const updateAge = async () => {
     }
 
     if (e.age !== age) {
+      const oldAge = e.age;
+
       await prisma.employee.update({
         where: { id: e.id },
         data: { age }
       });
 
       updatedCount++;
-    }
+  
+      const diff = { changedFields: ["age"] , changes: { age: {from: e.age, to:age}} }; // Initialize diff object
 
- 
-
-    const diff = { changedFields: [], changes: {}, ip:{} }; // Initialize diff object
-
-    // Logic to populate diff with changes goes here
-
-    if (diff.changedFields.length > 0) {
-      const ctx = ( { source: 'CRON' });
-      await (prisma as any).employeeAuditLog.create({
-        data: {// fields to list changes
-          employeeId: Number(e.id),
-          action: 'UPDATE',
-          changes: diff.changes,
-          changedFields: diff.changedFields,
-          changedBy: 'system',
-          source: ctx.source ?? 'CRON',
-          ipAddress: diff.ip ?? null,
-        },
-      });
+      try {
+        const log = await prisma.employeeAuditLog.create({
+          data: {
+            employeeId: e.id,
+            action: "UPDATE",
+            changes: diff.changes,
+            changedFields: diff.changedFields,
+            changedBy: null,
+            source: "CRON",
+          },
+        });
+      
+        console.log("Audit Created:", log);
+      } catch (err) {
+        console.error("Audit Error:", err);
+      }
     }
   }
 

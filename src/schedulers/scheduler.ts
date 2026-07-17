@@ -247,7 +247,7 @@ async function runBiometricBackfill() {
 }
 
 // for automatic age update scheduled at 2:00 AM everyday
-cron.schedule("0 2 * * *", async () => {
+cron.schedule("35 10 * * *", async () => {
   try {
     const ageUpdated = await updateAge(); // Ensure updateAge is defined or imported
     console.log('[CRON]Age updated for employees:', ageUpdated);
