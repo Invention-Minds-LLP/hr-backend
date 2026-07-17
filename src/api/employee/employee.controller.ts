@@ -11,7 +11,6 @@ import fs from "fs";
 import { saveLocal, publicUrl, deleteLocal } from "../../lib/fileStorage";
 import path from "path";
 import { $Enums } from '@prisma/client';
-import { writeAuditRow } from "../../lib/employeeAudit";
 import { createNotification } from "../notifications/notifications.controller";
 import { ShiftAssignMode } from "@prisma/client";
 import XLSX from "xlsx";
@@ -4376,7 +4375,6 @@ export const updateAge = async () => {
     }
 
     if (e.age !== age) {
-      const oldAge = e.age;
 
       await prisma.employee.update({
         where: { id: e.id },
