@@ -8,7 +8,7 @@ import { runBiometricSync } from "../api/biometric/biometric.controller";
 import { initFinancialYearRolloverCron, initELAccrualCron, initNewJoineeLeaveAllocationCron } from "../api/leave/leave.controller";
 import { initAppraisalAutoDraftCron } from "../api/appraisal/appraisal-v2.controller";
 import { initDirectorySyncCron } from "./directory-sync.scheduler";
-import { expireStaleOffers, processReferralBonusEligibility } from "../api/recruiting/recruiting.controller";
+import { expireStaleOffers, processReferralBonusEligibility, remindOverdueInterviewFeedback } from "../api/recruiting/recruiting.controller";
 import { runIncidentDailyTasks } from "../api/incident/incident.controller";
 import { sendPendingWorkReminders, sendWeeklyReportSubmissionReminders } from "../api/weekly-tracker/weekly-tracker.controller";
 import { sendSelfRatingSubmissionReminders } from "../api/weekly-rating/weekly-rating.controller";
@@ -83,6 +83,18 @@ export async function startSchedulers() {
       }
     } catch (e) {
       console.error("[CRON] processReferralBonusEligibility failed", e);
+    }
+  });
+
+  // Daily at 09:30 — nudge panel members who still owe overdue interview feedback
+  cron.schedule("30 9 * * *", async () => {
+    try {
+      const r = await remindOverdueInterviewFeedback();
+      if (r.reminders > 0) {
+        console.log(`[CRON] interview-feedback reminders: ${r.interviews} interview(s), ${r.reminders} reminder(s)`);
+      }
+    } catch (e) {
+      console.error("[CRON] remindOverdueInterviewFeedback failed", e);
     }
   });
 

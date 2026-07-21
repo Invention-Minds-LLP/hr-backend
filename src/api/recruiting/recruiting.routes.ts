@@ -48,6 +48,13 @@ recruitingRouter.get('/applications/:id/audit-log', ...recruiter, rc.getApplicat
 
 // Interviews (recruiter manages, panel members can record their feedback)
 recruitingRouter.post('/applications/:id/interviews', ...recruiter, rc.scheduleInterview);
+recruitingRouter.post('/applications/:id/interviews/multi-session', ...recruiter, rc.scheduleMultiSessionRound);
+recruitingRouter.get('/panel-availability', ...recruiter, rc.panelAvailability);
+recruitingRouter.patch('/interviews/:id/reschedule', ...recruiter, rc.rescheduleInterview);
+recruitingRouter.post('/interviews/:id/split-member', ...recruiter, rc.splitPanelMember);
+recruitingRouter.post('/interviews/:id/cancel', ...recruiter, rc.cancelInterview);
+// Panel member acknowledges availability / declines — panellist auth only (checked inside)
+recruitingRouter.post('/interviews/:id/panel-ack', authenticateToken, rc.panelAck);
 recruitingRouter.patch('/interviews/:id/feedback', authenticateToken, rc.recordInterviewFeedback);
 
 // Offers — all recruiter actions
@@ -62,6 +69,7 @@ recruitingRouter.post('/offers/:id/sign',     authenticateToken, rc.markOfferSig
 recruitingRouter.post('/offers/:id/decline',  authenticateToken, rc.declineOffer);    // candidate
 recruitingRouter.post('/offers/:id/withdraw', ...recruiter, rc.withdrawOffer);
 recruitingRouter.post('/offers/:id/expire',   ...recruiter, rc.expireOffer);
+recruitingRouter.post('/offers/:id/revise',   ...recruiter, rc.reviseOffer);   // re-open declined/expired offer
 recruitingRouter.patch('/offers/:id/schedule-join', ...recruiter, rc.scheduleJoin);
 recruitingRouter.post('/offers/:id/mark-joined',   ...recruiter, rc.markJoined);
 recruitingRouter.post('/offers/:id/mark-no-show',  ...recruiter, rc.markNoShow);

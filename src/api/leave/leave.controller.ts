@@ -73,26 +73,14 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       });
     }
 
-    // Fetch balance for that year & leave type
-    const balance = await prisma.employeeLeaveBalance.findFirst({
-      where: {
-        employeeId: employeeId,
-        leaveTypeId: leaveTypeId,
-        year: year,
-      }
-    });
-
-
     // Allow advance applications for the next FY when rollover hasn't run yet
     // (e.g., applying for April leave while still in March)
     const currentFY = getFinancialYear(new Date());
     // const isAdvanceNextFY = !balance && year === currentFY + 1;
 
-    if (!balance  && (lt.name !== "CO" && lt.name !== "RH")) {
-      return res.status(400).json({
-        error: `Leave balance not configured for ${year}`
-      });
-    }
+    // NOTE: a missing balance row no longer blocks the application. For
+    // balance-based types the shortfall (or the whole leave, if no balance is
+    // configured) is booked as LOP at approval. CO/RH/LOP never use a balance.
 
     // const year = start.getFullYear();
     // EL counts week-offs that fall inside the range (sandwich rule).
@@ -163,18 +151,19 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       }
     }
 
-    if (lt.name !== "CO" && lt.name !== "RH") {
+    // Compute the paid-vs-LOP preview (informational only — the authoritative
+    // split is recomputed and persisted at final approval, since the balance
+    // can change in between). We no longer block on insufficient balance:
+    // the shortfall is simply booked as LOP. CO consumes comp-off credits and
+    // RH consumes optional holidays, so neither has a balance-based LOP; the
+    // explicit LOP type is always fully unpaid.
+    let lopPreview = 0;
+    if (lt.name === "LOP") {
+      lopPreview = requestedUnits;
+    } else if (lt.name !== "CO" && lt.name !== "RH") {
       const bal = await getBalance(Number(employeeId), Number(leaveTypeId), year);
-      if (!bal) return res.status(400).json({ error: `Leave balance not configured for ${year}` });
-
-      const totalUsed = computeTotalUsed(bal);
-      const remaining = (bal.totalAllowed ?? 0) - totalUsed;
-
-      if (requestedUnits > remaining) {
-        return res.status(400).json({
-          error: `Insufficient balance. Available: ${remaining}, requested: ${requestedUnits}`
-        });
-      }
+      const remaining = bal ? (bal.totalAllowed ?? 0) - computeTotalUsed(bal) : 0;
+      lopPreview = Math.max(0, requestedUnits - Math.max(0, remaining));
     }
 
     const leaveRequest = await prisma.leaveRequest.create({
@@ -300,7 +289,7 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     }
 
 
-    res.status(201).json(leaveRequest);
+    res.status(201).json({ ...leaveRequest, lopPreview });
   } catch (error) {
     console.error("Error creating leave request:", error);
     res.status(500).json({ error: "Failed to create leave request" });
@@ -1679,55 +1668,66 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
           return { kind: "OK" as const, status: 200, body: { ...updatedLeave, requestedUnits } };
         }
 
-        // ---- Non-CO/RH: validate balance
+        // ---- LOP: explicit unpaid leave — no balance, entire request is LOP.
+        if (updatedLeave.leaveType.name === "LOP") {
+          await tx.leaveRequest.update({
+            where: { id: leaveId },
+            data: { paidUnits: 0, lopUnits: requestedUnits },
+          });
+          return {
+            kind: "OK" as const,
+            status: 200,
+            body: { ...updatedLeave, requestedUnits, paidUnits: 0, lopUnits: requestedUnits },
+          };
+        }
+
+        // ---- Non-CO/RH/LOP: split into paid (from balance) + LOP (overflow).
+        // A missing balance row or insufficient balance no longer blocks the
+        // approval — the shortfall is booked as LOP and captured on the request
+        // for payroll. Only the paid portion is deducted from balance + ledger.
         const bal = await tx.employeeLeaveBalance.findFirst({
           where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year, category: "LEAVE" },
         });
 
-        if (!bal) {
-          return {
-            kind: "ERR" as const,
-            status: 400,
-            body: { error: `Leave balance not configured for ${year}` },
-          };
-        }
-
-        const totalUsedBefore = computeTotalUsed(bal);
-        const remainingBefore = (bal.totalAllowed ?? 0) - totalUsedBefore;
-
-        if (requestedUnits > remainingBefore) {
-          return {
-            kind: "ERR" as const,
-            status: 400,
-            body: { error: "Insufficient balance at approval time" },
-          };
-        }
-
-        // ledger balance check
+        const remainingBefore = bal ? (bal.totalAllowed ?? 0) - computeTotalUsed(bal) : 0;
         const ledgerBalance = await getLastLedgerBalanceTx(tx, updatedLeave.employeeId, updatedLeave.leaveTypeId, year);
-        if (requestedUnits > ledgerBalance) {
-          return { kind: "ERR" as const, status: 400, body: { error: "Insufficient balance (ledger)" } };
+
+        // Paid capacity is bounded by BOTH the balance table and the ledger so
+        // the two stay consistent; anything beyond it is LOP.
+        const paidCapacity = Math.max(0, Math.min(remainingBefore, ledgerBalance));
+        const paidUnits = Math.min(requestedUnits, paidCapacity);
+        const lopUnits = requestedUnits - paidUnits;
+
+        // Deduct only the paid portion from EmployeeLeaveBalance.
+        if (paidUnits > 0) {
+          if (updatedLeave.isHalfDay) {
+            // A paid half-day is 0.5 → exactly one half-day unit.
+            await tx.employeeLeaveBalance.updateMany({
+              where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year },
+              data: { halfDayUsed: { increment: 1 } },
+            });
+          } else {
+            await tx.employeeLeaveBalance.updateMany({
+              where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year },
+              data: { used: { increment: paidUnits } },
+            });
+          }
         }
 
-        // Update EmployeeLeaveBalance usage
-        if (updatedLeave.isHalfDay) {
-          await tx.employeeLeaveBalance.updateMany({
-            where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year },
-            data: { halfDayUsed: { increment: 1 } },
-          });
-        } else {
-          await tx.employeeLeaveBalance.updateMany({
-            where: { employeeId: updatedLeave.employeeId, leaveTypeId: updatedLeave.leaveTypeId, year },
-            data: { used: { increment: requestedUnits } },
-          });
-        }
+        // Persist the split on the request for payroll + reporting.
+        await tx.leaveRequest.update({
+          where: { id: leaveId },
+          data: { paidUnits, lopUnits },
+        });
 
-        // Create ledger DEBITs per touched month (FAST enough; summary rebuild moved out)
+        // Ledger DEBITs per touched month — only for the PAID budget, allocated
+        // chronologically. Days beyond the paid budget in a month are LOP and
+        // are not ledgered (there is no balance to debit).
         const touched = getTouchedMonths(startDate, endDate);
         touched.sort((a, b) => a.year - b.year || a.month - b.month);
 
-        // IMPORTANT: start running balance from current ledger AFTER the debit inserts base
         let runningBalance = ledgerBalance;
+        let paidBudget = paidUnits;
 
         for (const m of touched) {
           const calYear = getCalendarYear(m.year, m.month);
@@ -1738,14 +1738,17 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
           const days = await countWorkingDays(updatedLeave.employeeId, from, to, { includeWeekOffs: isEarnedLeave });
           if (days <= 0) continue;
 
-          runningBalance -= days;
+          const paidForMonth = Math.min(days, paidBudget);
+          if (paidForMonth <= 0) continue; // fully-LOP month
+          paidBudget -= paidForMonth;
+          runningBalance -= paidForMonth;
 
           await insertLedgerTx(tx, {
             employeeId: updatedLeave.employeeId,
             leaveTypeId: updatedLeave.leaveTypeId,
             year: m.year,
             month: m.month,
-            debit: days,
+            debit: paidForMonth,
             credit: 0,
             balanceAfter: runningBalance,
             action: "DEBIT",
@@ -1761,7 +1764,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
         return {
           kind: "OK" as const,
           status: 200,
-          body: { ...updatedLeave, requestedUnits, __touched: touched },
+          body: { ...updatedLeave, requestedUnits, paidUnits, lopUnits, __touched: touched },
         };
       },
       {

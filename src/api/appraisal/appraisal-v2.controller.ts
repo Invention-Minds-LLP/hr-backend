@@ -1127,6 +1127,53 @@ const normaliseLevels = (raw: unknown): ReviewLevel[] => {
   return [...REVIEW_LEVELS];
 };
 
+/** Coerce a Json target field to a clean, deduped number[] (empty = no restriction). */
+const normaliseIdArray = (raw: unknown): number[] => {
+  if (!Array.isArray(raw)) return [];
+  const nums = raw
+    .map((v) => Number(v))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  return Array.from(new Set(nums));
+};
+
+type QuestionSubject = {
+  id: number;
+  departmentId: number | null;
+  designationId: number | null;
+  roleId: number | null;
+};
+
+/**
+ * Does this master question apply to the employee being appraised?
+ * All four target arrays empty => applies to everyone (global). Otherwise the
+ * employee must match at least one non-empty axis (OR/union).
+ */
+const questionAppliesToEmployee = (
+  q: { targetDepartmentIds: unknown; targetDesignationIds: unknown; targetRoleIds: unknown; targetEmployeeIds: unknown },
+  emp: QuestionSubject,
+): boolean => {
+  const dept = normaliseIdArray(q.targetDepartmentIds);
+  const desig = normaliseIdArray(q.targetDesignationIds);
+  const role = normaliseIdArray(q.targetRoleIds);
+  const emps = normaliseIdArray(q.targetEmployeeIds);
+  if (!dept.length && !desig.length && !role.length && !emps.length) return true;
+  if (dept.length && emp.departmentId != null && dept.includes(emp.departmentId)) return true;
+  if (desig.length && emp.designationId != null && desig.includes(emp.designationId)) return true;
+  if (role.length && emp.roleId != null && role.includes(emp.roleId)) return true;
+  if (emps.length && emps.includes(emp.id)) return true;
+  return false;
+};
+
+/** Shape a master question for the API response, normalising all Json arrays. */
+const shapeReviewQuestion = (q: any) => ({
+  ...q,
+  levels: normaliseLevels(q.levels),
+  targetDepartmentIds: normaliseIdArray(q.targetDepartmentIds),
+  targetDesignationIds: normaliseIdArray(q.targetDesignationIds),
+  targetRoleIds: normaliseIdArray(q.targetRoleIds),
+  targetEmployeeIds: normaliseIdArray(q.targetEmployeeIds),
+});
+
 /**
  * GET /review-questions?level=INCHARGE|MANAGER|MANAGEMENT&includeInactive=true
  * Lists master review questions. When `level` is provided, only questions
@@ -1136,17 +1183,50 @@ export const listReviewQuestions = async (req: Request, res: Response) => {
   try {
     const level = req.query.level as string | undefined;
     const includeInactive = req.query.includeInactive === "true";
+    const appraisalId = req.query.appraisalId ? Number(req.query.appraisalId) : undefined;
     const where = includeInactive ? {} : { isActive: true };
     const all = await prisma.appraisalReviewQuestion.findMany({
       where,
       orderBy: [{ displayOrder: "asc" }, { id: "asc" }],
     });
 
-    const filtered = level
-      ? all.filter((q) => normaliseLevels(q.levels).includes(level as ReviewLevel))
-      : all;
+    // When an appraisal is supplied, scope the master pool to the appraised
+    // employee's department / designation / role / specific-employee targets.
+    let subject: QuestionSubject | null = null;
+    // Questions the reviewer has already answered for this appraisal must stay
+    // visible even if they no longer match the scope (else a filled answer would
+    // vanish). "Answered" = an answer row with a rating or non-empty comment.
+    const answeredQuestionIds = new Set<number>();
+    if (appraisalId && !Number.isNaN(appraisalId)) {
+      const form = await prisma.appraisalForm.findUnique({
+        where: { id: appraisalId },
+        include: {
+          employee: { select: { id: true, departmentId: true, designationId: true, roleId: true } },
+        },
+      });
+      if (form?.employee) subject = form.employee;
 
-    return res.json(filtered.map((q) => ({ ...q, levels: normaliseLevels(q.levels) })));
+      const answers = await prisma.appraisalReviewAnswer.findMany({
+        where: { appraisalFormId: appraisalId, ...(level ? { level } : {}) },
+        select: { questionId: true, rating: true, comments: true },
+      });
+      for (const a of answers) {
+        if (a.rating != null || (a.comments && a.comments.trim() !== "")) {
+          answeredQuestionIds.add(a.questionId);
+        }
+      }
+    }
+
+    const filtered = all.filter((q) => {
+      // Already-answered questions for this appraisal/level are always kept, so a
+      // filled-in answer never disappears if scope or levels later change.
+      if (answeredQuestionIds.has(q.id)) return true;
+      if (level && !normaliseLevels(q.levels).includes(level as ReviewLevel)) return false;
+      if (subject && !questionAppliesToEmployee(q, subject)) return false;
+      return true;
+    });
+
+    return res.json(filtered.map(shapeReviewQuestion));
   } catch (e: any) {
     return res.status(500).json({ error: e.message });
   }
@@ -1158,6 +1238,7 @@ export const createReviewQuestion = async (req: Request, res: Response) => {
     const {
       title, description, prompts, aboveAverage, average, belowAverage,
       category, section, levels, displayOrder, isActive,
+      targetDepartmentIds, targetDesignationIds, targetRoleIds, targetEmployeeIds,
     } = req.body || {};
     if (!title || typeof title !== "string" || !title.trim()) {
       return res.status(400).json({ error: "title is required" });
@@ -1177,11 +1258,15 @@ export const createReviewQuestion = async (req: Request, res: Response) => {
         category: category ?? null,
         section: section ?? null,
         levels: normalisedLevels as any,
+        targetDepartmentIds: normaliseIdArray(targetDepartmentIds) as any,
+        targetDesignationIds: normaliseIdArray(targetDesignationIds) as any,
+        targetRoleIds: normaliseIdArray(targetRoleIds) as any,
+        targetEmployeeIds: normaliseIdArray(targetEmployeeIds) as any,
         displayOrder: typeof displayOrder === "number" ? displayOrder : 0,
         isActive: typeof isActive === "boolean" ? isActive : true,
       },
     });
-    return res.json({ ...q, levels: normaliseLevels(q.levels) });
+    return res.json(shapeReviewQuestion(q));
   } catch (e: any) {
     return res.status(500).json({ error: e.message });
   }
@@ -1194,6 +1279,7 @@ export const updateReviewQuestion = async (req: Request, res: Response) => {
     const {
       title, description, prompts, aboveAverage, average, belowAverage,
       category, section, levels, displayOrder, isActive,
+      targetDepartmentIds, targetDesignationIds, targetRoleIds, targetEmployeeIds,
     } = req.body || {};
 
     const data: any = {};
@@ -1209,11 +1295,15 @@ export const updateReviewQuestion = async (req: Request, res: Response) => {
       const arr = Array.isArray(levels) ? (levels.filter(isReviewLevel) as ReviewLevel[]) : [];
       data.levels = (arr.length ? arr : [...REVIEW_LEVELS]) as any;
     }
+    if (targetDepartmentIds !== undefined) data.targetDepartmentIds = normaliseIdArray(targetDepartmentIds) as any;
+    if (targetDesignationIds !== undefined) data.targetDesignationIds = normaliseIdArray(targetDesignationIds) as any;
+    if (targetRoleIds !== undefined) data.targetRoleIds = normaliseIdArray(targetRoleIds) as any;
+    if (targetEmployeeIds !== undefined) data.targetEmployeeIds = normaliseIdArray(targetEmployeeIds) as any;
     if (displayOrder !== undefined) data.displayOrder = Number(displayOrder);
     if (isActive !== undefined) data.isActive = !!isActive;
 
     const q = await prisma.appraisalReviewQuestion.update({ where: { id }, data });
-    return res.json({ ...q, levels: normaliseLevels(q.levels) });
+    return res.json(shapeReviewQuestion(q));
   } catch (e: any) {
     return res.status(500).json({ error: e.message });
   }
@@ -1229,7 +1319,7 @@ export const toggleReviewQuestion = async (req: Request, res: Response) => {
       where: { id },
       data: { isActive: !current.isActive },
     });
-    return res.json({ ...q, levels: normaliseLevels(q.levels) });
+    return res.json(shapeReviewQuestion(q));
   } catch (e: any) {
     return res.status(500).json({ error: e.message });
   }
@@ -1247,7 +1337,7 @@ export const deleteReviewQuestion = async (req: Request, res: Response) => {
       const q = await prisma.appraisalReviewQuestion.update({
         where: { id }, data: { isActive: false },
       });
-      return res.json({ deactivated: true, question: { ...q, levels: normaliseLevels(q.levels) } });
+      return res.json({ deactivated: true, question: shapeReviewQuestion(q) });
     }
     await prisma.appraisalReviewQuestion.delete({ where: { id } });
     return res.json({ deleted: true });

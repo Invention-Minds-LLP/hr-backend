@@ -924,6 +924,16 @@ export const updateEmployee = async (req: Request, res: Response) => {
       }
     });
 
+    // ── Geo-tracking request: when HR turns ON tracking for this employee
+    // (false/null → true), push a consent request to their phone. Only on the
+    // transition, so re-saving the form doesn't re-notify.
+    if (!beforeRow?.geoTrackingEnabled && updatedEmployee.geoTrackingEnabled) {
+      await createNotification(
+        Number(id),
+        'Your organization has requested location tracking for work sessions. Open HRMinds → Settings to review and give your consent.',
+      );
+    }
+
     // ── Audit log: record the diff between before and after.
     // Two layers of comparison:
     //   (1) Scalar fields on the Employee row (designation, dept, role,
@@ -1893,7 +1903,7 @@ export const getActiveEmployees = async (req: Request, res: Response) => {
       where: {
         employmentStatus: 'ACTIVE'
       },
-      select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true, employeeCode: true, roleId: true}
+      select: { id: true, firstName: true, lastName: true, branchId: true, departmentId: true, employeeCode: true, roleId: true, designationId: true}
     });
     res.json(employees);
   } catch (error) {
@@ -2143,17 +2153,22 @@ export async function getTodayCelebrants(req: Request, res: Response) {
 }
 export async function listMentors(req: Request, res: Response) {
   try {
-    const departmentId = Number(req.query.departmentId);
+    // departmentId is OPTIONAL. When supplied, results are scoped to that
+    // department (mentor picker); when omitted, all active employees are
+    // returned (used by the appraisal review-questions target picker). This
+    // matches the frontend EmployeesService.list({ departmentId? }) contract.
+    const departmentIdRaw = req.query.departmentId;
+    const departmentId = Number(departmentIdRaw);
+    const hasDept =
+      departmentIdRaw !== undefined &&
+      departmentIdRaw !== '' &&
+      Number.isFinite(departmentId);
     const q = (req.query.q as string) || '';
-
-    if (!departmentId) {
-      return res.status(400).json({ error: 'departmentId is required' });
-    }
 
     const rows = await prisma.employee.findMany({
       where: {
         employmentStatus: 'ACTIVE',
-        departmentId,
+        ...(hasDept ? { departmentId } : {}),
         ...(q ? {
           OR: [
             { firstName: { contains: q } },

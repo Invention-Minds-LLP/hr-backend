@@ -10,6 +10,7 @@ import bcrypt from "bcryptjs";
 import nodemailer from "nodemailer";
 import { createNotification } from '../notifications/notifications.controller';
 import { generateOfferLetterPdf, OfferLetterData } from './offerLetterPdf';
+import { isPanelAckStatus } from './recruiting.constants';
 import { config } from '../../config';
 
 
@@ -56,6 +57,34 @@ function readInterviewPanelIds(itv: {
     .split(",")
     .map((s) => Number(s.trim()))
     .filter((n) => Number.isFinite(n) && n > 0);
+}
+
+/**
+ * A candidate can only be in one interview at a time. Returns any non-cancelled
+ * interviews for the same application whose time window overlaps [start, end)
+ * (optionally excluding one interview id — used when rescheduling that one).
+ */
+async function candidateOverlaps(
+  applicationId: number,
+  start: Date,
+  end: Date,
+  excludeInterviewId?: number,
+): Promise<{ id: number; stage: string; startTime: Date; endTime: Date }[]> {
+  return prisma.interview.findMany({
+    where: {
+      applicationId,
+      cancelledAt: null,
+      ...(excludeInterviewId ? { id: { not: excludeInterviewId } } : {}),
+      startTime: { lt: end },
+      endTime: { gt: start },
+    },
+    select: { id: true, stage: true, startTime: true, endTime: true },
+  });
+}
+
+/** Format candidate-overlap rows into the standard `conflicts` string list. */
+function candidateConflictList(rows: { stage: string; startTime: Date; endTime: Date }[]): string[] {
+  return rows.map((c) => `🕒 ${c.stage}: ${new Date(c.startTime).toLocaleString()} – ${new Date(c.endTime).toLocaleString()}`);
 }
 
 /**
@@ -159,10 +188,33 @@ const offerNext: Record<OfferStatus, OfferStatus[]> = {
   SENT: ['VIEWED', 'SIGNED', 'DECLINED', 'WITHDRAWN', 'EXPIRED'],
   VIEWED: ['SIGNED', 'DECLINED', 'WITHDRAWN', 'EXPIRED'],
   SIGNED: [],
-  DECLINED: [],
-  WITHDRAWN: [],
-  EXPIRED: [],
+  // DECLINED / EXPIRED / WITHDRAWN can be re-opened to DRAFT via `reviseOffer`
+  // (offer-negotiation loop) — HR amends the terms and re-sends.
+  DECLINED: ['DRAFT'],
+  WITHDRAWN: ['DRAFT'],
+  EXPIRED: ['DRAFT'],
 };
+
+/**
+ * Ensure the candidate has a portal login. First-time candidates get a secure
+ * random password (returned in plaintext ONCE so the caller can email it);
+ * candidates who already have a `passwordHash` return null (nothing to send).
+ * Mirrors the first-time provisioning done on test-assignment so a candidate
+ * who goes straight to an offer can still log in to view / sign it.
+ */
+async function ensureCandidatePortalCredential(
+  candidateId: number,
+  existingHash: string | null,
+): Promise<string | null> {
+  if (existingHash) return null;
+  const plain = generateRandomPassword(10);
+  const hash = await bcrypt.hash(plain, 10);
+  await prisma.candidate.update({
+    where: { id: candidateId },
+    data: { passwordHash: hash },
+  });
+  return plain;
+}
 
 export class RecruitingController {
   // ---------------- Jobs ----------------
@@ -499,7 +551,10 @@ export class RecruitingController {
     const { to, rejectReason, currentStage, shortListNote } = req.body || {};
     if (!to) return bad(res, '`to` is required');
 
-    const app = await prisma.application.findUnique({ where: { id } });
+    const app = await prisma.application.findUnique({
+      where: { id },
+      include: { candidate: true, job: true },
+    });
     if (!app) return bad(res, 'Application not found', 404);
 
     if (!canAdvanceTo[app.status as ApplicationStatus]?.includes(to as ApplicationStatus)) {
@@ -540,6 +595,22 @@ export class RecruitingController {
 
       return u;
     });
+
+    // Notify the candidate on rejection (outside the txn — email latency must
+    // not hold a DB connection, and a delivery failure must not roll back the
+    // status change). Only fires for REJECTED; other transitions stay silent.
+    if (to === ApplicationStatus.REJECTED && app.candidate.email) {
+      try {
+        await sendApplicationRejectionMail({
+          to: app.candidate.email,
+          candidateName: app.candidate.name,
+          jobTitle: app.job.title,
+          companyName: config.branding.companyName || config.branding.hospitalName || undefined,
+        });
+      } catch (mailErr) {
+        console.error('[moveApplication] rejection email failed:', mailErr);
+      }
+    }
 
     res.json(updated);
   });
@@ -1311,9 +1382,17 @@ export class RecruitingController {
  */
   scheduleInterview = asyncHandler(async (req, res) => {
     const applicationId = Number(req.params.id);
-    const { stage, startTime, endTime, panelUserIds, feedbackDue } = req.body || {};
+    const { stage, startTime, endTime, panelUserIds, feedbackDue, grouped, sessionGroupId } = req.body || {};
 
     if (!stage || !startTime || !endTime) return bad(res, 'stage, startTime, endTime are required');
+
+    // Multi-session round grouping. `sessionGroupId` (when adding a session to an
+    // existing round) links this session to that group; otherwise `grouped: true`
+    // makes this interview a NEW group anchor (its id becomes the group id, set
+    // just after creation). Neither → a standalone single-session interview.
+    const joinGroupId = Number(sessionGroupId);
+    const hasGroupId = Number.isFinite(joinGroupId) && joinGroupId > 0;
+    const startNewGroup = !hasGroupId && !!grouped;
 
     // ── Validate interview times ────────────────────────────────────
     const start = new Date(startTime);
@@ -1351,6 +1430,18 @@ export class RecruitingController {
 
     if (!panels.length) return bad(res, 'At least one panel member is required');
 
+    // Candidate can't be double-booked — reject if they already have another
+    // (non-cancelled) interview overlapping this slot (incl. other sessions of
+    // the same round when adding a session).
+    const candBusy = await candidateOverlaps(applicationId, start, end);
+    if (candBusy.length) {
+      return res.status(409).json({
+        warning: true,
+        message: 'The candidate already has an interview during this time.',
+        conflicts: candidateConflictList(candBusy),
+      });
+    }
+
     const panelEmployees = await prisma.employee.findMany({
       where: { id: { in: panels } },
       select: { firstName: true, lastName: true }
@@ -1366,6 +1457,7 @@ export class RecruitingController {
     // (b) has at least one panel member in common with our requested panel.
     const overlapsRaw = await prisma.interview.findMany({
       where: {
+        cancelledAt: null, // cancelled interviews never conflict
         startTime: { lt: end },
         endTime:   { gt: start },
         OR: [
@@ -1455,12 +1547,22 @@ export class RecruitingController {
           // Junction table is the source of truth going forward.
           panelUserIds: panels.join(','),
           feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
+          ...(hasGroupId ? { sessionGroupId: joinGroupId } : {}),
           panel: {
             create: panels.map((employeeId) => ({ employeeId })),
           },
         },
         include: { panel: { select: { employeeId: true } } },
       });
+
+      // Anchor a brand-new multi-session group to this interview's own id.
+      if (startNewGroup) {
+        await tx.interview.update({
+          where: { id: created.id },
+          data: { sessionGroupId: created.id },
+        });
+        (created as any).sessionGroupId = created.id;
+      }
 
       await logApplicationAction(tx, applicationId, 'INTERVIEW_SCHEDULED', {
         toStatus: ApplicationStatus.INTERVIEW_SCHEDULED,
@@ -1562,6 +1664,694 @@ export class RecruitingController {
     });
   });
 
+  /**
+   * POST /recruiting/applications/:id/interviews/multi-session
+   * body: { stage, feedbackDue?, sessions: [{ panelUserIds, startTime, endTime }] }
+   * Schedules a multi-session round in ONE atomic call: different panel members
+   * on different days for the same round. All created interviews share a
+   * sessionGroupId (the first session's id). Per-session overlap-checked.
+   */
+  scheduleMultiSessionRound = asyncHandler(async (req, res) => {
+    const applicationId = Number(req.params.id);
+    const { stage, feedbackDue, sessions } = req.body || {};
+    if (!stage) return bad(res, 'stage is required');
+    if (!Array.isArray(sessions) || sessions.length < 1) return bad(res, 'At least one session is required');
+    if (sessions.length > 10) return bad(res, 'Too many sessions (max 10)');
+
+    const app = await prisma.application.findUnique({
+      where: { id: applicationId },
+      include: { candidate: true, job: true },
+    });
+    if (!app) return bad(res, 'Application not found', 404);
+
+    // Parse + validate every session up-front.
+    const now = new Date();
+    const parsed: { panels: number[]; start: Date; end: Date }[] = [];
+    for (let i = 0; i < sessions.length; i++) {
+      const s = sessions[i] || {};
+      const panels = (Array.isArray(s.panelUserIds) ? s.panelUserIds : String(s.panelUserIds ?? '').split(','))
+        .map((x: any) => Number(String(x).trim()))
+        .filter((n: number) => Number.isFinite(n) && n > 0);
+      if (!panels.length) return bad(res, `Session ${i + 1}: at least one panel member is required`);
+      const start = new Date(s.startTime), end = new Date(s.endTime);
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) return bad(res, `Session ${i + 1}: invalid start/end time`);
+      if (end <= start) return bad(res, `Session ${i + 1}: end must be after start`);
+      if (start < new Date(now.getTime() - 5 * 60 * 1000)) return bad(res, `Session ${i + 1}: start cannot be in the past`);
+      const dur = (end.getTime() - start.getTime()) / 60000;
+      if (dur < 5) return bad(res, `Session ${i + 1}: must be at least 5 minutes long`);
+      if (dur > 8 * 60) return bad(res, `Session ${i + 1}: cannot exceed 8 hours`);
+      parsed.push({ panels, start, end });
+    }
+
+    // The candidate attends EVERY session, so no two sessions of the round may
+    // overlap in time — regardless of which panel members are in each.
+    for (let a = 0; a < parsed.length; a++) {
+      for (let b = a + 1; b < parsed.length; b++) {
+        const timeOverlap = parsed[a].start < parsed[b].end && parsed[b].start < parsed[a].end;
+        if (timeOverlap) return bad(res, `Sessions ${a + 1} and ${b + 1} overlap in time — the candidate can't attend two sessions at once.`);
+      }
+    }
+
+    // Per-session clash against existing (non-cancelled) interviews.
+    for (let i = 0; i < parsed.length; i++) {
+      const { panels, start, end } = parsed[i];
+
+      // Candidate can't already be in another interview at this time.
+      const candBusy = await candidateOverlaps(applicationId, start, end);
+      if (candBusy.length) {
+        return res.status(409).json({
+          warning: true,
+          message: `Session ${i + 1}: the candidate already has an interview then.`,
+          conflicts: candidateConflictList(candBusy),
+        });
+      }
+
+      const raw = await prisma.interview.findMany({
+        where: {
+          cancelledAt: null,
+          startTime: { lt: end },
+          endTime: { gt: start },
+          OR: [{ panel: { some: { employeeId: { in: panels } } } }, { panelUserIds: { not: null } }],
+        },
+        select: {
+          startTime: true, endTime: true, panelUserIds: true,
+          panel: { select: { employeeId: true } },
+          application: { select: { candidate: { select: { name: true } }, job: { select: { title: true } } } },
+        },
+      });
+      const clashes = raw.filter((o) => readInterviewPanelIds(o).some((pid) => panels.includes(pid)));
+      if (clashes.length) {
+        const list = clashes.map((o) =>
+          `🕒 ${o.application.job.title} / ${o.application.candidate.name} ${new Date(o.startTime).toLocaleString()}–${new Date(o.endTime).toLocaleString()}`);
+        return res.status(409).json({ warning: true, message: `Session ${i + 1}: a panel member is already booked then.`, conflicts: list });
+      }
+    }
+
+    const created = await prisma.$transaction(async (tx) => {
+      const ids: number[] = [];
+      for (const { panels, start, end } of parsed) {
+        const itv = await tx.interview.create({
+          data: {
+            applicationId,
+            stage,
+            startTime: start,
+            endTime: end,
+            panelUserIds: panels.join(','),
+            feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
+            panel: { create: panels.map((employeeId) => ({ employeeId })) },
+          },
+        });
+        ids.push(itv.id);
+      }
+      // Anchor the whole round to the first session's id.
+      const groupId = ids[0];
+      await tx.interview.updateMany({ where: { id: { in: ids } }, data: { sessionGroupId: groupId } });
+
+      if (app.status === ApplicationStatus.SHORTLISTED || app.status === ApplicationStatus.SCREENING) {
+        await tx.application.update({ where: { id: applicationId }, data: { status: ApplicationStatus.INTERVIEW_SCHEDULED } });
+      }
+      return { groupId, ids };
+    }, { maxWait: 10000, timeout: 30000 });
+
+    // Audit + notifications AFTER commit (best-effort; not part of the atomic unit).
+    await logApplicationAction(prisma, applicationId, 'MULTI_SESSION_SCHEDULED', {
+      toStatus: ApplicationStatus.INTERVIEW_SCHEDULED,
+      note: `${stage}: ${parsed.length} session(s) scheduled (round #${created.groupId})`,
+      performedBy: (req as any).user?.empId ?? null,
+    });
+
+    (async () => {
+      for (let i = 0; i < parsed.length; i++) {
+        const { panels, start, end } = parsed[i];
+        const emps = await prisma.employee.findMany({
+          where: { id: { in: panels } },
+          select: { id: true, firstName: true, lastName: true, email: true },
+        });
+        const panelNames = emps.map((e) => `${e.firstName} ${e.lastName}`).join(', ');
+        const base = {
+          candidateName: app.candidate.name, jobTitle: app.job.title, stage,
+          startTime: start.toLocaleString(), endTime: end.toLocaleString(), panelNames,
+          hospitalName: config.branding.hospitalName, hospitalAddress: config.branding.hospitalAddress,
+          googleLocationUrl: config.branding.hospitalGoogleMap,
+        };
+        try { if (app.candidate.email) await sendInterviewMail({ ...base, to: app.candidate.email }); } catch { /* */ }
+        for (const e of emps) {
+          try { await createNotification(e.id, `🎤 You're on the ${stage} panel (session ${i + 1}) for ${app.candidate.name} (${app.job.title}) on ${start.toLocaleString()}.`); } catch { /* */ }
+          if (e.email) { try { await sendInterviewMail({ ...base, to: e.email, recipientType: 'PANELIST', recipientName: `${e.firstName} ${e.lastName}`.trim() }); } catch { /* */ } }
+        }
+      }
+    })().catch((e) => console.error('[scheduleMultiSessionRound] notify failed:', e));
+
+    res.status(201).json({ groupId: created.groupId, interviewIds: created.ids, sessions: parsed.length });
+  });
+
+  /**
+   * PATCH /interviews/:id/reschedule
+   * body: { startTime, endTime, panelUserIds?, feedbackDue?, stage? }
+   * Moves an existing (non-cancelled) interview to a new slot, re-checks panel
+   * overlaps (ignoring itself + cancelled rows), optionally swaps the panel,
+   * and re-notifies the candidate + panel.
+   */
+  rescheduleInterview = asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    const { startTime, endTime, panelUserIds, feedbackDue, stage } = req.body || {};
+    if (!startTime || !endTime) return bad(res, 'startTime and endTime are required');
+
+    const existing = await prisma.interview.findUnique({
+      where: { id },
+      include: {
+        panel: { select: { employeeId: true } },
+        application: { include: { candidate: true, job: true } },
+      },
+    });
+    if (!existing) return bad(res, 'Interview not found', 404);
+    if (existing.cancelledAt) return bad(res, 'Cannot reschedule a cancelled interview');
+
+    // ── Validate the new window (same rules as scheduleInterview) ────
+    const start = new Date(startTime);
+    const end   = new Date(endTime);
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return bad(res, 'Invalid startTime or endTime');
+    if (end <= start) return bad(res, 'endTime must be after startTime');
+    const now = new Date();
+    if (start < new Date(now.getTime() - 5 * 60 * 1000)) return bad(res, 'startTime cannot be in the past');
+    const durationMin = (end.getTime() - start.getTime()) / 60000;
+    if (durationMin < 5) return bad(res, 'Interview must be at least 5 minutes long');
+    if (durationMin > 8 * 60) return bad(res, 'Interview cannot exceed 8 hours');
+
+    // Panel: use the supplied list if present, else keep the existing panel.
+    const panelProvided = panelUserIds !== undefined && panelUserIds !== null;
+    const panels: number[] = panelProvided
+      ? (Array.isArray(panelUserIds)
+          ? panelUserIds.map(Number)
+          : String(panelUserIds).split(',').map((s) => Number(s.trim()))
+        ).filter((n) => Number.isFinite(n))
+      : existing.panel.map((p) => p.employeeId);
+    if (!panels.length) return bad(res, 'At least one panel member is required');
+
+    // ── Guard: never drop a panel member who has already SUBMITTED feedback ──
+    // Removing them would orphan a real evaluation. HR must keep them on the
+    // panel, or start a fresh interview round instead.
+    if (panelProvided) {
+      const removed = existing.panel.map((p) => p.employeeId).filter((eid) => !panels.includes(eid));
+      if (removed.length) {
+        const withFeedback = await prisma.interviewFeedback.findMany({
+          where: { interviewId: id, panelUserId: { in: removed }, status: 'SUBMITTED' },
+          select: { panelUserId: true, name: true },
+        });
+        if (withFeedback.length) {
+          const names = withFeedback.map((f) => f.name || `#${f.panelUserId}`).join(', ');
+          return bad(
+            res,
+            `Cannot remove panel member(s) who have already submitted feedback: ${names}. ` +
+            `Keep them on the panel, or schedule a new interview round.`,
+          );
+        }
+      }
+    }
+
+    // Candidate can't be double-booked — reject overlap with their OTHER
+    // (non-cancelled) interviews, e.g. sibling sessions of the same round.
+    const candBusy = await candidateOverlaps(existing.applicationId, start, end, id);
+    if (candBusy.length) {
+      return res.status(409).json({
+        warning: true,
+        message: 'The candidate already has another interview during this time.',
+        conflicts: candidateConflictList(candBusy),
+      });
+    }
+
+    // ── Overlap check — exclude THIS interview and any cancelled rows ──
+    const overlapsRaw = await prisma.interview.findMany({
+      where: {
+        id: { not: id },
+        cancelledAt: null,
+        startTime: { lt: end },
+        endTime:   { gt: start },
+        OR: [
+          { panel: { some: { employeeId: { in: panels } } } },
+          { panelUserIds: { not: null } },
+        ],
+      },
+      include: {
+        panel: { select: { employeeId: true } },
+        application: {
+          include: {
+            candidate: { select: { name: true } },
+            job: { select: { title: true } },
+          },
+        },
+      },
+    });
+    const overlaps = overlapsRaw.filter((o) => {
+      const ids = readInterviewPanelIds(o);
+      return ids.some((pid) => panels.includes(pid));
+    });
+    if (overlaps.length > 0) {
+      const conflicts = overlaps.map((o) => {
+        const startT = new Date(o.startTime).toLocaleString();
+        const endT = new Date(o.endTime).toLocaleString();
+        return `🕒 A panel member is already scheduled for "${o.application.job.title}" with candidate "${o.application.candidate.name}" from ${startT} to ${endT}`;
+      });
+      return res.status(409).json({
+        warning: true,
+        message: 'Some panel members already have interviews scheduled during this time.',
+        conflicts,
+      });
+    }
+
+    // ── Apply the move (+ swap panel when a new list was supplied) ────
+    const panelEmployees = await prisma.employee.findMany({
+      where: { id: { in: panels } },
+      select: { id: true, firstName: true, lastName: true, email: true },
+    });
+    const panelNames = panelEmployees.map((e) => `${e.firstName} ${e.lastName}`).join(', ');
+
+    const updated = await prisma.$transaction(async (tx) => {
+      if (panelProvided) {
+        await tx.interviewPanelMember.deleteMany({ where: { interviewId: id } });
+      }
+      const itv = await tx.interview.update({
+        where: { id },
+        data: {
+          startTime: start,
+          endTime: end,
+          ...(stage ? { stage } : {}),
+          panelUserIds: panels.join(','),
+          ...(feedbackDue !== undefined ? { feedbackDue: feedbackDue ? new Date(feedbackDue) : null } : {}),
+          ...(panelProvided ? { panel: { create: panels.map((employeeId) => ({ employeeId })) } } : {}),
+        },
+      });
+      // Time changed → every panel member must re-acknowledge availability.
+      await tx.interviewPanelMember.updateMany({
+        where: { interviewId: id },
+        data: { ackStatus: 'PENDING', ackReason: null, ackAt: null },
+      });
+      await logApplicationAction(tx, existing.applicationId, 'INTERVIEW_RESCHEDULED', {
+        note: `${existing.stage} moved to ${start.toLocaleString()} (panel: ${panelNames})`,
+        performedBy: (req as any).user?.empId ?? null,
+      });
+      return itv;
+    }, { maxWait: 10000, timeout: 30000 });
+
+    // ── Re-notify candidate + panel (best-effort) ────────────────────
+    const emailArgs = {
+      candidateName: existing.application.candidate.name,
+      jobTitle: existing.application.job.title,
+      stage: stage || existing.stage,
+      startTime: start.toLocaleString(),
+      endTime: end.toLocaleString(),
+      panelNames,
+      hospitalName: config.branding.hospitalName,
+      hospitalAddress: config.branding.hospitalAddress,
+      googleLocationUrl: config.branding.hospitalGoogleMap,
+    };
+    let mailStatus: 'sent' | 'failed' | 'skipped' = 'skipped';
+    if (existing.application.candidate.email) {
+      try {
+        await sendInterviewMail({ ...emailArgs, to: existing.application.candidate.email });
+        mailStatus = 'sent';
+      } catch (e) {
+        mailStatus = 'failed';
+        console.error('[rescheduleInterview] candidate email failed:', e);
+      }
+    }
+    const inApp =
+      `🔁 Interview rescheduled: ${emailArgs.stage} with ${emailArgs.candidateName} ` +
+      `(${emailArgs.jobTitle}) is now on ${start.toLocaleString()}.`;
+    for (const p of panelEmployees) {
+      try { await createNotification(p.id, inApp); } catch (e) { console.error('[rescheduleInterview] notify failed', e); }
+      if (p.email) {
+        try {
+          await sendInterviewMail({
+            ...emailArgs,
+            to: p.email,
+            recipientType: 'PANELIST',
+            recipientName: `${p.firstName} ${p.lastName}`.trim(),
+          });
+        } catch (e) { console.error('[rescheduleInterview] panel email failed', e); }
+      }
+    }
+
+    res.json({ ...updated, mailStatus });
+  });
+
+  /**
+   * POST /interviews/:id/cancel  { reason? }
+   * Soft-cancels a scheduled interview (kept for audit, excluded from overlap
+   * checks and the overdue-feedback reminder). Notifies candidate + panel.
+   */
+  cancelInterview = asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    const { reason } = req.body || {};
+
+    const existing = await prisma.interview.findUnique({
+      where: { id },
+      include: {
+        panel: { select: { employeeId: true } },
+        application: { include: { candidate: true, job: true } },
+      },
+    });
+    if (!existing) return bad(res, 'Interview not found', 404);
+    if (existing.cancelledAt) return bad(res, 'Interview is already cancelled');
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const itv = await tx.interview.update({
+        where: { id },
+        data: { cancelledAt: new Date(), cancelReason: reason?.trim() || null },
+      });
+      await logApplicationAction(tx, existing.applicationId, 'INTERVIEW_CANCELLED', {
+        note: `${existing.stage} on ${new Date(existing.startTime).toLocaleString()} cancelled${reason?.trim() ? `: ${reason.trim()}` : ''}`,
+        performedBy: (req as any).user?.empId ?? null,
+      });
+      return itv;
+    }, { maxWait: 10000, timeout: 30000 });
+
+    // Notify candidate + panel (best-effort).
+    const when = new Date(existing.startTime).toLocaleString();
+    if (existing.application.candidate.email) {
+      try {
+        await transporter.sendMail({
+          from: config.smtp.from,
+          to: existing.application.candidate.email,
+          subject: `Interview cancelled – ${existing.application.job.title}`,
+          text:
+            `Dear ${existing.application.candidate.name},\n\n` +
+            `Your ${existing.stage} interview scheduled for ${when} has been cancelled. ` +
+            `Our team will reach out with next steps if applicable.\n\nRegards,\nHR Team`,
+        });
+      } catch (e) { console.error('[cancelInterview] candidate email failed:', e); }
+    }
+    const panelIds = existing.panel.map((p) => p.employeeId);
+    const inApp = `❌ Interview cancelled: ${existing.stage} with ${existing.application.candidate.name} (${existing.application.job.title}) — was ${when}.`;
+    for (const empId of panelIds) {
+      try { await createNotification(empId, inApp); } catch (e) { console.error('[cancelInterview] notify failed', e); }
+    }
+
+    res.json(updated);
+  });
+
+  /**
+   * GET /recruiting/panel-availability
+   * Query: panelUserIds (CSV or repeated), durationMin (default 60),
+   *        fromDate (YYYY-MM-DD, default today), days (default 7),
+   *        dayStartHour (default 9), dayEndHour (default 18), stepMin (default 30)
+   * Opt-in helper: returns upcoming slots where EVERY listed panel member is
+   * free of other (non-cancelled) interviews, so the recruiter can pick a day
+   * the whole panel can attend. Interview-clash only — does not yet factor in
+   * leave / shift rosters.
+   */
+  panelAvailability = asyncHandler(async (req, res) => {
+    const raw = req.query.panelUserIds;
+    const panels: number[] = (Array.isArray(raw) ? raw.flatMap((v) => String(v).split(',')) : String(raw ?? '').split(','))
+      .map((s) => Number(String(s).trim()))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    if (!panels.length) return bad(res, 'panelUserIds is required');
+
+    const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+    const durationMin  = clamp(Number(req.query.durationMin) || 60, 15, 480);
+    const days         = clamp(Number(req.query.days) || 7, 1, 30);
+    const stepMin      = clamp(Number(req.query.stepMin) || 30, 15, 120);
+    const dayStartHour = clamp(Number(req.query.dayStartHour) || 9, 0, 23);
+    const dayEndHour   = clamp(Number(req.query.dayEndHour) || 18, 1, 24);
+    if (dayEndHour <= dayStartHour) return bad(res, 'dayEndHour must be after dayStartHour');
+
+    const rangeStart = req.query.fromDate
+      ? new Date(`${String(req.query.fromDate)}T00:00:00`)
+      : new Date();
+    if (isNaN(rangeStart.getTime())) return bad(res, 'Invalid fromDate');
+    rangeStart.setHours(0, 0, 0, 0);
+    const rangeEnd = new Date(rangeStart);
+    rangeEnd.setDate(rangeEnd.getDate() + days);
+
+    // Pull every non-cancelled interview overlapping the window that involves
+    // any of the requested panel members.
+    const busyRows = await prisma.interview.findMany({
+      where: {
+        cancelledAt: null,
+        startTime: { lt: rangeEnd },
+        endTime:   { gt: rangeStart },
+        OR: [
+          { panel: { some: { employeeId: { in: panels } } } },
+          { panelUserIds: { not: null } }, // legacy CSV fallback, re-checked below
+        ],
+      },
+      select: { startTime: true, endTime: true, panelUserIds: true, panel: { select: { employeeId: true } } },
+    });
+    const busy = busyRows
+      .filter((b) => readInterviewPanelIds(b).some((pid) => panels.includes(pid)))
+      .map((b) => ({ start: b.startTime.getTime(), end: b.endTime.getTime() }));
+
+    const now = Date.now();
+    const slots: { start: string; end: string }[] = [];
+    const MAX_SLOTS = 50;
+
+    outer:
+    for (let d = 0; d < days; d++) {
+      const day = new Date(rangeStart);
+      day.setDate(day.getDate() + d);
+      // Step through the working window in `stepMin` increments (minutes-of-day).
+      for (let m = dayStartHour * 60; m + durationMin <= dayEndHour * 60; m += stepMin) {
+        const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 0, m, 0, 0);
+        const end   = new Date(start.getTime() + durationMin * 60000);
+        if (start.getTime() < now) continue;            // skip past slots
+        const clash = busy.some((iv) => start.getTime() < iv.end && end.getTime() > iv.start);
+        if (!clash) {
+          slots.push({ start: start.toISOString(), end: end.toISOString() });
+          if (slots.length >= MAX_SLOTS) break outer;
+        }
+      }
+    }
+
+    res.json({ durationMin, panelUserIds: panels, count: slots.length, slots });
+  });
+
+  /**
+   * POST /recruiting/interviews/:id/panel-ack  { status: 'AVAILABLE'|'UNAVAILABLE', reason? }
+   * The logged-in panel member confirms availability, or declines with a reason.
+   * A decline notifies HR (and is audit-logged) so recruiters can cancel/reschedule.
+   */
+  panelAck = asyncHandler(async (req, res) => {
+    const interviewId = Number(req.params.id);
+    const { status, reason } = req.body || {};
+    if (!isPanelAckStatus(status) || status === 'PENDING') {
+      return bad(res, "status must be 'AVAILABLE' or 'UNAVAILABLE'");
+    }
+    if (status === 'UNAVAILABLE' && (!reason || !String(reason).trim())) {
+      return bad(res, 'A reason is required when you decline');
+    }
+
+    const empId = Number((req as any).user?.empId ?? (req as any).user?.id ?? (req as any).user?.userId);
+    if (!Number.isFinite(empId) || empId <= 0) return bad(res, 'Authenticated employee not resolved', 401);
+
+    const interview = await prisma.interview.findUnique({
+      where: { id: interviewId },
+      include: {
+        panel: { select: { id: true, employeeId: true } },
+        application: { include: { candidate: { select: { name: true } }, job: { select: { title: true } } } },
+      },
+    });
+    if (!interview) return bad(res, 'Interview not found', 404);
+    if (interview.cancelledAt) return bad(res, 'This interview has been cancelled');
+
+    const myRow = interview.panel.find((p) => p.employeeId === empId);
+    if (!myRow) return bad(res, 'You are not on this interview panel', 403);
+
+    const updated = await prisma.interviewPanelMember.update({
+      where: { id: myRow.id },
+      data: {
+        ackStatus: status,
+        ackReason: status === 'UNAVAILABLE' ? String(reason).trim() : null,
+        ackAt: new Date(),
+      },
+    });
+
+    // Decline → alert HR so they can cancel/reschedule, and leave an audit trail.
+    if (status === 'UNAVAILABLE') {
+      try {
+        const me = await prisma.employee.findUnique({
+          where: { id: empId },
+          select: { firstName: true, lastName: true },
+        });
+        const meName = me ? `${me.firstName} ${me.lastName}`.trim() : `Employee #${empId}`;
+        const when = new Date(interview.startTime).toLocaleString();
+        const msg =
+          `⚠️ ${meName} can't attend the ${interview.stage} interview with ` +
+          `${interview.application.candidate.name} (${interview.application.job.title}) on ${when}. ` +
+          `Reason: ${String(reason).trim()}. Consider rescheduling or cancelling.`;
+        const hr = await prisma.employee.findMany({
+          where: { departmentId: RECRUITING_DEFAULTS.hrDepartmentId, employmentStatus: 'ACTIVE' },
+          select: { id: true },
+        });
+        for (const h of hr) { try { await createNotification(h.id, msg); } catch { /* per-recipient */ } }
+        await logApplicationAction(prisma, interview.applicationId, 'PANEL_DECLINED', {
+          note: `${meName} declined interview #${interviewId}: ${String(reason).trim()}`,
+          performedBy: empId,
+        });
+      } catch (e) {
+        console.error('[panelAck] decline notification failed:', e);
+      }
+    }
+
+    res.json(updated);
+  });
+
+  /**
+   * POST /recruiting/interviews/:id/split-member  { employeeId, startTime, endTime }
+   * Moves ONE panel member out of this interview into their own session (same
+   * round group) at a new time; everyone else stays on the original interview.
+   * Auto-groups the original if it wasn't grouped. Refuses if the member already
+   * submitted feedback, is the sole panellist, or has a clash at the new time.
+   */
+  splitPanelMember = asyncHandler(async (req, res) => {
+    const interviewId = Number(req.params.id);
+    const { employeeId, startTime, endTime } = req.body || {};
+    const empId = Number(employeeId);
+    if (!Number.isFinite(empId) || empId <= 0) return bad(res, 'employeeId is required');
+    if (!startTime || !endTime) return bad(res, 'startTime and endTime are required');
+
+    const start = new Date(startTime), end = new Date(endTime);
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return bad(res, 'Invalid startTime or endTime');
+    if (end <= start) return bad(res, 'endTime must be after startTime');
+    const now = new Date();
+    if (start < new Date(now.getTime() - 5 * 60 * 1000)) return bad(res, 'startTime cannot be in the past');
+    const durationMin = (end.getTime() - start.getTime()) / 60000;
+    if (durationMin < 5) return bad(res, 'Interview must be at least 5 minutes long');
+    if (durationMin > 8 * 60) return bad(res, 'Interview cannot exceed 8 hours');
+
+    const existing = await prisma.interview.findUnique({
+      where: { id: interviewId },
+      include: {
+        panel: { select: { id: true, employeeId: true } },
+        application: { include: { candidate: true, job: true } },
+      },
+    });
+    if (!existing) return bad(res, 'Interview not found', 404);
+    if (existing.cancelledAt) return bad(res, 'Cannot split a cancelled interview');
+
+    const memberRow = existing.panel.find((p) => p.employeeId === empId);
+    if (!memberRow) return bad(res, 'That employee is not on this interview panel');
+    if (existing.panel.length < 2) {
+      return bad(res, 'This member is the only panellist — use Reschedule to move the whole interview instead.');
+    }
+
+    // Feedback guard — moving a member who already evaluated would orphan it.
+    const submitted = await prisma.interviewFeedback.findFirst({
+      where: { interviewId, panelUserId: empId, status: 'SUBMITTED' },
+      select: { id: true },
+    });
+    if (submitted) {
+      return bad(res, 'That member has already submitted feedback — their evaluation would be lost. Keep them on this session.');
+    }
+
+    // Candidate can't be double-booked — the moved member's new slot must not
+    // clash with the candidate's other sessions (including the one that stays).
+    const candBusy = await candidateOverlaps(existing.applicationId, start, end);
+    if (candBusy.length) {
+      return res.status(409).json({
+        warning: true,
+        message: "The candidate is already in a session then — pick a slot that doesn't clash.",
+        conflicts: candidateConflictList(candBusy),
+      });
+    }
+
+    // Overlap check for the member at the new time (exclude this interview + cancelled).
+    const overlapsRaw = await prisma.interview.findMany({
+      where: {
+        id: { not: interviewId },
+        cancelledAt: null,
+        startTime: { lt: end },
+        endTime: { gt: start },
+        OR: [
+          { panel: { some: { employeeId: empId } } },
+          { panelUserIds: { not: null } },
+        ],
+      },
+      select: {
+        startTime: true, endTime: true, panelUserIds: true,
+        panel: { select: { employeeId: true } },
+        application: { select: { candidate: { select: { name: true } }, job: { select: { title: true } } } },
+      },
+    });
+    const overlaps = overlapsRaw.filter((o) => readInterviewPanelIds(o).includes(empId));
+    if (overlaps.length) {
+      const conflicts = overlaps.map((o) => {
+        const s = new Date(o.startTime).toLocaleString(), e = new Date(o.endTime).toLocaleString();
+        return `🕒 Already booked for "${o.application.job.title}" with ${o.application.candidate.name} from ${s} to ${e}`;
+      });
+      return res.status(409).json({ warning: true, message: 'This member already has an interview during that time.', conflicts });
+    }
+
+    const emp = await prisma.employee.findUnique({
+      where: { id: empId },
+      select: { firstName: true, lastName: true, email: true },
+    });
+
+    const created = await prisma.$transaction(async (tx) => {
+      // Anchor a group if the original wasn't grouped yet.
+      let groupId = existing.sessionGroupId;
+      if (!groupId) {
+        await tx.interview.update({ where: { id: interviewId }, data: { sessionGroupId: interviewId } });
+        groupId = interviewId;
+      }
+
+      // Remove the member from the original interview (junction row + legacy CSV).
+      await tx.interviewPanelMember.delete({ where: { id: memberRow.id } });
+      const remaining = existing.panel.filter((p) => p.employeeId !== empId).map((p) => p.employeeId);
+      await tx.interview.update({ where: { id: interviewId }, data: { panelUserIds: remaining.join(',') } });
+
+      // Create the member's own session in the same group.
+      const itv = await tx.interview.create({
+        data: {
+          applicationId: existing.applicationId,
+          stage: existing.stage,
+          startTime: start,
+          endTime: end,
+          sessionGroupId: groupId,
+          panelUserIds: String(empId),
+          panel: { create: [{ employeeId: empId }] },
+        },
+      });
+
+      return itv;
+    }, { maxWait: 10000, timeout: 30000 });
+
+    // Audit AFTER commit (not part of the atomic unit) — a slow remote DB was
+    // pushing the interactive transaction past its timeout and rolling the whole
+    // split back. logApplicationAction swallows its own errors.
+    await logApplicationAction(prisma, existing.applicationId, 'PANEL_MEMBER_RESCHEDULED', {
+      note: `${emp ? `${emp.firstName} ${emp.lastName}`.trim() : `#${empId}`} moved to own session (#${created.id}) on ${start.toLocaleString()}`,
+      performedBy: (req as any).user?.empId ?? null,
+    });
+
+    // Notify the moved member + candidate about the new session (best-effort).
+    const emailArgs = {
+      candidateName: existing.application.candidate.name,
+      jobTitle: existing.application.job.title,
+      stage: existing.stage,
+      startTime: start.toLocaleString(),
+      endTime: end.toLocaleString(),
+      panelNames: emp ? `${emp.firstName} ${emp.lastName}`.trim() : '',
+      hospitalName: config.branding.hospitalName,
+      hospitalAddress: config.branding.hospitalAddress,
+      googleLocationUrl: config.branding.hospitalGoogleMap,
+    };
+    try {
+      if (emp?.email) {
+        await sendInterviewMail({ ...emailArgs, to: emp.email, recipientType: 'PANELIST', recipientName: emailArgs.panelNames });
+      }
+      if (existing.application.candidate.email) {
+        await sendInterviewMail({ ...emailArgs, to: existing.application.candidate.email });
+      }
+    } catch (e) {
+      console.error('[splitPanelMember] email failed:', e);
+    }
+    try {
+      await createNotification(empId, `📅 Your session for the ${existing.stage} interview with ${existing.application.candidate.name} was moved to ${start.toLocaleString()}.`);
+    } catch { /* non-fatal */ }
+
+    res.json(created);
+  });
+
 
   /** PATCH /interviews/:id/feedback  { result, feedbackUrl?, feedbackAt? } */
   recordInterviewFeedback = asyncHandler(async (req, res) => {
@@ -1622,6 +2412,12 @@ export class RecruitingController {
       bcc,
     } = req.body || {};
 
+    // BGV gate override — a senior HR user can knowingly send the offer before
+    // BGV is CLEAR, provided they give a reason. The bypass is logged on the
+    // application audit trail so the decision is traceable.
+    const bgvOverride = !!(req.body || {}).bgvOverride;
+    const bgvOverrideReason = (req.body || {}).bgvOverrideReason as string | undefined;
+
     const offer = await prisma.offer.findUnique({
       where: { id },
       include: {
@@ -1629,6 +2425,7 @@ export class RecruitingController {
           include: {
             candidate: true,
             job: { include: { department: { select: { name: true } } } },
+            bgv: true,
           },
         },
       },
@@ -1636,6 +2433,26 @@ export class RecruitingController {
     if (!offer) return bad(res, 'Offer not found', 404);
     if (!offerNext[offer.status].includes(OfferStatus.SENT)) {
       return bad(res, `Cannot move offer from ${offer.status} → SENT`);
+    }
+
+    // ── BGV gate ──────────────────────────────────────────────────────
+    // The offer letter may only go out once background verification is CLEAR.
+    // Anything else (not started / in progress / flagged / failed) blocks the
+    // send unless a senior HR user overrides with a reason.
+    const bgv = (offer.application as any).bgv;
+    if (!bgv || bgv.status !== 'CLEAR') {
+      const statusLabel = bgv ? bgv.status : 'NOT_INITIATED';
+      if (!bgvOverride) {
+        return bad(
+          res,
+          `Cannot send the offer — background verification is ${statusLabel}. ` +
+          `Complete BGV (status must be CLEAR) first, or pass ` +
+          `{ bgvOverride: true, bgvOverrideReason: '...' } to bypass.`,
+        );
+      }
+      if (!bgvOverrideReason || !bgvOverrideReason.trim()) {
+        return bad(res, 'bgvOverrideReason is required when bypassing the BGV gate');
+      }
     }
 
     // Normalize CC / BCC inputs — accept either a CSV string or an array
@@ -1684,8 +2501,28 @@ export class RecruitingController {
         note: `Offer #${id} sent to ${offer.application.candidate.email}`,
         performedBy: (req as any).user?.id ?? null,
       });
+      // Audit any BGV-gate override so the decision is traceable forever.
+      if ((!bgv || bgv.status !== 'CLEAR') && bgvOverride) {
+        await logApplicationAction(tx, offer.applicationId, 'BGV_GATE_OVERRIDDEN', {
+          note: `Offer sent despite BGV=${bgv ? bgv.status : 'NOT_INITIATED'}. Reason: ${bgvOverrideReason}`,
+          performedBy: (req as any).user?.id ?? null,
+        });
+      }
       return of;
     });
+
+    // Provision a portal login for first-time candidates so they can log in to
+    // view / sign the offer. Only returns a plaintext password the FIRST time;
+    // null if the candidate already has credentials (e.g. from a prior test).
+    let firstTimePassword: string | null = null;
+    try {
+      firstTimePassword = await ensureCandidatePortalCredential(
+        offer.application.candidateId,
+        offer.application.candidate.passwordHash,
+      );
+    } catch (credErr) {
+      console.error('[sendOffer] credential provisioning failed:', credErr);
+    }
 
     // Generate PDF + send email outside the transaction so SMTP latency doesn't
     // hold a DB connection; email failures shouldn't roll back the state change.
@@ -1718,6 +2555,11 @@ export class RecruitingController {
         ctc:            ctcNum,
         joinLocation:   updated.joinLocation,
         pdfBuffer,
+        // First-time login block — only populated when we just created the
+        // candidate's password above (null on repeat sends).
+        loginEmail:        offer.application.candidate.email,
+        firstTimePassword: firstTimePassword,
+        portalUrl:         config.candidatePortalUrl,
       });
     } catch (err: any) {
       console.error('[sendOffer] PDF/email failed:', err);
@@ -1801,6 +2643,61 @@ export class RecruitingController {
     if (!offer) return bad(res, 'Offer not found', 404);
     if (!offerNext[offer.status].includes(OfferStatus.EXPIRED)) return bad(res, `Cannot move offer from ${offer.status} → EXPIRED`);
     const updated = await prisma.offer.update({ where: { id }, data: { status: OfferStatus.EXPIRED } });
+    res.json(updated);
+  });
+
+  /**
+   * POST /offers/:id/revise  { ctc?, joinLocation?, workMode?, customNotes?, proposedJoinAt? }
+   * Offer-negotiation loop: reopen a DECLINED / EXPIRED / WITHDRAWN offer back to
+   * DRAFT with amended terms so HR can re-send it (via POST /offers/:id/send).
+   * The application is moved back to INTERVIEWED so a fresh offer can flow.
+   */
+  reviseOffer = asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    const { ctc, joinLocation, workMode, customNotes, proposedJoinAt } = req.body || {};
+
+    const offer = await prisma.offer.findUnique({ where: { id }, include: { application: true } });
+    if (!offer) return bad(res, 'Offer not found', 404);
+    if (!offerNext[offer.status].includes(OfferStatus.DRAFT)) {
+      return bad(res, `Cannot revise an offer in status ${offer.status} — only DECLINED, EXPIRED or WITHDRAWN offers can be reopened.`);
+    }
+    if (ctc !== undefined && ctc !== null && ctc !== '' && Number.isNaN(Number(ctc))) {
+      return bad(res, 'ctc must be a number');
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const of = await tx.offer.update({
+        where: { id },
+        data: {
+          status: OfferStatus.DRAFT,
+          // Clear the prior lifecycle timestamps — this is a fresh round.
+          sentAt: null,
+          viewedAt: null,
+          signedAt: null,
+          declinedAt: null,
+          declineReason: null,
+          // Apply amended terms when supplied; keep prior values otherwise.
+          ...(ctc !== undefined && ctc !== null && ctc !== '' ? { ctc: Number(ctc) } : {}),
+          ...(joinLocation !== undefined ? { joinLocation } : {}),
+          ...(workMode !== undefined ? { workMode } : {}),
+          ...(customNotes !== undefined ? { customNotes } : {}),
+          ...(proposedJoinAt !== undefined ? { proposedJoinAt: proposedJoinAt ? new Date(proposedJoinAt) : null } : {}),
+        },
+      });
+      // Revive the application so a new offer can be sent.
+      await tx.application.update({
+        where: { id: offer.applicationId },
+        data: { status: ApplicationStatus.INTERVIEWED },
+      });
+      await logApplicationAction(tx, offer.applicationId, 'OFFER_REVISED', {
+        fromStatus: offer.application.status,
+        toStatus: ApplicationStatus.INTERVIEWED,
+        note: `Offer #${id} reopened for revision (was ${offer.status})`,
+        performedBy: (req as any).user?.empId ?? (req as any).user?.id ?? null,
+      });
+      return of;
+    });
+
     res.json(updated);
   });
 
@@ -1977,6 +2874,11 @@ export class RecruitingController {
       // Race-safe code generation inside the SAME transaction
       const employeeCode = await generateEmployeeCode(tx);
 
+      // Best-effort carry-forward of the candidate's free-text experience
+      // ("5 years", "3+ yrs") → integer years. Unparseable → null.
+      const expMatch = String(candidate.experience ?? '').match(/\d+/);
+      const carriedExperience = expMatch ? Number(expMatch[0]) : null;
+
       // 🔹 STEP 1: resolve designation
       const designationName = job.title?.trim() || 'Employee';
 
@@ -2029,12 +2931,88 @@ export class RecruitingController {
           reportingManager: reportingManager ? Number(reportingManager) : null,
           age: age ? Number(age) : null,
           bloodGroup: bloodGroup ? String(bloodGroup) : null,
+          experience: carriedExperience,
         },
 
       });
 
-      return { ...of, employee };
-    });
+      // 3. Create a login User for the new hire so they can access the system
+      //    immediately (password = employeeCode, matching syncUsersFromEmployees).
+      //    Without this, a joined candidate has no way in until a manual sync runs.
+      const roleRow = await tx.role.findUnique({
+        where: { id: employee.roleId },
+        select: { name: true },
+      });
+      let username = `${employee.firstName}.${employee.lastName}`.toLowerCase().replace(/\s+/g, '');
+      let suffix = 1;
+      while (await tx.user.findUnique({ where: { username } })) {
+        username = `${employee.firstName}.${employee.lastName}${suffix}`.toLowerCase().replace(/\s+/g, '');
+        suffix++;
+      }
+      const userPasswordHash = await bcrypt.hash(employeeCode, 10);
+      let user = null as any;
+      if (roleRow) {
+        user = await tx.user.create({
+          data: {
+            employeeCode,
+            username,
+            passwordHash: userPasswordHash,
+            role: roleRow.name,
+          },
+        });
+      } else {
+        console.warn(`[markJoined] role ${employee.roleId} not found — skipping User creation for ${employeeCode}`);
+      }
+
+      // 4. Carry candidate artefacts forward onto the Employee record.
+      //    Resume → Document; address → Address. (Qualification is free-text
+      //    with no structured Employee target, so it is intentionally not copied.)
+      if (candidate.resumeUrl) {
+        await tx.document.create({
+          data: {
+            employeeId: employee.id,
+            title: 'Resume',
+            fileUrl: candidate.resumeUrl,
+            type: 'RESUME',
+            category: 'RECRUITMENT',
+          },
+        });
+      }
+      if (candidate.address && String(candidate.address).trim()) {
+        // Free-text address → line1; structured parts unknown (blank = "not captured").
+        await tx.address.create({
+          data: {
+            employeeId: employee.id,
+            type: 'CURRENT',
+            line1: String(candidate.address).trim(),
+            city: '',
+            state: '',
+            zipCode: '',
+            country: '',
+          },
+        });
+      }
+
+      return { ...of, employee, user, username, tempPassword: employeeCode };
+    }, { maxWait: 10000, timeout: 30000 });
+
+    // Welcome email with login credentials — best-effort, outside the txn.
+    if (updated.employee?.email && updated.username) {
+      try {
+        await sendJoiningWelcomeMail({
+          to: updated.employee.email,
+          employeeName: `${updated.employee.firstName} ${updated.employee.lastName}`.trim(),
+          jobTitle: offer.application.job.title,
+          username: updated.username,
+          tempPassword: updated.tempPassword,
+          dateOfJoining: updated.employee.dateOfJoining,
+          companyName: config.branding.companyName || config.branding.hospitalName || undefined,
+          portalUrl: config.candidatePortalUrl,
+        });
+      } catch (mailErr) {
+        console.error('[markJoined] welcome email failed:', mailErr);
+      }
+    }
 
     res.json(updated);
   });
@@ -2683,6 +3661,91 @@ export async function expireStaleOffers(): Promise<{ expired: number }> {
   return { expired: result.count };
 }
 
+/**
+ * Remind panel members who still owe interview feedback past its due date.
+ * An interview is "chaseable" when it has already happened (startTime in the
+ * past), is not cancelled, and has a feedbackDue that has elapsed. For each,
+ * we notify every panel member who has NOT submitted (status !== SUBMITTED).
+ * Idempotent to run daily — it keeps nudging until feedback lands.
+ */
+export async function remindOverdueInterviewFeedback(): Promise<{ interviews: number; reminders: number }> {
+  const now = new Date();
+  const overdue = await prisma.interview.findMany({
+    where: {
+      cancelledAt: null,
+      startTime: { lt: now },
+      feedbackDue: { not: null, lt: now },
+    },
+    include: {
+      panel: { select: { employeeId: true } },
+      InterviewFeedback: { select: { panelUserId: true, status: true } },
+      application: {
+        include: {
+          candidate: { select: { name: true } },
+          job: { select: { title: true } },
+        },
+      },
+    },
+  });
+
+  let reminders = 0;
+  let interviewsWithPending = 0;
+
+  for (const itv of overdue) {
+    const submitted = new Set(
+      itv.InterviewFeedback
+        .filter((f) => f.status === 'SUBMITTED')
+        .map((f) => f.panelUserId),
+    );
+    const pendingPanelists = itv.panel
+      .map((p) => p.employeeId)
+      .filter((empId) => !submitted.has(empId));
+
+    if (!pendingPanelists.length) continue;
+    interviewsWithPending++;
+
+    const employees = await prisma.employee.findMany({
+      where: { id: { in: pendingPanelists } },
+      select: { id: true, firstName: true, lastName: true, email: true },
+    });
+
+    const when = new Date(itv.startTime).toLocaleString();
+    const inApp =
+      `⏰ Feedback overdue: please submit your evaluation for the ${itv.stage} interview ` +
+      `with ${itv.application.candidate.name} (${itv.application.job.title}) held on ${when}.`;
+
+    for (const emp of employees) {
+      try {
+        await createNotification(emp.id, inApp);
+        reminders++;
+      } catch (e) {
+        console.error(`[remindOverdueInterviewFeedback] notify failed for emp ${emp.id}:`, e);
+      }
+      if (emp.email) {
+        try {
+          await transporter.sendMail({
+            from: config.smtp.from,
+            to: emp.email,
+            subject: `Interview feedback overdue – ${itv.application.job.title}`,
+            text:
+              `Hi ${emp.firstName} ${emp.lastName},\n\n` +
+              `Your feedback for the ${itv.stage} interview with ${itv.application.candidate.name} ` +
+              `(${itv.application.job.title}) held on ${when} is overdue.\n\n` +
+              `Please log in and submit your evaluation.\n\nRegards,\nHR Team`,
+          });
+        } catch (e) {
+          console.error(`[remindOverdueInterviewFeedback] email failed for emp ${emp.id}:`, e);
+        }
+      }
+    }
+  }
+
+  if (reminders > 0) {
+    console.log(`[remindOverdueInterviewFeedback] ${interviewsWithPending} interview(s), ${reminders} reminder(s)`);
+  }
+  return { interviews: interviewsWithPending, reminders };
+}
+
 // ───────────────────────────────────────────────────────────────────
 // Recruitment: Consent / References / BGV / Referral-bonus exports
 // ───────────────────────────────────────────────────────────────────
@@ -3251,6 +4314,17 @@ export const listInterviews = asyncHandler(async (req, res) => {
       take: pageSize,
       orderBy: [{ startTime: "desc" }, { id: "desc" }],
       include: {
+        // Structured panel members — lets the reschedule UI prefill / keep the
+        // panel and drives the availability check + shows each member's ack.
+        panel: {
+          select: {
+            employeeId: true,
+            ackStatus: true,
+            ackReason: true,
+            ackAt: true,
+            employee: { select: { firstName: true, lastName: true } },
+          },
+        },
         application: {
           select: {
             id: true,
@@ -3344,7 +4418,7 @@ export const listEmployeeInterviews = asyncHandler(async (req, res) => {
     },
     orderBy: [{ startTime: 'desc' }, { id: 'desc' }],
     include: {
-      panel: { select: { employeeId: true } },
+      panel: { select: { employeeId: true, ackStatus: true, ackReason: true, ackAt: true } },
       application: {
         select: {
           id: true,
@@ -3602,6 +4676,120 @@ ${credsHtml}
 }
 
 /**
+ * Welcome / onboarding email sent to a newly-joined hire when mark-joined
+ * creates their Employee + login. Carries the first-time credentials.
+ */
+export async function sendJoiningWelcomeMail(props: {
+  to: string;
+  employeeName: string;
+  jobTitle: string;
+  username: string;
+  tempPassword: string;
+  dateOfJoining?: Date | null;
+  companyName?: string;
+  portalUrl?: string;
+}) {
+  const { to, employeeName, jobTitle, username, tempPassword, dateOfJoining, companyName, portalUrl } = props;
+  const dojStr = dateOfJoining
+    ? new Date(dateOfJoining).toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' })
+    : 'your confirmed joining date';
+  const org = companyName || 'the team';
+
+  const text = `
+Dear ${employeeName},
+
+Welcome to ${org}! We're delighted to have you join us as ${jobTitle}.
+Your date of joining is ${dojStr}.
+
+Your login (please change the password after first sign-in):
+  Username: ${username}
+  Password: ${tempPassword}
+${portalUrl ? `\nPortal: ${portalUrl}\n` : ''}
+If you have any questions before your start date, please reach out to HR.
+
+Warm regards,
+${companyName ? `${companyName} — HR Team` : 'HR Team'}
+`;
+
+  const html = `
+<h2 style="color:#1f3a93;">Welcome aboard 🎉</h2>
+<p>Dear <b>${employeeName}</b>,</p>
+<p>Welcome to <b>${org}</b>! We're delighted to have you join us as
+<b>${jobTitle}</b>. Your date of joining is <b>${dojStr}</b>.</p>
+<h3>🔐 Your Login</h3>
+<ul>
+  <li><b>Username:</b> ${username}</li>
+  <li><b>Password:</b> ${tempPassword}</li>
+</ul>
+<p><i>Please change your password after your first sign-in.</i></p>
+${portalUrl ? `<p><a href="${portalUrl}" target="_blank">Open the portal</a></p>` : ''}
+<p>If you have any questions before your start date, please reach out to HR.</p>
+<br>
+<p>Warm regards,<br>${companyName ? `${companyName} — HR Team` : 'HR Team'}</p>
+`;
+
+  await transporter.sendMail({
+    from: config.smtp.from,
+    to,
+    subject: `Welcome to ${org} – ${jobTitle}`,
+    text,
+    html,
+  });
+}
+
+/**
+ * Polite rejection email to a candidate whose application was moved to
+ * REJECTED. Deliberately does not disclose the internal reject reason.
+ */
+export async function sendApplicationRejectionMail(props: {
+  to: string;
+  candidateName: string;
+  jobTitle: string;
+  companyName?: string;
+}) {
+  const { to, candidateName, jobTitle, companyName } = props;
+  const from = companyName ? `the ${companyName} team` : "the hiring team";
+
+  const text = `
+Dear ${candidateName},
+
+Thank you for your interest in the ${jobTitle} position and for the time you
+invested in the process.
+
+After careful consideration, we have decided not to move forward with your
+application at this time. This decision was not easy, and it does not diminish
+your skills and experience.
+
+We will keep your details on file and encourage you to apply for future
+openings that match your profile. We wish you all the best in your search.
+
+Warm regards,
+${companyName ? `${companyName} — HR Team` : "HR Team"}
+`;
+
+  const html = `
+<p>Dear <b>${candidateName}</b>,</p>
+<p>Thank you for your interest in the <b>${jobTitle}</b> position and for the
+time you invested in the process.</p>
+<p>After careful consideration, we have decided not to move forward with your
+application at this time. This decision was not easy, and it does not diminish
+your skills and experience.</p>
+<p>We will keep your details on file and encourage you to apply for future
+openings that match your profile. We wish you all the best in your search.</p>
+<br>
+<p>Warm regards,<br>${companyName ? `${companyName} — HR Team` : "HR Team"}</p>
+`;
+
+  await transporter.sendMail({
+    from: config.smtp.from,
+    to,
+    subject: `Update on your application – ${jobTitle}`,
+    text,
+    html,
+  });
+}
+
+/**
  * Send the generated offer letter PDF to the candidate (with optional
  * CC / BCC recipients). The PDF buffer is attached as `Offer-Letter-<name>.pdf`.
  *
@@ -3620,11 +4808,39 @@ export async function sendOfferLetterMail(props: {
   joinLocation?: string | null;
   pdfBuffer: Buffer;
   filename?: string;
+  // Optional first-time portal login — sent only when the candidate had no
+  // password yet (so an offer-only candidate can log in to sign).
+  loginEmail?: string;
+  firstTimePassword?: string | null;
+  portalUrl?: string;
 }) {
   const {
     to, cc, bcc, candidateName, jobTitle,
     proposedJoinAt, ctc, joinLocation, pdfBuffer, filename,
+    loginEmail, firstTimePassword, portalUrl,
   } = props;
+
+  // Portal-login blocks — rendered only for first-time candidates.
+  const credentialsText = firstTimePassword
+    ? `
+Your candidate portal login (please change after first login):
+  Email:    ${loginEmail}
+  Password: ${firstTimePassword}
+
+Portal: ${portalUrl || '[contact HR for the link]'}
+`
+    : "";
+  const credentialsHtml = firstTimePassword
+    ? `
+<h3 style="color:#1f3a93;">🔐 Candidate Portal Login</h3>
+<ul>
+  <li><b>Email:</b> ${loginEmail}</li>
+  <li><b>Password:</b> ${firstTimePassword}</li>
+</ul>
+<p><i>This is a one-time password — please change it after your first login.</i></p>
+${portalUrl ? `<p><a href="${portalUrl}" target="_blank">Open candidate portal</a></p>` : ""}
+`
+    : "";
 
   const joinStr = proposedJoinAt
     ? new Date(proposedJoinAt).toLocaleDateString("en-IN", {
@@ -3644,7 +4860,7 @@ Dear ${candidateName},
 Congratulations! We are pleased to extend an offer for the position of ${jobTitle}.
 
 Proposed join date: ${joinStr}${joinLocation ? `\nJoining location: ${joinLocation}` : ""}${ctcStr ? `\nAnnual CTC: ${ctcStr}` : ""}
-
+${credentialsText}
 Please find your detailed offer letter attached. Kindly review it and confirm
 your acceptance through the candidate portal at the earliest.
 
@@ -3665,6 +4881,8 @@ HR Team
   ${joinLocation ? `<tr><td style="padding:4px 12px 4px 0;"><b>Joining location:</b></td><td>${joinLocation}</td></tr>` : ""}
   ${ctcStr ? `<tr><td style="padding:4px 12px 4px 0;"><b>Annual CTC:</b></td><td>${ctcStr}</td></tr>` : ""}
 </table>
+
+${credentialsHtml}
 
 <p>Please find your detailed offer letter attached as a PDF. Kindly review it
 and confirm your acceptance through the candidate portal at the earliest.</p>
