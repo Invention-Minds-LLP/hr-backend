@@ -100,6 +100,17 @@ export const config = {
   appPublicUrl: optional("APP_PUBLIC_URL"),
   publicBaseUrl: optional("PUBLIC_BASE_URL"),
   candidatePortalUrl: optional("CANDIDATE_PORTAL_URL"),
+
+  // ── Google Calendar / Meet (auto-generate video links for online interviews)
+  // Requires a Workspace service account with domain-wide delegation + the
+  // Calendar API. `impersonate` is the Workspace user the events are created as.
+  // When keyFile + impersonate are unset, online interviews fall back to a
+  // manually-entered meeting link.
+  googleCalendar: {
+    keyFile: optional("GOOGLE_CALENDAR_KEY_FILE"),
+    impersonate: optional("GOOGLE_CALENDAR_IMPERSONATE"),
+    calendarId: optional("GOOGLE_CALENDAR_ID") || "primary",
+  },
   // Directory on the server's disk where uploaded files are stored. Empty =
   // <cwd>/uploads (see src/lib/fileStorage.ts). In Docker set to the mounted
   // volume path, e.g. /usr/src/app/uploads.
@@ -132,6 +143,19 @@ export const config = {
   // ── Auth / DB ─────────────────────────────────────────────────────────────
   jwtSecret: required("JWT_SECRET"),
   databaseUrl: required("DATABASE_URL"),
+
+  // Web session (browser) settings. The access token is short-lived and lives
+  // only in the SPA's memory; the long-lived refresh token lives in an httpOnly
+  // cookie and is mirrored (hashed) in the RefreshToken table so the server —
+  // not the browser — decides whether a session is still alive.
+  // COOKIE_DOMAIN is only needed when the API and the SPA sit on different
+  // sub-domains of the same site (e.g. api.example.com + app.example.com);
+  // leave it unset otherwise and the cookie stays host-only.
+  auth: {
+    accessTtl: optional("ACCESS_TTL", "15m"),
+    refreshTtlDays: int("REFRESH_TTL_DAYS", 7),
+    cookieDomain: optional("COOKIE_DOMAIN"),
+  },
 
   // ── SMTP (email / OTP) ────────────────────────────────────────────────────
   // host/port/secure were hardcoded to Gmail in sendEmailOtp.ts. Surfaced here
@@ -231,6 +255,11 @@ export const config = {
   // ── Leave ─────────────────────────────────────────────────────────────────
   leave: {
     balanceStartMode: optional("LEAVE_BALANCE_START_MODE"),
+    // One-time EL credit when an employee completes 1 year of service.
+    // Only anniversaries falling on or after this date (YYYY-MM-DD) are
+    // credited — anything earlier was settled manually before go-live.
+    // Unset = feature off, nothing is written.
+    elAnniversaryCreditFrom: optional("EL_ANNIVERSARY_CREDIT_FROM"),
   },
 
   // ── Management dashboard "attention" thresholds ───────────────────────────
@@ -296,6 +325,14 @@ export const config = {
     // "whatsapp" (IM — uses config.whatsapp.* + otpTemplateId) or
     // "sms" (JMRH — uses config.sms.*). Default "sms".
     otpChannel: optional("OTP_CHANNEL", "sms"),
+    // Pull active loan EMIs into the payroll run as a deduction, and settle the
+    // repayment when the run is published. Default on; a client that recovers
+    // loans outside payroll sets PAYROLL_LOAN_RECOVERY=false.
+    payrollLoanRecovery: bool("PAYROLL_LOAN_RECOVERY", true),
+    // Pay approved incentives through payroll and mark them PAID on publish.
+    // Default on; set PAYROLL_INCENTIVE_PAYOUT=false where incentives are paid
+    // separately from salary.
+    payrollIncentivePayout: bool("PAYROLL_INCENTIVE_PAYOUT", true),
     // Skip the phone-OTP step in mobile login. When true (IM), the flow goes
     // phone → identity confirmation → email OTP, with no phone OTP sent.
     // Default false (JMRH keeps phone OTP).

@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { getEmployeeAccess } from "../lib/employeeAccess";
+import { resolvePermissions } from "../lib/permissionResolver";
 import { config } from "../config";
 
 const JWT_SECRET = config.jwtSecret;
@@ -40,9 +41,18 @@ export const authenticateToken = async (
   let decoded: any;
   try {
     decoded = jwt.verify(token, JWT_SECRET);
-  } catch (error) {
+  } catch (error: any) {
+    // 401, never 403. The client contract is strict:
+    //   401 = the session is dead → try a silent refresh, then log out.
+    //   403 = authenticated but not allowed here → keep the session.
+    // Access tokens are short-lived now, so an expired one is the NORMAL case
+    // and must not tear down a perfectly good session.
     console.error("JWT verification failed:", error);
-    res.status(403).json({ message: "Forbidden: Invalid token" });
+    const expired = error?.name === "TokenExpiredError";
+    res.status(401).json({
+      message: expired ? "Session expired. Please log in again." : "Unauthorized: Invalid token",
+      code: expired ? "TOKEN_EXPIRED" : "TOKEN_INVALID",
+    });
     return;
   }
 
@@ -52,13 +62,17 @@ export const authenticateToken = async (
   if (empId > 0) {
     try {
       const access = await getEmployeeAccess(empId);
+      // 401, not 403: these are session-terminating conditions, and the client
+      // only tears a session down on 401 (403 is reserved for "you're logged
+      // in but this route isn't yours" — see requireRole below).
       if (!access.exists) {
-        res.status(403).json({ message: "Forbidden: account not found" });
+        res.status(401).json({ message: "Unauthorized: account not found", code: "ACCOUNT_MISSING" });
         return;
       }
       if (!access.active) {
-        res.status(403).json({
-          message: `Forbidden: account is ${access.status?.toLowerCase() ?? 'inactive'}`,
+        res.status(401).json({
+          message: `Your account is ${access.status?.toLowerCase() ?? 'inactive'}. Please contact HR.`,
+          code: "ACCOUNT_INACTIVE",
         });
         return;
       }
@@ -67,7 +81,7 @@ export const authenticateToken = async (
       if (access.accessRevokedAt && typeof decoded.iat === 'number') {
         const tokenIssuedMs = decoded.iat * 1000;
         if (tokenIssuedMs < access.accessRevokedAt.getTime()) {
-          res.status(401).json({ message: "Session expired. Please log in again." });
+          res.status(401).json({ message: "Session expired. Please log in again.", code: "ACCESS_REVOKED" });
           return;
         }
       }
@@ -109,6 +123,38 @@ export const requireRole = (allowed: (string | number)[]) => {
       return next();
     }
     return res.status(403).json({ message: "Forbidden: insufficient role" });
+  };
+};
+
+/**
+ * Permission-based guard. Use AFTER `authenticateToken`.
+ *
+ * Prefer this over `requireRole` for anything new: role checks hardcode WHO,
+ * permission checks state WHAT, and the WHO is editable from the Role
+ * Permissions screen without a deploy.
+ *
+ *   router.get('/payroll', authenticateToken,
+ *     requirePermission('admin.payroll.view'), handler);
+ *
+ * Passing several keys means any-of.
+ */
+export const requirePermission = (...required: string[]) => {
+  return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    const empId = Number(req.user?.empId ?? 0);
+    if (!empId) {
+      // Candidate tokens have no Employee row, so no permissions to hold.
+      return res.status(403).json({ message: "Forbidden: insufficient permission" });
+    }
+    try {
+      const held = await resolvePermissions(empId);
+      if (required.some((key) => held.includes(key as any))) return next();
+      return res.status(403).json({ message: "Forbidden: insufficient permission" });
+    } catch (e) {
+      // Unlike the access check above, fail CLOSED — this guard is the whole
+      // reason the route is protected.
+      console.error("[auth] permission check failed:", e);
+      return res.status(500).json({ message: "Permission check failed" });
+    }
   };
 };
 

@@ -4,6 +4,9 @@ import { Request, Response } from "express";
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
 import { getEmployeeAccess } from "../../lib/employeeAccess";
+import jwt from "jsonwebtoken";
+import { config } from "../../config";
+import type { AuthenticatedRequest } from "../../middleware/authMiddleware";
 
 // --- SSE Client list (for live updates) ---
 let clients: Client[] = [];
@@ -13,26 +16,79 @@ interface Client {
   res: Response;
 }
 
+/** How long a stream ticket is usable. Long enough to open the EventSource
+ *  immediately after fetching it, short enough that a ticket leaked via a
+ *  proxy/access log is worthless by the time anyone reads it. */
+const STREAM_TICKET_TTL_SECONDS = 60;
+
+/**
+ * Mint a one-minute ticket authorising an SSE subscription.
+ *
+ * EventSource cannot send request headers, so the stream itself can't carry a
+ * Bearer token — which is why it used to trust `?employeeId=` and let anyone
+ * subscribe to anyone. Instead the client calls THIS endpoint (a normal
+ * authenticated request), and puts the resulting short-lived ticket in the
+ * stream URL. The subscriber's identity is signed into the ticket, so the
+ * query string is no longer trusted for anything.
+ */
+export const issueStreamTicket = (req: AuthenticatedRequest, res: Response) => {
+  const empId = Number(req.user?.empId ?? 0);
+  if (!empId) {
+    return res.status(403).json({ message: "Forbidden: no employee on this session" });
+  }
+
+  const ticket = jwt.sign({ empId, purpose: "sse" }, config.jwtSecret, {
+    expiresIn: STREAM_TICKET_TTL_SECONDS,
+  });
+  return res.json({ ticket, expiresIn: STREAM_TICKET_TTL_SECONDS });
+};
+
 /**
  * Server-Sent Events registration endpoint.
  * Clients connect here to receive real-time notifications.
+ *
+ * Authorised by the ticket from `issueStreamTicket` — never by the query
+ * string. Note the ticket is validated once, at connect time: a stream already
+ * open when an employee is deactivated survives until the client disconnects
+ * (their next reconnect can't get a ticket, since that path is authenticated).
  */
 export const registerForNotifications = (req: Request, res: Response): void => {
+  // Reject BEFORE flushing SSE headers so the client sees a real HTTP status
+  // (EventSource fires onerror) instead of a 200 stream carrying an error event.
+  const rawTicket = String(req.query.ticket || "");
+  if (!rawTicket) {
+    res.status(401).json({ message: "Unauthorized: stream ticket required" });
+    return;
+  }
+
+  let employeeId: number;
+  try {
+    const payload = jwt.verify(rawTicket, config.jwtSecret) as any;
+    if (payload?.purpose !== "sse") {
+      // Refuse anything that isn't a purpose-built ticket — in particular a
+      // full access token, which must never become a URL parameter.
+      res.status(401).json({ message: "Unauthorized: invalid stream ticket" });
+      return;
+    }
+    employeeId = Number(payload.empId ?? 0);
+  } catch {
+    res.status(401).json({ message: "Unauthorized: expired or invalid stream ticket" });
+    return;
+  }
+
+  if (!employeeId) {
+    res.status(401).json({ message: "Unauthorized: invalid stream ticket" });
+    return;
+  }
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Credentials", "true");
+  // CORS is handled by the global allowlist in index.ts. This used to hand-set
+  // `Access-Control-Allow-Origin: *`, which overrode that allowlist and let any
+  // site on the internet open the stream.
 
   res.flushHeaders();
-
-  // Extract employeeId from query params (required)
-  const employeeId = Number(req.query.employeeId);
-  if (!employeeId) {
-    res.write(`event: error\ndata: "Missing employeeId"\n\n`);
-    res.end();
-    return;
-  }
 
   // Add client to the active list
   clients.push({ employeeId, res });
@@ -182,10 +238,17 @@ export const deleteNotification = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to delete notification" });
   }
 };
-export const saveDeviceToken = async (req: Request, res: Response) => {
-  const { employeeId, token, platform } = req.body;
+export const saveDeviceToken = async (req: AuthenticatedRequest, res: Response) => {
+  const { token, platform } = req.body;
 
-  if (!employeeId || !token) {
+  // Identity comes from the session, never the body. Previously this was an
+  // unauthenticated upsert keyed on `token`, so anyone could re-point an
+  // existing device token at a different employeeId and hijack their push feed.
+  const employeeId = Number(req.user?.empId ?? 0);
+  if (!employeeId) {
+    return res.status(403).json({ error: 'Forbidden: no employee on this session' });
+  }
+  if (!token) {
     return res.status(400).json({ error: 'Missing data' });
   }
 

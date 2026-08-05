@@ -3076,11 +3076,257 @@ export async function insertLedgerTx(
     },
   });
 }
+/**
+ * IST calendar parts of a stored timestamp.
+ *
+ * dateOfJoining is written two different ways in this DB: IST midnight saved as
+ * UTC (2025-03-31T18:30:00Z is really 1-Apr-2025) and plain UTC midnight
+ * (2026-02-10T00:00:00Z). Shifting by +5:30 and reading UTC parts yields the
+ * intended calendar date for both, without depending on the server timezone.
+ */
+function istParts(d: Date) {
+  const shifted = new Date(d.getTime() + 330 * 60 * 1000);
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1, // 1-12
+    day: shifted.getUTCDate(),
+  };
+}
+
+/** UTC-midnight Date for an IST calendar date — safe to compare across zones. */
+function utcDateOf(year: number, month: number, day: number) {
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+/**
+ * Calendar months from `from` to `to` inclusive, walked in financial-year order
+ * (April → March). Returns just [from] when the two are the same month, and
+ * stops at March if `to` sits outside the FY.
+ */
+function fyMonthsBetween(from: number, to: number): number[] {
+  const idx = (m: number) => (m >= 4 ? m - 4 : m + 8); // April = 0 ... March = 11
+  const start = idx(from);
+  const end = Math.max(start, Math.min(idx(to), 11));
+  const months: number[] = [];
+  for (let i = start; i <= end; i++) months.push(i < 9 ? i + 4 : i - 8);
+  return months;
+}
+
+/**
+ * One-time EL credit on completion of 1 year of service.
+ *
+ * The monthly accrual only starts once an employee has completed a year
+ * (runELAccrual filters on dateOfJoining <= oneYearAgo), so the first year of
+ * service currently earns nothing at all. This credits that first year in one
+ * shot on the joining anniversary — accrualRate * 12, i.e. 18 days at the
+ * current 1.5/month policy. The value is derived so it tracks the policy rate
+ * instead of hardcoding 18.
+ *
+ * Scope is bounded by EL_ANNIVERSARY_CREDIT_FROM: only anniversaries on or
+ * after that date are credited. Unset = feature off. Because the window is
+ * "cutoff .. today" rather than "this month", the same call both backfills
+ * anyone missed since the cutoff and handles everyone going forward — running
+ * it from the monthly cron is self-healing.
+ *
+ * Idempotent per (employee, EL, FY) via a YEARLY LeaveAccrual row. Note the
+ * @@unique([employeeId, leaveTypeId, year, month]) index cannot enforce this on
+ * its own — MySQL treats NULL months as distinct — so the findFirst guard below
+ * is the real protection.
+ */
+export async function creditELAnniversary(overrideToday?: Date) {
+  const cutoffRaw = config.leave.elAnniversaryCreditFrom;
+  if (!cutoffRaw) return { disabled: true as const, reason: "EL_ANNIVERSARY_CREDIT_FROM not set" };
+
+  const cutoff = new Date(`${cutoffRaw}T00:00:00Z`);
+  if (isNaN(cutoff.getTime())) {
+    return { error: `Invalid EL_ANNIVERSARY_CREDIT_FROM: "${cutoffRaw}" (expected YYYY-MM-DD)` };
+  }
+
+  const now = overrideToday ?? new Date();
+  const nowIst = istParts(now);
+  const todayUtc = utcDateOf(nowIst.year, nowIst.month, nowIst.day);
+
+  const el = await prisma.leaveType.findFirst({ where: { name: "EL" }, select: { id: true } });
+  if (!el) return { error: "EL leave type not found" };
+
+  const policy = await getActivePolicy(el.id, now);
+  if (!policy) return { error: "No active EL policy found" };
+
+  const monthlyRate = Number(policy.accrualRate ?? 0);
+  if (!monthlyRate) return { error: "EL accrual rate is 0" };
+
+  const creditDays = monthlyRate * 12;
+  const maxBalance = policy.maxBalance ?? null;
+  const currentFY = getFinancialYear(now);
+
+  // Coarse DB filter on DOJ (anniversary window shifted back a year, padded a
+  // day either side to absorb the storage-format skew). The exact test is the
+  // IST comparison below.
+  const dojFrom = new Date(cutoff);
+  dojFrom.setUTCFullYear(dojFrom.getUTCFullYear() - 1);
+  dojFrom.setUTCDate(dojFrom.getUTCDate() - 1);
+  const dojTo = new Date(todayUtc);
+  dojTo.setUTCFullYear(dojTo.getUTCFullYear() - 1);
+  dojTo.setUTCDate(dojTo.getUTCDate() + 1);
+
+  const candidates = await prisma.employee.findMany({
+    where: {
+      employmentStatus: "ACTIVE",
+      dateOfJoining: { gte: dojFrom, lte: dojTo },
+      // Drop anyone already credited at the query, not per-employee: this runs
+      // daily, and without it every past recipient would cost a transaction on
+      // every run. The in-transaction guard below stays as the race protection.
+      leaveAccruals: { none: { leaveTypeId: el.id, accrualType: "YEARLY" } },
+    },
+    select: { id: true, employeeCode: true, dateOfJoining: true },
+    orderBy: { id: "asc" },
+  });
+
+  let credited = 0, skipped = 0;
+  const cappedEmployees: string[] = [];
+  const closedFYEmployees: string[] = [];
+  const errors: string[] = [];
+
+  for (const emp of candidates) {
+    try {
+      const doj = istParts(emp.dateOfJoining);
+      const anniversary = utcDateOf(doj.year + 1, doj.month, doj.day);
+
+      // Exact window test — the DB filter above is deliberately loose.
+      if (anniversary < cutoff || anniversary > todayUtc) continue;
+
+      // FY of the anniversary, computed from IST parts so it can't drift with
+      // the server timezone the way a Date-getter based check would.
+      const fyYear = doj.month >= 4 ? doj.year + 1 : doj.year;
+      if (fyYear < currentFY) {
+        closedFYEmployees.push(emp.employeeCode ?? String(emp.id));
+        continue;
+      }
+
+      let didCredit = false;
+
+      await prisma.$transaction(async (tx) => {
+        // Idempotency — this credit happens once per employee ever, not once
+        // per FY, so the guard is deliberately not year-scoped (and matches the
+        // query filter above).
+        const already = await tx.leaveAccrual.findFirst({
+          where: { employeeId: emp.id, leaveTypeId: el.id, accrualType: "YEARLY" },
+          select: { id: true },
+        });
+        if (already) { skipped++; return; }
+
+        const prevBalance = await getLastLedgerBalanceTx(tx, emp.id, el.id, fyYear);
+
+        // Deliberately skip rather than auto-encash the excess: the monthly
+        // path converts anything over maxBalance into a payout (see below),
+        // which must not happen unattended on a bulk credit.
+        if (maxBalance != null && prevBalance + creditDays > maxBalance) {
+          cappedEmployees.push(emp.employeeCode ?? String(emp.id));
+          skipped++;
+          return;
+        }
+
+        const bal = await tx.employeeLeaveBalance.upsert({
+          where: {
+            employeeId_leaveTypeId_year: { employeeId: emp.id, leaveTypeId: el.id, year: fyYear },
+          },
+          update: {},
+          create: {
+            employeeId: emp.id,
+            leaveTypeId: el.id,
+            category: "LEAVE",
+            year: fyYear,
+            totalAllowed: 0,
+            used: 0,
+            halfDayUsed: 0,
+          },
+        });
+
+        await tx.leaveAccrual.create({
+          data: {
+            employeeId: emp.id,
+            leaveTypeId: el.id,
+            year: fyYear,
+            month: null,
+            accrualType: "YEARLY",
+            daysCredited: creditDays,
+            remarks: "EL credit on completion of 1 year",
+          },
+        });
+
+        await tx.employeeLeaveBalance.update({
+          where: { id: bal.id },
+          data: { totalAllowed: { increment: creditDays } },
+        });
+
+        await insertLedgerTx(tx, {
+          employeeId: emp.id,
+          leaveTypeId: el.id,
+          year: fyYear,
+          month: doj.month,
+          credit: creditDays,
+          debit: 0,
+          balanceAfter: prevBalance + creditDays,
+          action: "CREDIT",
+          referenceType: "ACCRUAL",
+          source: "SYSTEM",
+          remarks: `EL credited on completion of 1 year (${anniversary.toISOString().slice(0, 10)})`,
+        });
+
+        credited++;
+        didCredit = true;
+      }, { timeout: 15000 });
+
+      // Summaries outside the transaction — same pattern as the monthly accrual.
+      // The credit is posted in the ANNIVERSARY month, which on a backfill is
+      // months in the past, so every later month in the FY has to be rebuilt
+      // too — each takes its opening from the previous month's closing and
+      // would otherwise keep a stale figure. On the normal cron path the
+      // anniversary month is the current month and this is a single rebuild.
+      if (didCredit) {
+        for (const m of fyMonthsBetween(doj.month, nowIst.month)) {
+          await rebuildMonthlySummaryTx(prisma, emp.id, el.id, fyYear, m);
+        }
+        await rebuildYearlySummaryTx(prisma, emp.id, el.id, fyYear);
+      }
+    } catch (err: any) {
+      errors.push(`emp ${emp.id}: ${err?.message ?? "unknown"}`);
+    }
+  }
+
+  console.log(
+    `✅ EL anniversary credit (from ${cutoffRaw}): credited=${credited}, skipped=${skipped}, ` +
+    `capped=${cappedEmployees.length}, closedFY=${closedFYEmployees.length}, errors=${errors.length}`
+  );
+  if (cappedEmployees.length) {
+    console.warn(`⚠️ EL anniversary credit skipped (would exceed max balance ${maxBalance}):`, cappedEmployees.join(", "));
+  }
+  if (closedFYEmployees.length) {
+    console.warn("⚠️ EL anniversary credit skipped (anniversary falls in a closed FY):", closedFYEmployees.join(", "));
+  }
+
+  return {
+    cutoff: cutoffRaw,
+    creditDays,
+    candidates: candidates.length,
+    credited,
+    skipped,
+    capped: cappedEmployees,
+    closedFY: closedFYEmployees,
+    errors,
+  };
+}
+
 // ── Core EL accrual logic — called by cron AND manual trigger ──────────────
 async function runELAccrual(overrideYear?: number, overrideMonth?: number) {
   const today = atStartOfDay(new Date());
   const year = overrideYear ?? getFinancialYear(today);
   const month = overrideMonth ?? (today.getMonth() + 1);
+
+  // 1-year completion credit runs first so it lands ahead of this month's 1.5
+  // in the ledger. Skipped when re-running a specific past month, since the
+  // anniversary window is driven by today's date, not the target month.
+  const anniversary = overrideMonth === undefined ? await creditELAnniversary() : null;
 
   // 1️⃣ EL Leave Type
   const el = await prisma.leaveType.findFirst({
@@ -3260,7 +3506,7 @@ async function runELAccrual(overrideYear?: number, overrideMonth?: number) {
   }
 
   console.log(`✅ EL accrual done for ${year}-${month}: credited=${credited}, skipped=${skipped}`);
-  return { year, month, totalEmployees: employees.length, credited, skipped, errors };
+  return { year, month, totalEmployees: employees.length, credited, skipped, errors, anniversary };
 }
 
 // ── Manual trigger endpoint ────────────────────────────────────────────────
@@ -3283,6 +3529,22 @@ export const initELAccrualCron = () => {
       await runELAccrual();
     } catch (e) {
       console.error("EL CRON ERROR:", e);
+    }
+  });
+};
+
+/**
+ * Daily, not monthly: the 1-year credit is tied to a joining anniversary, which
+ * can fall on any day. Piggy-backing on the monthly EL cron would leave an
+ * employee waiting up to a month for a balance they had already earned.
+ * No-op when EL_ANNIVERSARY_CREDIT_FROM is unset.
+ */
+export const initELAnniversaryCron = () => {
+  cron.schedule("20 2 * * *", async () => {
+    try {
+      await creditELAnniversary();
+    } catch (e) {
+      console.error("EL ANNIVERSARY CRON ERROR:", e);
     }
   });
 };

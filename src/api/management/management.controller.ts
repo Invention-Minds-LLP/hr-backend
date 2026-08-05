@@ -4750,10 +4750,34 @@ export const getPayrollOverview = async (req: Request, res: Response) => {
     }
     const monthLabel = format(labelDate, "MMMM yyyy");
 
-    const run = await prisma.payrollRun.findUnique({
-      where: { month_year: { month: targetMonth, year: targetYear } },
+    // Multi-company: a month can have one run per legal entity. Without a
+    // companyId the management view aggregates the whole group, which is what
+    // this dashboard is for; with one, it scopes to that entity.
+    const scopedCompanyId = Number((req.query as any).companyId);
+    const runs = await prisma.payrollRun.findMany({
+      where: {
+        month: targetMonth,
+        year: targetYear,
+        ...(Number.isInteger(scopedCompanyId) && scopedCompanyId > 0
+          ? { companyId: scopedCompanyId }
+          : {}),
+      },
       include: { payslips: true },
+      orderBy: { id: 'asc' },
     });
+
+    const run = runs.length
+      ? {
+          id: runs[0].id,
+          // Group status is only PUBLISHED when every entity's run is.
+          status: runs.every((r) => r.status === 'PUBLISHED')
+            ? 'PUBLISHED'
+            : runs.some((r) => r.status === 'PUBLISHED')
+              ? 'PARTIALLY_PUBLISHED'
+              : runs[0].status,
+          payslips: runs.flatMap((r) => r.payslips),
+        }
+      : null;
 
     if (!run) {
       return res.json({

@@ -11,6 +11,7 @@ import nodemailer from "nodemailer";
 import { createNotification } from '../notifications/notifications.controller';
 import { generateOfferLetterPdf, OfferLetterData } from './offerLetterPdf';
 import { isPanelAckStatus } from './recruiting.constants';
+import { createMeetForInterview, googleCalendarConfigured } from '../../lib/googleMeet';
 import { config } from '../../config';
 
 
@@ -85,6 +86,38 @@ async function candidateOverlaps(
 /** Format candidate-overlap rows into the standard `conflicts` string list. */
 function candidateConflictList(rows: { stage: string; startTime: Date; endTime: Date }[]): string[] {
   return rows.map((c) => `🕒 ${c.stage}: ${new Date(c.startTime).toLocaleString()} – ${new Date(c.endTime).toLocaleString()}`);
+}
+
+// Maps a document type to the employee `Document.category`, mirroring the
+// frontend employee-form taxonomy. Used when carrying BGV documents onto the
+// new employee at join. Unknown / free-text "Other" types fall back to
+// CERTIFICATE (a generic bucket for verification papers).
+const DOC_TYPE_CATEGORY: Record<string, string> = {
+  AADHAAR: 'IDENTITY', PASSPORT: 'IDENTITY', PAN: 'IDENTITY',
+  SSLC: 'EDUCATION', PU: 'EDUCATION', DEGREE: 'EDUCATION', DIPLOMA: 'EDUCATION',
+  EMPLOYMENT_CONTRACT: 'EMPLOYMENT_CONTRACT',
+  OFFER_LETTER: 'OFFER_LETTER',
+  EXPERIENCE: 'EXPERIENCE',
+  REGISTRATION_CERT: 'CERTIFICATE', SALARY_CERT: 'CERTIFICATE', VERIFICATION_CERT: 'CERTIFICATE',
+  BANK: 'FINANCIAL',
+};
+function categoryForDocType(docType: string): string {
+  return DOC_TYPE_CATEGORY[String(docType ?? '').toUpperCase().trim()] || 'CERTIFICATE';
+}
+
+/**
+ * When the caller is a candidate (token carries `candidateId`), ensure the offer
+ * belongs to them — otherwise 403. Employees / HR (no candidateId on the token)
+ * are unrestricted. Returns true if the request may proceed; false after it has
+ * already sent the 403 response.
+ */
+function candidateMayActOnOffer(req: Request, res: Response, offerCandidateId: number): boolean {
+  const candidateId = Number((req as any).user?.candidateId);
+  if (Number.isFinite(candidateId) && candidateId > 0 && candidateId !== Number(offerCandidateId)) {
+    bad(res, 'This offer does not belong to you', 403);
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -1382,9 +1415,14 @@ export class RecruitingController {
  */
   scheduleInterview = asyncHandler(async (req, res) => {
     const applicationId = Number(req.params.id);
-    const { stage, startTime, endTime, panelUserIds, feedbackDue, grouped, sessionGroupId } = req.body || {};
+    const { stage, startTime, endTime, panelUserIds, feedbackDue, grouped, sessionGroupId, mode, meetingLink } = req.body || {};
 
     if (!stage || !startTime || !endTime) return bad(res, 'stage, startTime, endTime are required');
+
+    // Interview mode: OFFLINE (default) or ONLINE (video). For ONLINE we need a
+    // Meet link — auto-generated via Google Calendar when configured, else a
+    // manually-supplied `meetingLink`.
+    const interviewMode = String(mode || 'OFFLINE').toUpperCase() === 'ONLINE' ? 'ONLINE' : 'OFFLINE';
 
     // Multi-session round grouping. `sessionGroupId` (when adding a session to an
     // existing round) links this session to that group; otherwise `grouped: true`
@@ -1525,6 +1563,31 @@ export class RecruitingController {
       });
     }
 
+    // ── Resolve the online meeting link (network call — before the DB write) ──
+    let resolvedMeetingLink: string | null =
+      interviewMode === 'ONLINE' ? (String(meetingLink || '').trim() || null) : null;
+    if (interviewMode === 'ONLINE' && !resolvedMeetingLink) {
+      if (googleCalendarConfigured()) {
+        try {
+          const panelEmails = (await prisma.employee.findMany({
+            where: { id: { in: panels } }, select: { email: true },
+          })).map((e) => e.email).filter(Boolean) as string[];
+          resolvedMeetingLink = await createMeetForInterview({
+            summary: `${stage} interview — ${app.candidate.name} (${app.job.title})`,
+            description: `Panel: ${panelNames}`,
+            start, end,
+            attendees: [app.candidate.email, ...panelEmails].filter(Boolean) as string[],
+          });
+        } catch (e: any) {
+          console.error('[scheduleInterview] Meet link generation failed:', e);
+          return bad(res, `Could not generate the Google Meet link: ${e?.message || e}. Provide a link manually or check the Google Calendar setup.`);
+        }
+      }
+      if (!resolvedMeetingLink) {
+        return bad(res, 'Online interview requires a meeting link — provide one, or configure Google Calendar to auto-generate it.');
+      }
+    }
+
     // ✅ Step 4: No conflicts → create the interview + populate junction table
     const itv = await prisma.$transaction(async (tx) => {
       if (
@@ -1548,6 +1611,8 @@ export class RecruitingController {
           panelUserIds: panels.join(','),
           feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
           ...(hasGroupId ? { sessionGroupId: joinGroupId } : {}),
+          mode: interviewMode,
+          meetingLink: resolvedMeetingLink,
           panel: {
             create: panels.map((employeeId) => ({ employeeId })),
           },
@@ -1589,6 +1654,8 @@ export class RecruitingController {
           hospitalName: config.branding.hospitalName,
           hospitalAddress: config.branding.hospitalAddress,
           googleLocationUrl: config.branding.hospitalGoogleMap,
+          mode: interviewMode,
+          meetingLink: resolvedMeetingLink,
         });
         mailStatus = "sent";
       } catch (e: any) {
@@ -1634,6 +1701,8 @@ export class RecruitingController {
               hospitalName: config.branding.hospitalName,
               hospitalAddress: config.branding.hospitalAddress,
               googleLocationUrl: config.branding.hospitalGoogleMap,
+              mode: interviewMode,
+              meetingLink: resolvedMeetingLink,
               // Hint to the email helper that this is the panelist copy. Helper
               // can use it to re-write the salutation if needed; if it ignores
               // the field, the candidate-facing text still reads OK.
@@ -2572,11 +2641,15 @@ export class RecruitingController {
   /** POST /offers/:id/view -> mark viewed */
   markOfferViewed = asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    const offer = await prisma.offer.findUnique({ where: { id } });
+    const offer = await prisma.offer.findUnique({ where: { id }, include: { application: true } });
     if (!offer) return bad(res, 'Offer not found', 404);
-    if (!offerNext[offer.status].includes(OfferStatus.VIEWED)) return bad(res, `Cannot move offer from ${offer.status} → VIEWED`);
-    const updated = await prisma.offer.update({ where: { id }, data: { status: OfferStatus.VIEWED, viewedAt: new Date() } });
-    res.json(updated);
+    if (!candidateMayActOnOffer(req, res, offer.application.candidateId)) return;
+    // Idempotent: transition SENT → VIEWED; if already viewed/beyond, no-op.
+    if (offerNext[offer.status].includes(OfferStatus.VIEWED)) {
+      const updated = await prisma.offer.update({ where: { id }, data: { status: OfferStatus.VIEWED, viewedAt: new Date() } });
+      return res.json(updated);
+    }
+    return res.json(offer);
   });
 
   /** POST /offers/:id/sign -> SIGNED + Application OFFER_ACCEPTED */
@@ -2584,6 +2657,7 @@ export class RecruitingController {
     const id = Number(req.params.id);
     const offer = await prisma.offer.findUnique({ where: { id }, include: { application: true } });
     if (!offer) return bad(res, 'Offer not found', 404);
+    if (!candidateMayActOnOffer(req, res, offer.application.candidateId)) return;
     if (!offerNext[offer.status].includes(OfferStatus.SIGNED)) return bad(res, `Cannot move offer from ${offer.status} → SIGNED`);
 
     const app: any = offer.application;
@@ -2615,6 +2689,7 @@ export class RecruitingController {
     const { reason } = req.body || {};
     const offer = await prisma.offer.findUnique({ where: { id }, include: { application: true } });
     if (!offer) return bad(res, 'Offer not found', 404);
+    if (!candidateMayActOnOffer(req, res, offer.application.candidateId)) return;
     if (!offerNext[offer.status].includes(OfferStatus.DECLINED)) return bad(res, `Cannot move offer from ${offer.status} → DECLINED`);
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -2748,6 +2823,50 @@ export class RecruitingController {
     res.end(pdfBuffer);
   });
 
+  /**
+   * POST /offers/:id/preview  { proposedJoinAt?, ctc?, joinLocation?, workMode?, customNotes? }
+   * Renders the offer-letter PDF from the SUPPLIED (unsaved) values — a true
+   * preview-before-send. Falls back to any saved offer fields. Does not persist
+   * or email anything.
+   */
+  previewOfferLetterPdf = asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    const { proposedJoinAt, ctc, joinLocation, workMode, customNotes } = req.body || {};
+
+    const offer: any = await prisma.offer.findUnique({
+      where: { id },
+      include: {
+        application: {
+          include: { candidate: true, job: { include: { department: { select: { name: true } } } } },
+        },
+      },
+    });
+    if (!offer) return bad(res, 'Offer not found', 404);
+
+    const ctcNum = ctc !== undefined && ctc !== null && ctc !== '' ? Number(ctc) : (offer.ctc ?? null);
+
+    const pdfBuffer = await generateOfferLetterPdf({
+      candidateName:  offer.application.candidate.name,
+      candidateEmail: offer.application.candidate.email,
+      jobTitle:       offer.application.job.title,
+      departmentName: offer.application.job.department?.name ?? null,
+      ctc:            Number.isNaN(ctcNum as any) ? (offer.ctc ?? null) : ctcNum,
+      joinLocation:   joinLocation ?? offer.joinLocation ?? null,
+      workMode:       workMode ?? offer.workMode ?? null,
+      proposedJoinAt: proposedJoinAt ? new Date(proposedJoinAt) : (offer.proposedJoinAt ?? null),
+      customNotes:    customNotes ?? offer.customNotes ?? null,
+      companyName:    config.branding.companyName    || undefined,
+      companyAddress: config.branding.companyAddress || undefined,
+      hrName:         config.branding.hrSignatoryName  || undefined,
+      hrTitle:        config.branding.hrSignatoryTitle || undefined,
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="Offer-Letter-Preview.pdf"');
+    res.setHeader('Content-Length', pdfBuffer.length.toString());
+    res.end(pdfBuffer);
+  });
+
   /** PATCH /offers/:id/schedule-join  { proposedJoinAt } */
   scheduleJoin = asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
@@ -2815,7 +2934,7 @@ export class RecruitingController {
       where: { id },
       include: {
         application: {
-          include: { candidate: true, job: true, bgv: true }
+          include: { candidate: true, job: true, bgv: { include: { documents: true } } }
         }
       }
     });
@@ -2989,6 +3108,22 @@ export class RecruitingController {
             state: '',
             zipCode: '',
             country: '',
+          },
+        });
+      }
+
+      // Carry the BGV supporting documents onto the employee record so verified
+      // docs (Aadhaar, PAN, mark-sheets, relieving letters, …) aren't re-collected.
+      // docType maps to the employee Document taxonomy (category via the shared map).
+      const bgvDocs: any[] = offer.application.bgv?.documents ?? [];
+      for (const d of bgvDocs) {
+        await tx.document.create({
+          data: {
+            employeeId: employee.id,
+            title: d.fileName || d.docType,
+            fileUrl: d.fileUrl,
+            type: String(d.docType ?? '').toUpperCase().trim() || 'OTHER',
+            category: categoryForDocType(d.docType),
           },
         });
       }
@@ -3273,6 +3408,40 @@ export class RecruitingController {
   //   });
   // ===== Catalog for candidate's "My Assigned Tests" page =====
   /** GET /candidate/:candidateId/tests  OR  /applications/:id/tests (if you prefer appId) */
+  /**
+   * GET /recruiting/candidate/:candidateId/offers
+   * The candidate's own offers (one per application that has one), for the
+   * candidate portal. Scoped to the logged-in candidate.
+   */
+  getCandidateOffers = asyncHandler(async (req, res) => {
+    const candidateId = Number(req.params.candidateId);
+    if (!Number.isFinite(candidateId)) return bad(res, 'candidateId is required');
+    // A candidate may only read their own offers.
+    const tokenCandidateId = Number((req as any).user?.candidateId);
+    if (Number.isFinite(tokenCandidateId) && tokenCandidateId > 0 && tokenCandidateId !== candidateId) {
+      return bad(res, 'Forbidden', 403);
+    }
+
+    const apps = await prisma.application.findMany({
+      where: { candidateId },
+      include: {
+        offer: true,
+        job: { include: { department: { select: { name: true } } } },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    const out = apps
+      .filter((a) => a.offer)
+      .map((a) => ({
+        applicationId: a.id,
+        jobTitle: a.job.title,
+        departmentName: a.job.department?.name ?? null,
+        offer: a.offer,
+      }));
+    res.json(out);
+  });
+
   getCandidateAssignedTests = asyncHandler(async (req, res) => {
     const candidateId = Number(req.params.candidateId);
     // Pull `maxAttempts` in the same SELECT so we don't need a second query per row
@@ -3555,6 +3724,20 @@ export const upsertFeedback = asyncHandler(async (req, res) => {
 
   if (!allowedPanelIds.includes(panelId)) {
     return bad(res, 'Not in panel', 403);
+  }
+
+  // A SUBMITTED evaluation stays editable while the interview is still running
+  // (panellists often submit mid-interview and then want to adjust a score).
+  // Once the interview has ENDED it is final — view only. A DRAFT, or feedback
+  // that was never submitted, always stays open so overdue feedback can still
+  // be collected after the fact.
+  const existingFb = await prisma.interviewFeedback.findUnique({
+    where: { interviewId_panelUserId: { interviewId, panelUserId: panelId } },
+    select: { status: true },
+  });
+  const interviewEnded = new Date() >= new Date(itv.endTime);
+  if (existingFb?.status === 'SUBMITTED' && interviewEnded) {
+    return bad(res, 'This interview has ended — your submitted feedback can no longer be changed.', 409);
   }
 
   // OPTIONAL: also require the logged-in user to match the chosen panel slot.
@@ -3965,6 +4148,85 @@ export const updateBgvCheck = asyncHandler(async (req: Request, res: Response) =
 });
 
 /**
+ * POST /bgv/:bgvId/checks/:checkId/evidence  (multipart, field: file)
+ * Uploads a proof file for one BGV check and stores it as the check's
+ * evidenceUrl (local disk under /uploads/bgv). Replaces the paste-a-URL flow.
+ */
+export const uploadBgvCheckEvidence = asyncHandler(async (req: Request, res: Response) => {
+  const bgvId   = Number(req.params.bgvId);
+  const checkId = Number(req.params.checkId);
+  const check: any = await (prisma as any).bgvCheck.findUnique({ where: { id: checkId } });
+  if (!check || check.bgvId !== bgvId) return bad(res, 'Check not found', 404);
+
+  const form = formidable({ multiples: false, maxFileSize: 15 * 1024 * 1024 });
+  form.parse(req, async (err, _fields, files) => {
+    if (err) {
+      console.error('[uploadBgvCheckEvidence] parse error:', err);
+      return res.status(400).json({ error: 'File upload failed' });
+    }
+    try {
+      const fileField = files.file as FormidableFile | FormidableFile[] | undefined;
+      const file = Array.isArray(fileField) ? fileField[0] : fileField;
+      if (!file) return res.status(400).json({ error: 'file is required' });
+
+      const safe = (file.originalFilename || 'evidence').replace(/[^\w.\-]+/g, '_');
+      const remotePath = `/public_html/bgv/${Date.now()}_${safe}`;
+      await saveLocal(file.filepath, remotePath);
+      const url = publicUrl(remotePath);
+      try { fs.unlinkSync(file.filepath); } catch { /* temp cleanup best-effort */ }
+
+      const updated = await (prisma as any).bgvCheck.update({
+        where: { id: checkId },
+        data: { evidenceUrl: url },
+      });
+      res.json(updated);
+    } catch (e) {
+      console.error('[uploadBgvCheckEvidence] failed:', e);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+});
+
+/**
+ * POST /bgv/:id/report  (multipart, field: file)
+ * Uploads the consolidated final BGV report and stores it as the BGV's
+ * reportUrl. Does NOT finalise — Complete BGV still computes the overall status.
+ */
+export const uploadBgvReport = asyncHandler(async (req: Request, res: Response) => {
+  const bgvId = Number(req.params.id);
+  const bgv = await (prisma as any).backgroundVerification.findUnique({ where: { id: bgvId } });
+  if (!bgv) return bad(res, 'BGV not found', 404);
+
+  const form = formidable({ multiples: false, maxFileSize: 20 * 1024 * 1024 });
+  form.parse(req, async (err, _fields, files) => {
+    if (err) {
+      console.error('[uploadBgvReport] parse error:', err);
+      return res.status(400).json({ error: 'File upload failed' });
+    }
+    try {
+      const fileField = files.file as FormidableFile | FormidableFile[] | undefined;
+      const file = Array.isArray(fileField) ? fileField[0] : fileField;
+      if (!file) return res.status(400).json({ error: 'file is required' });
+
+      const safe = (file.originalFilename || 'bgv-report').replace(/[^\w.\-]+/g, '_');
+      const remotePath = `/public_html/bgv/${Date.now()}_${safe}`;
+      await saveLocal(file.filepath, remotePath);
+      const url = publicUrl(remotePath);
+      try { fs.unlinkSync(file.filepath); } catch { /* temp cleanup best-effort */ }
+
+      const updated = await (prisma as any).backgroundVerification.update({
+        where: { id: bgvId },
+        data: { reportUrl: url },
+      });
+      res.json(updated);
+    } catch (e) {
+      console.error('[uploadBgvReport] failed:', e);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+});
+
+/**
  * POST /bgv/:bgvId/checks/:checkId/resolve  { resolutionNote }
  * Marks a DISCREPANCY check as DISCREPANCY_RESOLVED with audit trail.
  */
@@ -4037,20 +4299,47 @@ export const completeBgv = asyncHandler(async (req: Request, res: Response) => {
 /** POST /bgv/:id/documents  { docType, fileName, fileUrl } */
 export const addBgvDocument = asyncHandler(async (req: Request, res: Response) => {
   const bgvId = Number(req.params.id);
-  const { docType, fileName, fileUrl } = req.body || {};
-  if (!docType || !fileName || !fileUrl) {
-    return bad(res, 'docType, fileName and fileUrl are required');
-  }
   const bgv = await (prisma as any).backgroundVerification.findUnique({ where: { id: bgvId } });
   if (!bgv) return bad(res, 'BGV not found', 404);
 
-  const doc = await (prisma as any).bgvDocument.create({
-    data: {
-      bgvId, docType, fileName, fileUrl,
-      uploadedBy: (req as any).user?.id ?? null,
-    },
+  // Multipart: HR uploads the actual file (stored on local disk under /uploads,
+  // same path as the résumé). A pasted `fileUrl` is still accepted as a fallback.
+  const form = formidable({ multiples: false, maxFileSize: 15 * 1024 * 1024 });
+  form.parse(req, async (err, fields, files) => {
+    if (err) {
+      console.error('[addBgvDocument] parse error:', err);
+      return res.status(400).json({ error: 'File upload failed' });
+    }
+    try {
+      const pick = (v: any) => (Array.isArray(v) ? v[0] : v);
+      const docType = String(pick(fields.docType) ?? '').trim();
+      let fileName = String(pick(fields.fileName) ?? '').trim();
+      let fileUrl = String(pick(fields.fileUrl) ?? '').trim();
+      if (!docType) return res.status(400).json({ error: 'docType is required' });
+
+      const fileField = files.file as FormidableFile | FormidableFile[] | undefined;
+      const file = Array.isArray(fileField) ? fileField[0] : fileField;
+      if (file) {
+        const safe = (file.originalFilename || 'document').replace(/[^\w.\-]+/g, '_');
+        const remotePath = `/public_html/bgv/${Date.now()}_${safe}`;
+        await saveLocal(file.filepath, remotePath);
+        fileUrl = publicUrl(remotePath);
+        if (!fileName) fileName = file.originalFilename || safe;
+        try { fs.unlinkSync(file.filepath); } catch { /* temp cleanup best-effort */ }
+      }
+
+      if (!fileUrl) return res.status(400).json({ error: 'Upload a file, or provide a fileUrl' });
+      if (!fileName) fileName = docType;
+
+      const doc = await (prisma as any).bgvDocument.create({
+        data: { bgvId, docType, fileName, fileUrl, uploadedBy: (req as any).user?.id ?? null },
+      });
+      res.status(201).json(doc);
+    } catch (e) {
+      console.error('[addBgvDocument] failed:', e);
+      res.status(500).json({ error: 'Internal server error' });
+    }
   });
-  res.status(201).json(doc);
 });
 
 /** GET /bgv/:id/documents */
@@ -4506,10 +4795,25 @@ export async function sendInterviewMail(props: any) {
     hospitalAddress,
     googleLocationUrl,
     panelNames,
+    mode,
+    meetingLink,
   } = props;
 
   // Convert to CSV if array
   const recipients = Array.isArray(to) ? to.join(", ") : to;
+
+  // Online interview → show the Meet link; offline → show the venue.
+  const isOnline = String(mode || 'OFFLINE').toUpperCase() === 'ONLINE' && !!meetingLink;
+  const locationText = isOnline
+    ? `Join online (video call):\n${meetingLink}`
+    : `Venue:\n${hospitalName}\n${hospitalAddress}\n\nGoogle Maps:\n${googleLocationUrl}`;
+  const locationHtml = isOnline
+    ? `<h3>💻 Join Online</h3>
+  <p><a href="${meetingLink}" target="_blank">${meetingLink}</a></p>
+  <p style="font-size:12px;color:#666;">Click the link at the scheduled time to join the video interview.</p>`
+    : `<h3>📍 Venue</h3>
+  <p><b>${hospitalName}</b><br>${hospitalAddress}</p>
+  <p><a href="${googleLocationUrl}" target="_blank">📌 View Location on Google Maps</a></p>`;
 
   const text = `
 Interview Scheduled
@@ -4523,12 +4827,7 @@ End Time: ${endTime}
 
 Panel Members: ${panelNames}
 
-Venue:
-${hospitalName}
-${hospitalAddress}
-
-Google Maps:
-${googleLocationUrl}
+${locationText}
 
 Best Regards,
 HR Team
@@ -4546,16 +4845,10 @@ HR Team
     <li><b>Start Time:</b> ${startTime}</li>
     <li><b>End Time:</b> ${endTime}</li>
     <li><b>Panel:</b> ${panelNames}</li>
+    <li><b>Mode:</b> ${isOnline ? 'Online (video)' : 'In-person'}</li>
   </ul>
 
-  <h3>📍 Venue</h3>
-  <p><b>${hospitalName}</b><br>${hospitalAddress}</p>
-
-  <p>
-    <a href="${googleLocationUrl}" target="_blank">
-      📌 View Location on Google Maps
-    </a>
-  </p>
+  ${locationHtml}
 
   <br>
   <p>Best Regards,<br>HR Team</p>

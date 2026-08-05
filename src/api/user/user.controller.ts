@@ -11,6 +11,20 @@ import { otpService } from "../../services/otp.service";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { sendOtpSms } from "../sms/sms.controller";
+import {
+  REFRESH_COOKIE,
+  clearAuthCookies,
+  createRefreshToken,
+  csrfOk,
+  issueCsrfCookie,
+  readCookie,
+  revokeRefreshTokenById,
+  revokeRefreshTokenByRaw,
+  setRefreshCookie,
+  signAccessToken,
+  validateRefreshToken,
+} from "./auth.helpers";
+import { getEmployeeAccess } from "../../lib/employeeAccess";
 
 // REGISTER / CREATE USER (linked to Employee)
 export const createUser = async (req: Request, res: Response) => {
@@ -135,8 +149,14 @@ export const loginUser = async (req: Request, res: Response) => {
       roleId: employee.roleId
     };
 
-    const token = jwt.sign(payload, config.jwtSecret, { expiresIn: "12h" });
+    // Short-lived access token — the browser keeps it in memory only. The
+    // long-lived half of the session is the httpOnly refresh cookie below,
+    // backed by a revocable RefreshToken row.
+    const token = signAccessToken(payload);
 
+    const refreshRaw = await createRefreshToken(user.id, req);
+    setRefreshCookie(res, refreshRaw, req);
+    issueCsrfCookie(res, req);
 
     // Update last login
     await prisma.user.update({
@@ -406,18 +426,131 @@ export const verifyOtp = async (req: Request, res: Response) => {
   }
 };
 
-export const logout = async (req: Request, res: Response) => {
+/**
+ * Mint a fresh access token from the httpOnly refresh cookie.
+ *
+ * This is the "is my session still alive?" check — it's the server, not the
+ * browser, that answers. Called by the SPA at boot (so a page reload restores
+ * the in-memory access token) and whenever a request comes back 401.
+ *
+ * Authenticated by the cookie alone, so it carries no bearer token and needs
+ * the double-submit CSRF header instead. The refresh token is ROTATED on every
+ * use: the presented one is revoked and a new one issued, so a stolen cookie
+ * has a short useful life and replay of an already-used token fails.
+ */
+export const refreshAccessToken = async (req: Request, res: Response) => {
   try {
-    const { refreshToken } = req.body;
-
-    if (!refreshToken) {
-      return res.status(400).json({ message: 'Refresh token required' });
+    if (!csrfOk(req)) {
+      return res.status(403).json({ message: 'Invalid CSRF token' });
     }
 
-    // delete refresh token from DB
-    await prisma.refreshToken.deleteMany({
-      where: { token: refreshToken }
+    const raw = readCookie(req, REFRESH_COOKIE);
+    const session = await validateRefreshToken(raw);
+    if (!session) {
+      clearAuthCookies(res, req);
+      return res.status(401).json({ message: 'Session expired. Please log in again.' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: session.userId },
+      select: { id: true, username: true, employeeCode: true, role: true }
     });
+    if (!user) {
+      await revokeRefreshTokenById(session.id);
+      clearAuthCookies(res, req);
+      return res.status(401).json({ message: 'Session expired. Please log in again.' });
+    }
+
+    const employee = await prisma.employee.findUnique({
+      where: { employeeCode: user.employeeCode },
+      select: {
+        id: true,
+        departmentId: true,
+        photoUrl: true,
+        designation: true,
+        roleId: true,
+        gender: true,
+        employmentStatus: true,
+        role: { select: { name: true } },
+        Department: { select: { name: true } }
+      }
+    });
+
+    // Re-check employment status / revocation on every refresh, so terminating
+    // someone kills their web session within one access-token lifetime rather
+    // than waiting for the 7-day refresh cookie to expire.
+    const access = employee ? await getEmployeeAccess(employee.id) : null;
+    if (!employee || !access?.exists || !access.active) {
+      await revokeRefreshTokenById(session.id);
+      clearAuthCookies(res, req);
+      return res.status(401).json({ message: 'Your account is inactive. Please contact HR.' });
+    }
+
+    // Rotate: the presented token dies here, a new one takes its place.
+    await revokeRefreshTokenById(session.id);
+    const nextRaw = await createRefreshToken(user.id, req);
+    setRefreshCookie(res, nextRaw, req);
+    issueCsrfCookie(res, req);
+
+    const roleName = employee.role?.name ?? user.role;
+    const token = signAccessToken({
+      userId: user.id,
+      role: roleName,
+      empId: employee.id,
+      deptId: employee.departmentId,
+      employeeCode: user.employeeCode,
+      username: user.username,
+      roleId: employee.roleId
+    });
+
+    // Same shape as the login response — the SPA reuses one setSession() for
+    // both, so display data (role, dept, photo…) refreshes from the DB too.
+    return res.json({
+      token,
+      username: user.username,
+      employeeCode: user.employeeCode,
+      id: user.id,
+      role: roleName,
+      empId: employee.id,
+      deptId: employee.departmentId,
+      departmentName: employee.Department?.name || '',
+      designation: employee?.designation?.name || '',
+      photoUrl: employee.photoUrl || null,
+      roleId: employee.roleId,
+      gender: employee.gender
+    });
+  } catch (error) {
+    console.error('Refresh error:', error);
+    return res.status(500).json({ message: 'Refresh failed' });
+  }
+};
+
+/**
+ * End a session server-side.
+ *
+ * Two callers with two token transports:
+ *   • web    — refresh token in the httpOnly cookie, CSRF header required.
+ *   • mobile — opaque refresh token in the request body (legacy, unchanged).
+ * Returns 200 even when nothing matched: logout must never leave a client
+ * stuck holding credentials it can't clear.
+ */
+export const logout = async (req: Request, res: Response) => {
+  try {
+    const { refreshToken } = req.body ?? {};
+
+    if (refreshToken) {
+      // Mobile path — raw token, hard delete as before.
+      await prisma.refreshToken.deleteMany({ where: { token: refreshToken } });
+    }
+
+    const cookieRaw = readCookie(req, REFRESH_COOKIE);
+    if (cookieRaw) {
+      if (!csrfOk(req)) {
+        return res.status(403).json({ message: 'Invalid CSRF token' });
+      }
+      await revokeRefreshTokenByRaw(cookieRaw);
+    }
+    clearAuthCookies(res, req);
 
     return res.json({ message: 'Logged out successfully' });
 

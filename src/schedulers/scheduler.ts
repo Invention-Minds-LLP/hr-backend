@@ -5,7 +5,7 @@ import { initQuarterlyAppraisalScheduler, sendAppraisalCountReminders } from "..
 import { startShiftCron } from "../api/shift/shift.controller";
 import cron from 'node-cron';
 import { runBiometricSync } from "../api/biometric/biometric.controller";
-import { initFinancialYearRolloverCron, initELAccrualCron, initNewJoineeLeaveAllocationCron } from "../api/leave/leave.controller";
+import { initFinancialYearRolloverCron, initELAccrualCron, initELAnniversaryCron, initNewJoineeLeaveAllocationCron } from "../api/leave/leave.controller";
 import { initAppraisalAutoDraftCron } from "../api/appraisal/appraisal-v2.controller";
 import { initDirectorySyncCron } from "./directory-sync.scheduler";
 import { expireStaleOffers, processReferralBonusEligibility, remindOverdueInterviewFeedback } from "../api/recruiting/recruiting.controller";
@@ -31,6 +31,7 @@ export async function startSchedulers() {
   // await runBiometricBackfill();
 
   initELAccrualCron();
+  initELAnniversaryCron();
   initFinancialYearRolloverCron();
   initNewJoineeLeaveAllocationCron();
 

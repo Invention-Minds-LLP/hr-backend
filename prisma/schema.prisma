@@ -87,6 +87,13 @@ model Employee {
   experienceType          String?
   overtimeEnabled         Boolean?         @default(false)
 
+  // Legal entity this employee is payrolled under. Nullable so existing rows
+  // survive the rollout; `resolveCompanyId()` falls back to the default company
+  // when unset. Payroll, statutory config and Form 16 are all scoped by this —
+  // a group running several registered entities keeps their PF/ESI/PT codes,
+  // payroll runs and returns separate under one deployment.
+  companyId Int?
+
   // Per-employee attendance channel. NULL = inherit the branch's attendanceMode.
   // Effective mode = attendanceMode ?? Branch.attendanceMode ?? MOBILE.
   attendanceMode AttendanceMode?
@@ -114,6 +121,7 @@ model Employee {
   incharge                   Employee?                   @relation("EmployeeIncharge", fields: [inchargeId], references: [id])
   subordinates               Employee[]                  @relation("EmployeeIncharge")
   role                       Role                        @relation(fields: [roleId], references: [id])
+  permissionOverrides        EmployeePermission[]
   performedLedgers           LeaveLedger[]               @relation("LedgerPerformedBy")
   EmployeeShiftSetting       EmployeeShiftSetting?
   EmployeeSurvey             EmployeeSurvey[]
@@ -187,10 +195,26 @@ model Employee {
   // Committee memberships (ICC for POSH, Grievance Redressal Committee, etc.)
   committeeMemberships CommitteeMember[]
 
+  // Legal entity + income-tax relations
+  company                   Company?                   @relation(fields: [companyId], references: [id])
+  taxProfiles               EmployeeTaxProfile[]
+  taxDeclarations           TaxDeclaration[]
+  form16Records             Form16Record[]
+  salaryArrears             SalaryArrear[]
+  lettersIssued             LetterIssued[]
+  assetAllocations          AssetAllocation[]
+  salaryTemplateAssignments SalaryTemplateAssignment[]
+
+  // Row-level data scope. Zero rows = this person sees everyone (the historic
+  // behaviour); one or more rows narrows them to those branches/departments.
+  dataScopes        EmployeeDataScope[] @relation("DataScopeOwner")
+  dataScopesGranted EmployeeDataScope[] @relation("DataScopeGrantedBy")
+
   @@index([employmentStatus])
   @@index([departmentId])
   @@index([branchId])
   @@index([roleId])
+  @@index([companyId])
   @@index([firstName])
   @@index([lastName])
   @@index([reportingManager])
@@ -268,6 +292,7 @@ model Department {
   // HR-ops planning masters (management dashboard #18/#19):
   //   otBudgetHoursPerMonth — allotted OT hours/month for the dept (0 = no budget set)
   //   minDailyStrength      — minimum staff that must be present each day
+  salaryTemplates         SalaryTemplate[]
   otBudgetHoursPerMonth   Int?                      @default(0)
   minDailyStrength        Int?                      @default(0)
   // Appraisal-cycle policy (management dashboard #20):
@@ -288,6 +313,7 @@ model Department {
   Training                Training[]
   resignationClearances   ResignationClearance[]
   clearanceTemplateItems  ClearanceTemplateItem[]
+  dataScopes              EmployeeDataScope[]
 }
 
 model Branch {
@@ -297,7 +323,14 @@ model Branch {
   attendanceMode AttendanceMode @default(MOBILE)
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @default(now()) @updatedAt
-  employees      Employee[]
+
+  // Legal entity this location belongs to. Nullable so existing rows survive —
+  // until it is set, the branch is treated as belonging to the default company.
+  // Until now branch->company could only be inferred through employees.
+  companyId Int?
+
+  employees  Employee[]
+  dataScopes EmployeeDataScope[]
 }
 
 enum AttendanceMode {
@@ -314,10 +347,84 @@ model Role {
   permissions Permission[] @relation("PermissionToRole")
 }
 
+/// One capability, e.g. `admin.payroll.view`. `name` is the stable key the
+/// frontend gates on; the other columns exist only so the admin matrix can
+/// render itself without a hardcoded UI list.
 model Permission {
-  id    Int    @id @default(autoincrement())
-  name  String @unique
-  roles Role[] @relation("PermissionToRole")
+  id        Int                  @id @default(autoincrement())
+  name      String               @unique
+  label     String?
+  module    String?
+  sortOrder Int                  @default(0)
+  roles     Role[]               @relation("PermissionToRole")
+  overrides EmployeePermission[]
+}
+
+/// Per-person exception to their role's grants.
+///   granted = true  → extra access this role doesn't normally get
+///   granted = false → explicit deny that beats the role grant
+/// Replaces the hardcoded empId allowlist that used to live in the frontend.
+model EmployeePermission {
+  id           Int        @id @default(autoincrement())
+  employeeId   Int
+  permissionId Int
+  granted      Boolean
+  note         String?
+  createdBy    Int?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @default(now()) @updatedAt
+  employee     Employee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, permissionId])
+  @@index([employeeId])
+  @@index([permissionId])
+}
+
+/// Row-level data scope — the WHOSE-DATA axis, orthogonal to Permission's
+/// WHICH-SCREEN axis. Permission decides that an HR can open the Employee
+/// screen at all; this decides which employees they see once they are on it.
+///
+/// ZERO ROWS = GLOBAL. An employee with no scope rows sees everything, which is
+/// exactly the behaviour every existing deployment has today. Branch isolation
+/// is therefore opt-in per person: it starts the moment the first row is added
+/// from the Data Scope screen, and nothing changes for clients who never use it.
+///
+/// Multiple rows are OR-ed, so one HR covering three branches is three rows —
+/// which is what makes "same HR across branches" and "different HR per branch"
+/// the same feature rather than two.
+/// The scope target is expressed as real foreign keys rather than a
+/// (scopeType, scopeId) pair: exactly one of branchId / departmentId is set per
+/// row. That keeps referential integrity — deleting a branch cannot leave a row
+/// behind that still grants access to it — and removes the invariant a
+/// polymorphic scopeId would have to keep in sync.
+model EmployeeDataScope {
+  id           Int  @id @default(autoincrement())
+  employeeId   Int
+  /// Set for a branch grant; null on a department grant.
+  branchId     Int?
+  /// Set for a department grant; null on a branch grant.
+  departmentId Int?
+
+  /// Who granted it — this is a privilege-escalation surface, so it is audited.
+  createdBy Int?
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  employee   Employee    @relation("DataScopeOwner", fields: [employeeId], references: [id], onDelete: Cascade)
+  grantedBy  Employee?   @relation("DataScopeGrantedBy", fields: [createdBy], references: [id])
+  branch     Branch?     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  // MySQL treats NULLs as distinct in a unique index, which is exactly what is
+  // wanted here: these constrain duplicate branch grants and duplicate
+  // department grants independently, without blocking one because of the other.
+  @@unique([employeeId, branchId])
+  @@unique([employeeId, departmentId])
+  @@index([employeeId])
+  @@index([branchId])
+  @@index([departmentId])
 }
 
 model Attendance {
@@ -449,10 +556,18 @@ model AppraisalOverrideLog {
 }
 
 model LeaveType {
-  id                    Int                         @id @default(autoincrement())
-  name                  String                      @unique
-  description           String?
-  carryForward          Boolean                     @default(false)
+  id           Int     @id @default(autoincrement())
+  name         String  @unique
+  description  String?
+  carryForward Boolean @default(false)
+
+  /// This type is unpaid by definition. When set, approving a request of this
+  /// type forces the whole duration to lopUnits regardless of leave balance.
+  ///
+  /// Previously "LOP" was only a type NAME, while payroll decided paid-vs-unpaid
+  /// from lopUnits — so a request could sit on the LOP type with lopUnits = 0 and
+  /// be paid in full. One live row was doing exactly that.
+  isLop                 Boolean                     @default(false)
   EmployeeLeaveBalance  EmployeeLeaveBalance[]
   LeaveRequest          LeaveRequest[]
   policies              LeavePolicy[]
@@ -772,27 +887,27 @@ model EmployeeAppraisalPause {
 /// (e.g. ["INCHARGE","MANAGER","MANAGEMENT"]) so HR can scope a question to
 /// a subset later without altering the schema.
 model AppraisalReviewQuestion {
-  id           Int      @id @default(autoincrement())
-  title        String // e.g. "Quality of Work"
-  description  String?  @db.Text // one-line intent
-  prompts      Json? // array of bullet questions
-  aboveAverage String?  @db.Text
-  average      String?  @db.Text
-  belowAverage String?  @db.Text
-  category     String? // CLINICAL | NONCLINICAL | PARAMEDICAL
-  section      String?
-  levels       Json     @default("[\"INCHARGE\",\"MANAGER\",\"MANAGEMENT\"]")
+  id                   Int      @id @default(autoincrement())
+  title                String // e.g. "Quality of Work"
+  description          String?  @db.Text // one-line intent
+  prompts              Json? // array of bullet questions
+  aboveAverage         String?  @db.Text
+  average              String?  @db.Text
+  belowAverage         String?  @db.Text
+  category             String? // CLINICAL | NONCLINICAL | PARAMEDICAL
+  section              String?
+  levels               Json     @default("[\"INCHARGE\",\"MANAGER\",\"MANAGEMENT\"]")
   // Subject targeting: which appraised employee gets this question. Each array
   // holds ids; empty [] means "no restriction on that axis". All four empty =
   // the question applies to every employee. Match is OR/union across axes.
-  targetDepartmentIds  Json @default("[]")
-  targetDesignationIds Json @default("[]")
-  targetRoleIds        Json @default("[]")
-  targetEmployeeIds    Json @default("[]")
-  displayOrder Int      @default(0)
-  isActive     Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @default(now()) @updatedAt
+  targetDepartmentIds  Json     @default("[]")
+  targetDesignationIds Json     @default("[]")
+  targetRoleIds        Json     @default("[]")
+  targetEmployeeIds    Json     @default("[]")
+  displayOrder         Int      @default(0)
+  isActive             Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @default(now()) @updatedAt
 
   answers AppraisalReviewAnswer[]
 }
@@ -1402,6 +1517,11 @@ model Interview {
   // Interview shares the same sessionGroupId (the anchor session's own id).
   // Null = standalone single-session interview.
   sessionGroupId          Int?
+  // Interview mode. OFFLINE (in-person at the venue) or ONLINE (video). For
+  // ONLINE, `meetingLink` holds the Google Meet URL (auto-generated when Google
+  // Calendar is configured, else a manually supplied link).
+  mode                    String                 @default("OFFLINE")
+  meetingLink             String?
   createdAt               DateTime               @default(now())
   updatedAt               DateTime               @default(now()) @updatedAt
   candidateAssignedTestId Int?
@@ -1432,9 +1552,9 @@ model InterviewPanelMember {
   // declines with a reason) after being scheduled, so HR knows up-front whether
   // to cancel / reschedule. String (not enum) to match the codebase's
   // "String-enum constants" convention — allowed: PENDING / AVAILABLE / UNAVAILABLE.
-  ackStatus   String    @default("PENDING")
-  ackReason   String?
-  ackAt       DateTime?
+  ackStatus String    @default("PENDING")
+  ackReason String?
+  ackAt     DateTime?
 
   interview Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
   employee  Employee  @relation(fields: [employeeId], references: [id])
@@ -1742,11 +1862,37 @@ model InterviewHRReview {
 }
 
 model OvertimeApproval {
-  id                Int       @id @default(autoincrement())
-  employeeId        Int
-  date              DateTime
-  minutes           Int
-  status            String
+  id         Int      @id @default(autoincrement())
+  employeeId Int
+  date       DateTime
+  minutes    Int
+  status     String
+
+  // ── Employee-raised OT request ───────────────────────────────────────────
+  // Until now OT could only appear two ways: derived automatically from a late
+  // check-out, or keyed in by HR. An employee could not say "I need to stay
+  // back for X" and get it sanctioned in advance, and nobody ever confirmed the
+  // work the OT was claimed for actually got done.
+  //
+  /// AUTO | EMPLOYEE_REQUEST | MANUAL
+  source          String    @default("AUTO")
+  /// What the overtime is for. Required on an employee request — OT with no
+  /// stated purpose is what makes overtime budgets unauditable.
+  taskDescription String?   @db.Text
+  /// What the employee asked for, kept separate from `minutes` (what actually
+  /// happened) so over-runs are visible.
+  expectedMinutes Int?
+  requestedAt     DateTime?
+  /// Manager's reason when rejecting.
+  rejectionReason String?   @db.Text
+
+  // ── Completion acknowledgement ───────────────────────────────────────────
+  // Approval sanctions the hours; acknowledgement confirms the work landed.
+  // null = not yet reviewed, true = done, false = not done.
+  taskCompleted     Boolean?
+  taskAckBy         Int?
+  taskAckAt         DateTime?
+  taskAckNote       String?   @db.Text
   createdAt         DateTime  @default(now())
   approvedAt        DateTime?
   scheduledEnd      DateTime?
@@ -2484,6 +2630,7 @@ model Designation {
   isActive        Boolean                @default(true)
   employees       Employee[]
   ratingQuestions WeeklyRatingQuestion[]
+  salaryTemplates SalaryTemplate[]
 }
 
 model DeviceToken {
@@ -2536,13 +2683,22 @@ model MobileAuthSession {
   @@index([employeeId])
 }
 
+/// Server-side session records. Two producers, one table:
+///   • mobile  — stores the RAW opaque token (legacy, /api/auth/mobile/refresh)
+///   • web     — stores the SHA-256 HASH of the token that lives in the
+///               httpOnly `hr_rt` cookie, so a DB leak can't mint sessions.
+/// The two never collide (a 64-char hex hash can't equal a UUID), so lookups
+/// stay unambiguous without a discriminator column.
 model RefreshToken {
-  id        Int      @id @default(autoincrement())
+  id        Int       @id @default(autoincrement())
   userId    Int
-  token     String   @unique
+  token     String    @unique
   expiresAt DateTime
-  createdAt DateTime @default(now())
-  user      User     @relation(fields: [userId], references: [id])
+  revokedAt DateTime?
+  userAgent String?
+  ipAddress String?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id])
 
   @@index([userId])
 }
@@ -3382,45 +3538,84 @@ model SalaryRevision {
 }
 
 model PayrollRun {
-  id          Int       @id @default(autoincrement())
+  id          Int               @id @default(autoincrement())
+  companyId   Int?
   month       Int
   year        Int
-  status      String    @default("DRAFT")
+  status      String            @default("DRAFT")
   notes       String?
   processedBy Int
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @default(now()) @updatedAt
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @default(now()) @updatedAt
   payslips    Payslip[]
+  dispatches  PayrollDispatch[]
+  company     Company?          @relation(fields: [companyId], references: [id])
 
-  @@unique([month, year])
+  // Month-end freeze. Once locked the run cannot be deleted, re-imported or
+  // recomputed — the figures are what was actually paid. Unlocking is a
+  // deliberate, audited act rather than an implicit side effect of an edit.
+  lockedAt DateTime?
+  lockedBy Int?
+
+  // One run per company per month. companyId is nullable for legacy rows only —
+  // createPayrollRun always resolves a company, and the bootstrap backfills
+  // existing rows to the default company so the constraint stays meaningful
+  // (MySQL treats NULLs as distinct in unique indexes).
+  @@unique([companyId, month, year])
   @@index([status])
+  @@index([companyId])
 }
 
 model Payslip {
-  id                   Int        @id @default(autoincrement())
-  employeeId           Int
-  payrollRunId         Int
-  month                Int
-  year                 Int
-  workingDays          Int        @default(0)
-  presentDays          Float      @default(0)
-  leaveDays            Float      @default(0)
-  lopDays              Float      @default(0)
-  overtimeHours        Float      @default(0)
-  overtimePay          Float      @default(0)
-  basic                Float      @default(0)
-  hra                  Float      @default(0)
-  medicalAllowance     Float      @default(0)
-  travelAllowance      Float      @default(0)
-  specialAllowance     Float      @default(0)
-  otherAllowances      Float      @default(0)
-  grossEarnings        Float      @default(0)
-  pfEmployee           Float      @default(0)
-  pfEmployer           Float      @default(0)
-  esiEmployee          Float      @default(0)
-  esiEmployer          Float      @default(0)
-  professionalTax      Float      @default(0)
-  tds                  Float      @default(0)
+  id               Int   @id @default(autoincrement())
+  employeeId       Int
+  payrollRunId     Int
+  month            Int
+  year             Int
+  workingDays      Int   @default(0)
+  presentDays      Float @default(0)
+  leaveDays        Float @default(0)
+  lopDays          Float @default(0)
+  overtimeHours    Float @default(0)
+  overtimePay      Float @default(0)
+  basic            Float @default(0)
+  hra              Float @default(0)
+  medicalAllowance Float @default(0)
+  travelAllowance  Float @default(0)
+  specialAllowance Float @default(0)
+  otherAllowances  Float @default(0)
+  grossEarnings    Float @default(0)
+  pfEmployee       Float @default(0)
+  pfEmployer       Float @default(0)
+  esiEmployee      Float @default(0)
+  esiEmployer      Float @default(0)
+  professionalTax  Float @default(0)
+  tds              Float @default(0)
+
+  // ── Statutory additions (Phase 1) ──────────────────────────────────────────
+  // LWF is a deduction (employee half) plus an employer contribution. Both are
+  // zero in months the state doesn't collect — see StatutoryConfig.lwfFrequency.
+  lwfEmployee          Float @default(0)
+  lwfEmployer          Float @default(0)
+  // PF side-charges the employer pays on top of its 12% share.
+  pfAdminCharges       Float @default(0)
+  edliCharges          Float @default(0)
+  // Employer-cost provisions. NOT deductions and NOT part of netPay — they are
+  // accrued monthly so the JV/CTC reports and the gratuity liability are right.
+  gratuityProvision    Float @default(0)
+  bonusProvision       Float @default(0)
+  leaveEncashProvision Float @default(0)
+  // How `tds` above was arrived at: AUTO = projected by the tax engine,
+  // MANUAL = SalaryStructure.tdsMonthly / HR override. Kept so a payslip can be
+  // explained months later without re-running the projection.
+  // Auto-pulled from the loan and incentive modules when the run is created.
+  // Kept as their own columns rather than folded into otherDeduction /
+  // otherAddition so the payslip explains where the money went.
+  loanRecovery         Float @default(0)
+  incentivePayout      Float @default(0)
+
+  tdsMode              String     @default("MANUAL")
+  taxRegime            String? // OLD | NEW — regime in force for this payslip
   // Working-sheet input columns (HR/Finance). Additions and reimbursements add
   // to net pay; advanceRecovery/otherDeduction add to total deductions. lopDays
   // above becomes HR-overridable via the working-sheet import.
@@ -3617,6 +3812,7 @@ model WeeklyRatingAnswer {
 model Incentive {
   id            Int       @id @default(autoincrement())
   employeeId    Int
+  companyId     Int?
   type          String // BONUS, PERFORMANCE, FESTIVAL, REFERRAL, OTHER
   amount        Float
   description   String?   @db.Text
@@ -3635,15 +3831,20 @@ model Incentive {
   updatedAt     DateTime  @default(now()) @updatedAt
 
   employee Employee @relation(fields: [employeeId], references: [id])
+  company  Company? @relation(fields: [companyId], references: [id])
 
   @@index([employeeId])
   @@index([status])
   @@index([requestedBy])
+  @@index([companyId])
 }
 
 model Loan {
   id                 Int       @id @default(autoincrement())
   employeeId         Int
+  // Legal entity the loan sits against. Nullable for legacy rows; resolved to
+  // the employee's company by the payroll recovery step.
+  companyId          Int?
   loanType           String // SALARY_ADVANCE, PERSONAL, EMERGENCY, OTHER
   principalAmount    Float
   interestRate       Float     @default(0)
@@ -3662,10 +3863,12 @@ model Loan {
   updatedAt          DateTime  @default(now()) @updatedAt
 
   employee   Employee        @relation(fields: [employeeId], references: [id])
+  company    Company?        @relation(fields: [companyId], references: [id])
   repayments LoanRepayment[]
 
   @@index([employeeId])
   @@index([status])
+  @@index([companyId])
 }
 
 model LoanRepayment {
@@ -3678,11 +3881,16 @@ model LoanRepayment {
   remarks    String?
   createdAt  DateTime @default(now())
 
+  // Set when the repayment was recovered through a payroll run, so deleting or
+  // reversing that run can unwind the recovery instead of stranding it.
+  payslipId Int?
+
   loan     Loan     @relation(fields: [loanId], references: [id])
   employee Employee @relation(fields: [employeeId], references: [id])
 
   @@index([loanId])
   @@index([employeeId])
+  @@index([payslipId])
 }
 
 // ─── PIP (Performance Improvement Plan) ────────────────────────────────────
@@ -3957,4 +4165,708 @@ model CommitteeMember {
 
   @@index([committeeId, isActive])
   @@index([employeeId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  MULTI-COMPANY  +  STATUTORY CONFIG  +  INCOME TAX
+//
+//  A deployment serves one client, but that client may run several registered
+//  legal entities (Spine licenses this as "Additional Company"). Everything
+//  that carries a statutory identity — PF/ESI/PT codes, payroll runs, challans,
+//  Form 16 — hangs off Company rather than Branch. Branch stays a *location*
+//  construct (attendance mode, geography); Company is the *legal* one.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// A registered legal entity. Exactly one row is flagged isDefault — legacy
+/// employees and payroll runs with a NULL companyId resolve to it.
+model Company {
+  id        Int     @id @default(autoincrement())
+  name      String  @unique
+  legalName String?
+  isDefault Boolean @default(false)
+  isActive  Boolean @default(true)
+
+  // Statutory identifiers — printed on challans, returns and Form 16.
+  pan                   String?
+  tan                   String?
+  gstin                 String?
+  cin                   String?
+  pfEstablishmentCode   String?
+  esiEmployerCode       String?
+  ptRegistrationNumber  String?
+  lwfRegistrationNumber String?
+
+  // Registered address + authorised signatory, used on generated documents.
+  addressLine1         String?
+  addressLine2         String?
+  city                 String?
+  state                String?
+  pincode              String?
+  signatoryName        String?
+  signatoryDesignation String?
+  signatoryPlace       String?
+  logoUrl              String?
+
+  /// Default recipients for the month-end payroll workbook, comma separated.
+  /// Pre-fills the dispatch dialog so nobody retypes the finance address.
+  financeEmails String? @db.Text
+
+  /// Day of the month after which attendance is frozen for payroll. Leave or
+  /// regularisation applied on or after this day for the CURRENT month lands
+  /// after payroll is cut, so the employee is warned up front and HR is told it
+  /// will be adjusted next month rather than silently altering a processed
+  /// payslip.
+  payrollCutoffDay Int @default(25)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  employees         Employee[]
+  statutoryConfigs  StatutoryConfig[]
+  payrollRuns       PayrollRun[]
+  taxProfiles       EmployeeTaxProfile[]
+  taxDeclarations   TaxDeclaration[]
+  form16Records     Form16Record[]
+  statutoryFilings  StatutoryFiling[]
+  letterTemplates   LetterTemplate[]
+  lettersIssued     LetterIssued[]
+  assets            Asset[]
+  salaryTemplates   SalaryTemplate[]
+  loans             Loan[]
+  incentives        Incentive[]
+  payrollDispatches PayrollDispatch[]
+
+  @@index([isDefault])
+}
+
+/// Versioned statutory rates for one company. Payroll picks the row with the
+/// latest effectiveFrom <= the run month, so a mid-year rate change applies
+/// going forward without touching historic payslips — and without a deploy,
+/// which is the whole point of moving these out of payroll.controller.ts.
+model StatutoryConfig {
+  id            Int      @id @default(autoincrement())
+  companyId     Int
+  effectiveFrom DateTime
+  notes         String?
+
+  // ── Provident Fund ─────────────────────────────────────────────────────────
+  pfEnabled         Boolean @default(true)
+  pfEmployeeRate    Float   @default(12) // % of PF wage
+  pfEmployerRate    Float   @default(12)
+  pfWageCeiling     Float   @default(15000)
+  // true  -> PF wage is capped at pfWageCeiling (statutory minimum contribution)
+  // false -> PF is computed on full basic (current HRMINDS behaviour)
+  pfCapAtCeiling    Boolean @default(false)
+  pfAdminChargeRate Float   @default(0.5) // employer, % of PF wage
+  edliRate          Float   @default(0.5) // employer, % of PF wage
+  // Split of the employer 12%: 8.33% to pension (EPS) capped at the ceiling,
+  // remainder to PF. Needed for the ECR file, not for net pay.
+  epsRate           Float   @default(8.33)
+
+  // ── ESI ────────────────────────────────────────────────────────────────────
+  esiEnabled      Boolean @default(true)
+  esiEmployeeRate Float   @default(0.75)
+  esiEmployerRate Float   @default(3.25)
+  esiWageLimit    Float   @default(21000)
+
+  // ── Professional Tax ───────────────────────────────────────────────────────
+  // State-specific, so the slabs live as JSON rather than columns:
+  //   [{ "upTo": 15000, "amount": 0 }, { "upTo": 20000, "amount": 150 },
+  //    { "upTo": null,  "amount": 200, "februaryAmount": 300 }]
+  // "upTo": null is the top open-ended slab. februaryAmount covers Maharashtra's
+  // February differential. Null slabs -> fall back to the built-in default.
+  ptEnabled Boolean @default(true)
+  ptState   String?
+  ptSlabs   Json?
+
+  // ── Labour Welfare Fund ────────────────────────────────────────────────────
+  // Most states collect half-yearly or yearly, not monthly, hence the frequency
+  // and the explicit list of months in which it is deducted.
+  lwfEnabled         Boolean @default(false)
+  lwfState           String?
+  lwfEmployeeAmount  Float   @default(0)
+  lwfEmployerAmount  Float   @default(0)
+  lwfFrequency       String  @default("MONTHLY") // MONTHLY | HALF_YEARLY | YEARLY
+  lwfDeductionMonths Json? // e.g. [6, 12] for half-yearly (June & December)
+
+  // ── Gratuity (employer provision, not a deduction) ─────────────────────────
+  gratuityEnabled  Boolean @default(true)
+  gratuityRate     Float   @default(4.81) // % of basic accrued monthly
+  gratuityMinYears Float   @default(5)
+
+  // ── Statutory Bonus (employer provision) ───────────────────────────────────
+  bonusEnabled         Boolean @default(true)
+  bonusRate            Float   @default(8.33) // % — min 8.33, max 20
+  bonusEligibilityWage Float   @default(21000) // eligible if basic+DA <= this
+  bonusCalculationCap  Float   @default(7000) // bonus computed on min(wage, cap)
+
+  // ── Leave encashment (employer provision) ──────────────────────────────────
+  leaveEncashEnabled  Boolean @default(false)
+  leaveEncashDaysYear Float   @default(0) // days accrued per year for provisioning
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  company   Company  @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, effectiveFrom])
+  @@index([companyId])
+}
+
+/// Per-employee, per-financial-year tax setup. The regime choice and the
+/// auto/manual TDS switch live here rather than on SalaryStructure because both
+/// reset every April and must be retained per year for Form 16.
+model EmployeeTaxProfile {
+  id            Int    @id @default(autoincrement())
+  employeeId    Int
+  companyId     Int?
+  financialYear String // "2026-27"
+
+  regime       String    @default("NEW") // OLD | NEW
+  regimeLocked Boolean   @default(false) // set once payroll has run for the FY
+  regimeSetAt  DateTime?
+
+  // true  -> engine projects TDS each month (recommended)
+  // false -> SalaryStructure.tdsMonthly is used verbatim
+  autoComputeTds Boolean @default(true)
+
+  // HRA exemption inputs (Old regime only).
+  rentPaidAnnual Float   @default(0)
+  metroCity      Boolean @default(false)
+  landlordPan    String?
+
+  // Carried into the projection: income and TDS from a previous employer this FY.
+  previousEmployerIncome Float @default(0)
+  previousEmployerTds    Float @default(0)
+  previousEmployerPf     Float @default(0)
+
+  // Other declared income that increases the tax base (e.g. bank interest).
+  otherIncome       Float @default(0)
+  housePropertyLoss Float @default(0) // positive number; capped at 200000
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  employee  Employee @relation(fields: [employeeId], references: [id])
+  company   Company? @relation(fields: [companyId], references: [id])
+
+  @@unique([employeeId, financialYear])
+  @@index([companyId])
+  @@index([financialYear])
+}
+
+/// An employee's investment declaration for a financial year. One row per
+/// employee per FY; the line items hang off it. Mirrors the request->review
+/// shape used by LeaveRequest so the frontend approval pattern is reusable.
+model TaxDeclaration {
+  id            Int    @id @default(autoincrement())
+  employeeId    Int
+  companyId     Int?
+  financialYear String
+
+  // DRAFT -> SUBMITTED -> APPROVED | PARTIALLY_APPROVED | REJECTED
+  status      String    @default("DRAFT")
+  submittedAt DateTime?
+  reviewedBy  Int?
+  reviewedAt  DateTime?
+  remarks     String?   @db.Text
+
+  // Denormalised totals so listing screens don't aggregate line items.
+  totalDeclared Float @default(0)
+  totalApproved Float @default(0)
+
+  createdAt DateTime             @default(now())
+  updatedAt DateTime             @default(now()) @updatedAt
+  employee  Employee             @relation(fields: [employeeId], references: [id])
+  company   Company?             @relation(fields: [companyId], references: [id])
+  items     TaxDeclarationItem[]
+
+  @@unique([employeeId, financialYear])
+  @@index([status])
+  @@index([companyId])
+  @@index([financialYear])
+}
+
+/// One declared investment/deduction line. `section` is the IT Act section the
+/// engine groups and caps by (80C, 80D, 80CCD1B, 24B...).
+model TaxDeclarationItem {
+  id            Int     @id @default(autoincrement())
+  declarationId Int
+  section       String
+  category      String // "LIC Premium", "PPF", "ELSS", ...
+  description   String?
+
+  declaredAmount Float @default(0)
+  approvedAmount Float @default(0)
+
+  proofUrl    String?
+  proofStatus String  @default("PENDING") // PENDING | VERIFIED | REJECTED
+  remarks     String?
+
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @default(now()) @updatedAt
+  declaration TaxDeclaration @relation(fields: [declarationId], references: [id], onDelete: Cascade)
+
+  @@index([declarationId])
+  @@index([section])
+}
+
+/// A generated Form 16 for one employee/FY. Stores the computed figures as well
+/// as the file so the certificate can be re-issued or reconciled without
+/// recomputing from payslips.
+model Form16Record {
+  id            Int    @id @default(autoincrement())
+  employeeId    Int
+  companyId     Int?
+  financialYear String
+
+  regime          String @default("NEW")
+  grossSalary     Float  @default(0)
+  exemptAllowance Float  @default(0)
+  standardDeduct  Float  @default(0)
+  chapterViaTotal Float  @default(0)
+  taxableIncome   Float  @default(0)
+  taxOnIncome     Float  @default(0)
+  rebate87A       Float  @default(0)
+  surcharge       Float  @default(0)
+  educationCess   Float  @default(0)
+  totalTaxPayable Float  @default(0)
+  tdsDeducted     Float  @default(0)
+  balanceTax      Float  @default(0)
+
+  fileUrl      String?
+  passwordHint String? // e.g. "PAN (uppercase) + DDMMYYYY date of birth"
+  generatedBy  Int?
+  generatedAt  DateTime  @default(now())
+  emailedAt    DateTime?
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+  company  Company? @relation(fields: [companyId], references: [id])
+
+  @@unique([employeeId, financialYear])
+  @@index([companyId])
+  @@index([financialYear])
+}
+
+/// A generated statutory return/challan file (PF ECR, ESI, PT, LWF) for one
+/// company and period. Keeps an audit trail of what was filed and when.
+model StatutoryFiling {
+  id        Int    @id @default(autoincrement())
+  companyId Int
+  type      String // PF_ECR | ESI | PT | LWF
+  month     Int
+  year      Int
+
+  employeeCount Int     @default(0)
+  totalEmployee Float   @default(0) // employee-share total
+  totalEmployer Float   @default(0) // employer-share total
+  totalAmount   Float   @default(0)
+  fileUrl       String?
+  status        String  @default("GENERATED") // GENERATED | FILED
+
+  generatedBy Int?
+  generatedAt DateTime  @default(now())
+  filedAt     DateTime?
+  reference   String? // challan / TRRN number once filed
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, type, month, year])
+  @@index([companyId])
+  @@index([year, month])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  PHASE 2 — ARREARS
+//
+//  SalaryRevision records only previousCtc/newCtc, not the component breakdown,
+//  so an arrear cannot be reconstructed from it alone. Instead the engine
+//  recomputes each already-published month against the employee's CURRENT
+//  salary structure and diffs it against what was actually paid.
+//
+//  This row exists so the same arrear is never paid twice: once APPLIED it is
+//  tied to the payslip that carried it, and the recompute skips the covered
+//  period on the next run.
+// ═════════════════════════════════════════════════════════════════════════════
+
+model SalaryArrear {
+  id         Int  @id @default(autoincrement())
+  employeeId Int
+  companyId  Int?
+
+  /// Inclusive period the arrear covers.
+  fromMonth Int
+  fromYear  Int
+  toMonth   Int
+  toYear    Int
+
+  /// Difference between what the revised structure should have paid and what
+  /// the published payslips actually paid, split so the statutory top-up is
+  /// auditable rather than buried in one number.
+  grossArrear Float @default(0)
+  pfArrear    Float @default(0)
+  esiArrear   Float @default(0)
+  totalArrear Float @default(0)
+
+  /// Per-month breakdown, kept so an employee query years later can be answered
+  /// without re-deriving it from payslips that may since have been corrected.
+  detail Json?
+
+  /// PENDING → computed, awaiting a payroll run
+  /// APPLIED → paid out via appliedPayslipId
+  /// CANCELLED → discarded by HR
+  status           String    @default("PENDING")
+  appliedPayslipId Int?
+  appliedAt        DateTime?
+
+  reason     String?
+  computedBy Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId])
+  @@index([status])
+  @@index([companyId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  PHASE 3 — LETTER GENERATION
+//
+//  Replaces the single hardcoded offer letter with user-designable templates.
+//  Body is HTML (authored in the PrimeNG/quill editor) carrying {{tokens}} that
+//  are resolved per employee at issue time.
+//
+//  A template is a living document; an issued letter is a historical fact. So
+//  LetterIssued stores the RENDERED html, not a pointer to the template — if HR
+//  edits the template next year, letters already handed to employees must not
+//  silently change.
+// ═════════════════════════════════════════════════════════════════════════════
+
+model LetterTemplate {
+  id         Int     @id @default(autoincrement())
+  companyId  Int?
+  name       String
+  /// OFFER | CONFIRMATION | EXPERIENCE | RELIEVING | APPRECIATION | WARNING |
+  /// INCREMENT | TRANSFER | CUSTOM — drives grouping and the default token set.
+  category   String  @default("CUSTOM")
+  subject    String
+  /// HTML with {{token}} placeholders. See lib/letterTokens.ts for the catalog.
+  bodyHtml   String  @db.LongText
+  /// Optional letterhead/footer wrapped around the body on every issue.
+  headerHtml String? @db.Text
+  footerHtml String? @db.Text
+
+  /// Show the authorised signatory block at the end.
+  includeSignature Boolean @default(true)
+  isActive         Boolean @default(true)
+
+  createdBy Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  company Company?       @relation(fields: [companyId], references: [id])
+  issued  LetterIssued[]
+
+  @@index([companyId])
+  @@index([category])
+  @@index([isActive])
+}
+
+/// One letter handed to one employee. Immutable once issued.
+model LetterIssued {
+  id         Int  @id @default(autoincrement())
+  templateId Int?
+  employeeId Int
+  companyId  Int?
+
+  /// Snapshot at issue time — deliberately NOT re-rendered from the template.
+  subject      String
+  renderedHtml String  @db.LongText
+  templateName String?
+
+  issuedBy  Int?
+  issuedAt  DateTime  @default(now())
+  emailedAt DateTime?
+  /// ISSUED | EMAILED | REVOKED
+  status    String    @default("ISSUED")
+  remarks   String?
+
+  template LetterTemplate? @relation(fields: [templateId], references: [id])
+  employee Employee        @relation(fields: [employeeId], references: [id])
+  company  Company?        @relation(fields: [companyId], references: [id])
+
+  @@index([employeeId])
+  @@index([templateId])
+  @@index([issuedAt])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  PHASE 3 — ASSET MANAGEMENT
+//
+//  Tracks company property issued to employees, and makes it recoverable at
+//  exit. The FnF link is the point: an employee should not be able to clear
+//  their exit while still holding a laptop.
+// ═════════════════════════════════════════════════════════════════════════════
+
+model Asset {
+  id        Int    @id @default(autoincrement())
+  companyId Int?
+  /// Human-facing identifier stencilled on the device. Unique per deployment.
+  assetTag  String @unique
+  name      String
+  /// LAPTOP | DESKTOP | MOBILE | SIM | VEHICLE | FURNITURE | ID_CARD |
+  /// ACCESS_CARD | TOOL | OTHER
+  category  String @default("OTHER")
+
+  serialNumber String?
+  make         String?
+  model        String?
+  description  String? @db.Text
+
+  purchaseDate DateTime?
+  purchaseCost Float     @default(0)
+  warrantyEnd  DateTime?
+  /// Current book value, for the FnF recovery figure when an asset is lost.
+  currentValue Float     @default(0)
+
+  /// AVAILABLE | ALLOCATED | IN_REPAIR | LOST | SCRAPPED | RETIRED
+  /// Derived from allocations but denormalised so the register lists fast.
+  status String @default("AVAILABLE")
+
+  location String?
+  remarks  String? @db.Text
+
+  createdBy Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  company     Company?          @relation(fields: [companyId], references: [id])
+  allocations AssetAllocation[]
+
+  @@index([companyId])
+  @@index([status])
+  @@index([category])
+}
+
+/// One issue-and-return cycle. History is kept: a laptop passed between three
+/// employees has three rows, and only one with returnedOn = null.
+model AssetAllocation {
+  id         Int @id @default(autoincrement())
+  assetId    Int
+  employeeId Int
+
+  allocatedOn DateTime  @default(now())
+  allocatedBy Int?
+  dueOn       DateTime?
+  purpose     String?
+
+  returnedOn      DateTime?
+  returnedTo      Int?
+  /// GOOD | MINOR_DAMAGE | MAJOR_DAMAGE | LOST — drives whether a recovery
+  /// amount is charged in the full and final settlement.
+  returnCondition String?
+  /// Amount to recover from the employee, carried into FnF.
+  recoveryAmount  Float     @default(0)
+  recoveryWaived  Boolean   @default(false)
+
+  /// ALLOCATED | RETURNED | PENDING_RETURN | LOST
+  status  String  @default("ALLOCATED")
+  remarks String? @db.Text
+
+  acknowledgedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  asset    Asset    @relation(fields: [assetId], references: [id])
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([assetId])
+  @@index([employeeId])
+  @@index([status])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SALARY STRUCTURE TEMPLATES
+//
+//  HR defines a structure once as PERCENTAGES OF MONTHLY GROSS that total
+//  exactly 100%, then assigns it to many employees by entering a single figure.
+//  That figure may be gross, annual CTC, or net take-home — see
+//  api/payroll/calc/salaryTemplate.ts for how each is resolved.
+//
+//  Two design points that protect accuracy:
+//
+//  1. ROUNDING. Percentages of an arbitrary gross rarely land on whole rupees.
+//     Rounding each component independently makes the parts stop summing to the
+//     whole, which is how payroll totals drift. Exactly one component is flagged
+//     `isBalancing` and absorbs the remainder, so components always re-add to
+//     the gross to the paisa.
+//
+//  2. FIXED ADD-ONS SIT OUTSIDE THE 100%. LTA, mobile and meal reimbursements
+//     are flat monthly amounts, not a share of gross. Folding them into the
+//     percentage split would make the same template produce a different basic
+//     for two people on the same gross.
+// ═════════════════════════════════════════════════════════════════════════════
+
+model SalaryTemplate {
+  id          Int     @id @default(autoincrement())
+  companyId   Int?
+  name        String
+  code        String?
+  description String? @db.Text
+
+  /// Only GROSS today. Kept explicit so a future CTC-based template is a data
+  /// change rather than a schema migration.
+  basis String @default("GROSS")
+
+  isActive Boolean @default(false)
+
+  /// Suggested applicability — drives the FILTER on the bulk-assign screen so
+  /// HR can pull up "all Nursing / Staff Nurse" in one go. It does NOT auto-apply
+  /// to anyone; assignment is always an explicit act.
+  departmentId   Int?
+  designationId  Int?
+  roleId         Int?
+  employmentType String?
+  branchId       Int?
+
+  /// Statutory applicability written onto each structure created from this
+  /// template. An employee-level override still wins.
+  pfApplicable  Boolean @default(true)
+  esiApplicable Boolean @default(true)
+  ptApplicable  Boolean @default(true)
+
+  createdBy Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  company     Company?                   @relation(fields: [companyId], references: [id])
+  department  Department?                @relation(fields: [departmentId], references: [id])
+  designation Designation?               @relation(fields: [designationId], references: [id])
+  components  SalaryTemplateComponent[]
+  assignments SalaryTemplateAssignment[]
+
+  @@index([companyId])
+  @@index([isActive])
+  @@index([departmentId])
+  @@index([designationId])
+}
+
+model SalaryTemplateComponent {
+  id         Int @id @default(autoincrement())
+  templateId Int
+
+  /// Maps onto a SalaryStructure column: basic | hra | medicalAllowance |
+  /// travelAllowance | specialAllowance | otherAllowances | lta |
+  /// mobileInternet | mealFuel
+  key   String
+  label String
+
+  /// Share of monthly gross. Percentage components must total exactly 100.
+  /// Ignored when isFixed.
+  percentage Float @default(0)
+
+  /// Flat monthly amount for reimbursement-style components. These sit OUTSIDE
+  /// the 100% and are added on top of gross when computing CTC.
+  isFixed     Boolean @default(false)
+  fixedAmount Float   @default(0)
+
+  /// Exactly one percentage component carries this. It receives
+  /// gross − (sum of the other rounded components), so the split always
+  /// reconciles to the gross exactly.
+  isBalancing Boolean @default(false)
+
+  orderNo Int @default(0)
+
+  template SalaryTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@unique([templateId, key])
+  @@index([templateId])
+}
+
+/// Audit of which template produced an employee's current structure, and on
+/// what input. Without this, "why is this person's basic 22,500?" is
+/// unanswerable six months later.
+model SalaryTemplateAssignment {
+  id         Int @id @default(autoincrement())
+  templateId Int
+  employeeId Int
+
+  /// GROSS | CTC | NET — what HR actually typed.
+  inputMode   String @default("GROSS")
+  inputAmount Float
+
+  /// Resolved figures at assignment time.
+  monthlyGross Float @default(0)
+  monthlyCtc   Float @default(0)
+  /// Net the engine arrived at. For inputMode NET this is the achieved net,
+  /// which can differ from the requested amount at a statutory slab boundary.
+  monthlyNet   Float @default(0)
+  /// achieved − requested, for NET assignments. Non-zero means the exact net
+  /// was unreachable; it is recorded rather than hidden.
+  netVariance  Float @default(0)
+
+  effectiveFrom DateTime @default(now())
+  assignedBy    Int?
+  createdAt     DateTime @default(now())
+
+  template SalaryTemplate @relation(fields: [templateId], references: [id])
+  employee Employee       @relation(fields: [employeeId], references: [id])
+
+  @@index([templateId])
+  @@index([employeeId])
+  @@index([effectiveFrom])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  PAYROLL DISPATCH — sending the verified workbook to finance.
+//
+//  The last mile of the month-end cycle: HR exports the sheet, Finance fills in
+//  their columns, HR imports it back, checks the exceptions, and then has to get
+//  the final workbook to whoever actually pays people. Until now that step was a
+//  manual download-and-attach, which is where the wrong month's file gets sent.
+//
+//  Every send is recorded with the totals as they stood at that moment, so
+//  "which figures did Finance actually receive on the 28th?" is answerable
+//  without trusting anyone's sent-items folder.
+// ═════════════════════════════════════════════════════════════════════════════
+
+model PayrollDispatch {
+  id           Int  @id @default(autoincrement())
+  payrollRunId Int
+  companyId    Int?
+
+  /// Comma-separated recipients, exactly as sent.
+  recipients String  @db.Text
+  ccList     String? @db.Text
+  subject    String
+  note       String? @db.Text
+
+  /// Which sheet formats went out, and whether as a live-formula template or a
+  /// values-only snapshot.
+  templates String
+  mode      String  @default("snapshot")
+  fileNames String? @db.Text
+
+  /// Totals frozen at send time. If payroll is later corrected, this row still
+  /// shows what Finance was told.
+  employeeCount     Int   @default(0)
+  totalGross        Float @default(0)
+  totalDeductions   Float @default(0)
+  totalNet          Float @default(0)
+  totalEmployerCost Float @default(0)
+
+  /// SENT | FAILED
+  status String  @default("SENT")
+  error  String? @db.Text
+
+  sentBy Int?
+  sentAt DateTime @default(now())
+
+  run     PayrollRun @relation(fields: [payrollRunId], references: [id])
+  company Company?   @relation(fields: [companyId], references: [id])
+
+  @@index([payrollRunId])
+  @@index([companyId])
+  @@index([sentAt])
 }

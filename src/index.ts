@@ -7,6 +7,8 @@ import { config, validateConfig } from "./config";
 
 import employeeRoutes from "./api/employee/employee.routes";
 import userRoutes from "./api/user/user.routes";
+import meRoutes from "./api/me/me.routes";
+import accessRoutes from "./api/access/access.routes";
 import departmentRoutes from "./api/department/department.routes";
 import branchRoutes from "./api/branch/branch.routes";
 import roleRoutes from "./api/role/role.routes";
@@ -50,6 +52,11 @@ import exportRoutes from "./api/export/export.routes";
 import forcePresentRoutes from "./api/force-present/force-present.routes";
 import hrCorrectionsRoutes from "./api/hr-corrections/hr-corrections.routes";
 import payrollRoutes from "./api/payroll/payroll.routes";
+import companyRoutes from "./api/company/company.routes";
+import taxRoutes from "./api/tax/tax.routes";
+import letterRoutes from "./api/letters/letters.routes";
+import assetRoutes from "./api/assets/assets.routes";
+import overtimeRoutes from "./api/overtime/overtime.routes";
 import mobileAttendanceRoutes from "./api/mobile-attendance/mobile-attendance.routes";
 import weeklyTrackerRoutes from "./api/weekly-tracker/weekly-tracker.routes";
 import encashmentRoutes from "./api/encashment/encashment.routes";
@@ -151,7 +158,9 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  // X-CSRF-Token: double-submit header the SPA echoes from the hr_csrf cookie
+  // on the cookie-authenticated endpoints (/api/users/refresh, /logout).
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token']
 }));
 
 app.use(express.json({ limit: "2mb" }));
@@ -169,11 +178,29 @@ app.use(accessLogger);
 // at <PUBLIC_BASE_URL>/uploads/<folder>/<file>. In production nginx also serves
 // /uploads directly from the shared volume; this route is the in-process
 // fallback (and what's used when running the backend without nginx).
+//
+// Allow the frontend to EMBED uploaded files (e.g. the résumé PDF preview is an
+// <iframe> in the candidate evaluation form). helmet's defaults send
+// `X-Frame-Options: SAMEORIGIN` + CSP `frame-ancestors 'self'`, which blocks the
+// iframe whenever the frontend runs on a different origin/port than the API.
+// Scoped to /uploads only — API responses keep helmet's stricter framing rules.
+// NOTE: in production nginx serves /uploads directly, so the same headers must
+// be set there too (see deployment notes) — this covers in-process serving.
+app.use("/uploads", (_req, res, next) => {
+  res.removeHeader("X-Frame-Options");
+  res.setHeader(
+    "Content-Security-Policy",
+    `frame-ancestors 'self' ${allowedOrigins.join(" ")}`,
+  );
+  next();
+});
 app.use("/uploads", express.static(UPLOADS_DIR, { fallthrough: false, maxAge: "1d" }));
 
 // Routes
 app.use("/api/employees", employeeRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/me", meRoutes);
+app.use("/api/access", accessRoutes);
 app.use("/api/departments", departmentRoutes);
 app.use("/api/branches", branchRoutes);
 app.use("/api/roles", roleRoutes);
@@ -212,6 +239,11 @@ app.use("/api/export", exportRoutes)
 app.use("/api/force-present", forcePresentRoutes);
 app.use("/api/hr-corrections", hrCorrectionsRoutes);
 app.use("/api/payroll", payrollRoutes);
+app.use("/api/companies", companyRoutes);
+app.use("/api/tax", taxRoutes);
+app.use("/api/letters", letterRoutes);
+app.use("/api/assets", assetRoutes);
+app.use("/api/overtime", overtimeRoutes);
 app.use("/api/mobile-attendance", mobileAttendanceRoutes);
 app.use("/api/weekly-tracker", weeklyTrackerRoutes);
 app.use("/api/encashment", encashmentRoutes);

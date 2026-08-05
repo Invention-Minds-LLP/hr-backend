@@ -1,6 +1,8 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import { revokeEmployeeAccess } from "../../lib/employeeAccess";
+import { withEmployeeScope, guardInScope } from "../../lib/dataScope";
+import type { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { buildEmployeeDiff, auditCtxFromReq } from "../../lib/employeeAudit";
 import type { Prisma } from "@prisma/client";
 const prisma = new PrismaClient();
@@ -549,7 +551,7 @@ export const createEmployee = async (req: Request, res: Response) => {
 //     res.status(500).json({ error: "Failed to fetch employees" });
 //   }
 // };
-export const getEmployees = async (req: Request, res: Response) => {
+export const getEmployees = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const page = Number(req.query.page ?? 1);
     const pageSize = Math.min(Number(req.query.pageSize ?? 10), 50); // max = 50
@@ -659,11 +661,18 @@ export const getEmployees = async (req: Request, res: Response) => {
     //   where.branchId = Number(req.query.branchId);
     // }
 
+    // Narrow to the caller's assigned branches/departments. A caller with no
+    // scope rows is global and `scopedWhere` comes back identical to `where`,
+    // so this is a no-op for everyone who hasn't been explicitly restricted.
+    // Merged via withEmployeeScope rather than assigning onto `where` because
+    // the search filters above may already have set `where.OR`.
+    const scopedWhere = await withEmployeeScope(Number(req.user?.empId ?? 0), where);
+
     const [employees, total] = await Promise.all([
       prisma.employee.findMany({
         skip,
         take: pageSize,
-        where,
+        where: scopedWhere,
         select: {
           id: true,
           employeeCode: true,
@@ -689,7 +698,9 @@ export const getEmployees = async (req: Request, res: Response) => {
           },
         },
       }),
-      prisma.employee.count({ where }),
+      // Must use the SAME scoped where — counting with the unscoped filter
+      // would report the full headcount and page count to a branch-scoped HR.
+      prisma.employee.count({ where: scopedWhere }),
     ]);
 
     res.json({
@@ -708,9 +719,13 @@ export const getEmployees = async (req: Request, res: Response) => {
 
 
 // GET single employee by ID
-export const getEmployeeById = async (req: Request, res: Response) => {
+export const getEmployeeById = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
+
+    // Scoping the list alone would be cosmetic — the record is still one
+    // guessable id away. No-op for a global caller.
+    if (!(await guardInScope(req, res, Number(id)))) return;
 
     const employee = await prisma.employee.findUnique({
       where: { id: Number(id) },
@@ -755,9 +770,14 @@ export const getEmployeeById = async (req: Request, res: Response) => {
 };
 
 
-export const updateEmployee = async (req: Request, res: Response) => {
+export const updateEmployee = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
+
+    // Editing someone outside your branch is the failure that actually costs —
+    // guard the write, not just the read.
+    if (!(await guardInScope(req, res, Number(id)))) return;
+
     const data = req.body;
 
     const {
@@ -1136,9 +1156,11 @@ export const updateEmployee = async (req: Request, res: Response) => {
 };
 
 // DELETE employee
-export const deleteEmployee = async (req: Request, res: Response) => {
+export const deleteEmployee = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
+
+    if (!(await guardInScope(req, res, Number(id)))) return;
 
     // Capture phone first so we can deactivate the directory entry after delete
     const employee = await prisma.employee.findUnique({

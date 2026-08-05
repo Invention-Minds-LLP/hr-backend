@@ -2,17 +2,17 @@ import { Request, Response } from 'express';
 import { prisma } from '../../lib/prisma';
 import { createNotification } from '../notifications/notifications.controller';
 import { AuthenticatedRequest } from '../../middleware/authMiddleware';
+import { resolveCompanyId, coerceCompanyId } from '../../lib/company';
+import { currentEmployeeId } from '../../lib/currentUser';
+import { resolveStatutoryRates } from './calc/resolveStatutory';
+import { computeStatutory } from './calc/statutory';
+import { resolveMonthlyTds } from './calc/resolveTds';
+import { previewLoanAndIncentive, settleForPayslip } from './calc/loanIncentive';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 function daysInMonth(year: number, month: number): number {
   return new Date(year, month, 0).getDate();
-}
-
-function professionalTax(gross: number): number {
-  if (gross < 15000) return 0;
-  if (gross < 20000) return 150;
-  return 200;
 }
 
 function round2(n: number): number {
@@ -35,10 +35,15 @@ async function buildPayslip(
   employeeId: number,
   month: number,
   year: number,
-  payrollRunId: number
+  payrollRunId: number,
+  companyId?: number
 ): Promise<any> {
   const sal = await (prisma as any).salaryStructure.findUnique({ where: { employeeId } });
   if (!sal) return null;
+
+  // Statutory rates are company- and date-scoped. Resolve the employee's legal
+  // entity when the caller didn't already pin one for the whole run.
+  const resolvedCompanyId = companyId ?? (await resolveCompanyId(employeeId));
 
   const startDate = new Date(year, month - 1, 1);
   const endDate   = new Date(year, month, 0, 23, 59, 59);
@@ -68,21 +73,39 @@ async function buildPayslip(
       endDate:   { gte: startDate },
     },
   });
-  let leaveDays = 0;
+  let leaveDays = 0;      // total approved leave days in the month (paid + LOP)
+  let leaveLopDays = 0;   // LOP (unpaid) portion of that leave, within the month
   for (const l of leaves) {
     const s = new Date(Math.max(l.startDate.getTime(), startDate.getTime()));
     const e = new Date(Math.min(l.endDate.getTime(),   endDate.getTime()));
     const diff = Math.round((e.getTime() - s.getTime()) / 86400000) + 1;
     leaveDays += diff;
+
+    // LOP portion of this leave that falls inside the payroll month, apportioned
+    // by the share of the leave's calendar span overlapping the month. Legacy
+    // rows (lopUnits = 0) and fully-paid leaves stay fully paid.
+    const lop = (l as any).lopUnits ?? 0;
+    if (lop > 0) {
+      const fullDays = Math.round((l.endDate.getTime() - l.startDate.getTime()) / 86400000) + 1;
+      const lopInMonth = fullDays > 0 ? (lop * diff) / fullDays : 0;
+      leaveLopDays += Math.min(diff, lopInMonth);
+    }
   }
-  presentDays += leaveDays;
+  // Only the PAID portion of leave counts as present; the LOP portion is left
+  // out, so it flows into lopDays (workingDays − presentDays) → salary deducted.
+  presentDays += (leaveDays - leaveLopDays);
 
   // ── overtime ─────────────────────────────────────────────────────────────────
+  // Approval sanctions the hours; for an employee-raised request the manager
+  // must also confirm the work landed. An approved-but-unacknowledged claim
+  // pays nothing, and one acknowledged as NOT completed is excluded outright —
+  // the hours were sanctioned for a task that never happened.
   const otRecords = await prisma.overtimeApproval.findMany({
     where: {
       employeeId,
       status: 'APPROVED',
       date: { gte: startDate, lte: endDate },
+      NOT: { taskCompleted: false },
     } as any,
   });
   let overtimeHours = 0;
@@ -103,16 +126,52 @@ async function buildPayslip(
   const hourlyOtRate = workingDays > 0 ? (sal.basic / (workingDays * 8)) * 2 : 0;
   const overtimePay  = round2(overtimeHours * hourlyOtRate);
 
-  // ── deductions ───────────────────────────────────────────────────────────────
-  const pfEmployee    = sal.pfApplicable  ? round2(sal.basic * 0.12)   : 0;
-  const pfEmployer    = sal.pfApplicable  ? round2(sal.basic * 0.12)   : 0;
-  const esiEmployee   = (sal.esiApplicable && gross <= 21000) ? round2(gross * 0.0075) : 0;
-  const esiEmployer   = (sal.esiApplicable && gross <= 21000) ? round2(gross * 0.0325) : 0;
-  const pt            = sal.ptApplicable  ? professionalTax(earnedGross) : 0;
-  const tds           = sal.tdsMonthly ?? 0;
+  // ── statutory deductions & employer provisions ───────────────────────────────
+  // Rates come from the company's StatutoryConfig (versioned by effectiveFrom),
+  // falling back to the pre-Phase-1 hardcoded values when none is configured —
+  // so an un-migrated client's payroll is byte-identical to what it was before.
+  const { rates } = await resolveStatutoryRates(resolvedCompanyId, month, year);
 
-  const totalDeductions = round2(pfEmployee + esiEmployee + pt + tds);
-  const netPay          = round2(earnedGross + overtimePay - totalDeductions);
+  const earnedBasic = round2(sal.basic - lopDays * (workingDays > 0 ? sal.basic / workingDays : 0));
+
+  const statutory = computeStatutory({
+    rates,
+    flags: {
+      pfApplicable:  !!sal.pfApplicable,
+      esiApplicable: !!sal.esiApplicable,
+      ptApplicable:  !!sal.ptApplicable,
+    },
+    earnedBasic,
+    earnedGross,
+    fullMonthGross: gross,
+    fullMonthBasic: sal.basic,
+    month,
+  });
+
+  // ── income tax ───────────────────────────────────────────────────────────────
+  // AUTO → projected by the tax engine across the remaining months of the FY.
+  // MANUAL → SalaryStructure.tdsMonthly, i.e. exactly the old behaviour. The
+  // switch is per-employee (EmployeeTaxProfile.autoComputeTds), so a client
+  // adopts the engine gradually instead of all at once.
+  const tdsResult = await resolveMonthlyTds(employeeId, month, year, sal.tdsMonthly ?? 0);
+  const tds = tdsResult.tds;
+
+  // ── loan recovery & incentive payout ─────────────────────────────────────────
+  // Pulled from the loan and incentive modules rather than keyed by hand into
+  // the working sheet. Recovery is capped against the pre-adjustment net so a
+  // large EMI can never produce a negative payslip; the shortfall stays
+  // outstanding and carries forward.
+  const statutoryDeductions = round2(statutory.totalEmployeeDeductions + tds);
+  const netBeforeAdjustments = round2(earnedGross + overtimePay - statutoryDeductions);
+
+  const adjustments = await previewLoanAndIncentive(
+    employeeId, month, year, netBeforeAdjustments,
+  );
+
+  const totalDeductions = round2(statutoryDeductions + adjustments.loanRecovery);
+  const netPay          = round2(
+    earnedGross + overtimePay + adjustments.incentivePayout - totalDeductions,
+  );
 
   return {
     employeeId,
@@ -132,12 +191,26 @@ async function buildPayslip(
     specialAllowance: sal.specialAllowance,
     otherAllowances:  sal.otherAllowances,
     grossEarnings:    earnedGross,
-    pfEmployee,
-    pfEmployer,
-    esiEmployee,
-    esiEmployer,
-    professionalTax: pt,
+    // Employer PF is stored as the full 12% (PF + EPS split) so existing
+    // reports that sum pfEmployee + pfEmployer keep reconciling; the EPS split
+    // is recomputed from StatutoryConfig when the ECR file is generated.
+    pfEmployee:       statutory.pfEmployee,
+    pfEmployer:       round2(statutory.pfEmployer + statutory.epsEmployer),
+    esiEmployee:      statutory.esiEmployee,
+    esiEmployer:      statutory.esiEmployer,
+    professionalTax:  statutory.professionalTax,
     tds,
+    lwfEmployee:          statutory.lwfEmployee,
+    lwfEmployer:          statutory.lwfEmployer,
+    pfAdminCharges:       statutory.pfAdminCharges,
+    edliCharges:          statutory.edliCharges,
+    gratuityProvision:    statutory.gratuityProvision,
+    bonusProvision:       statutory.bonusProvision,
+    leaveEncashProvision: statutory.leaveEncashProvision,
+    tdsMode:              tdsResult.mode,
+    taxRegime:            tdsResult.regime,
+    loanRecovery:         adjustments.loanRecovery,
+    incentivePayout:      adjustments.incentivePayout,
     totalDeductions,
     netPay,
   };
@@ -270,35 +343,56 @@ export const listPayrollRuns = async (req: Request, res: Response) => {
 
 export const createPayrollRun = async (req: Request, res: Response) => {
   try {
-    const { month, year, notes } = req.body;
-    const performedBy = (req as any).user?.employeeId ?? 1;
+    const { month, year, notes, companyId: rawCompanyId } = req.body;
+    // The JWT claim is `empId`; reading `employeeId` here always fell through to
+    // the `?? 1` fallback, so every run was recorded as processed by employee 1.
+    const performedBy = currentEmployeeId(req as any) ?? 1;
 
     if (!month || !year) return res.status(400).json({ message: 'month and year required' });
 
-    // Prevent duplicate run
+    // A run belongs to one legal entity. Omitting companyId resolves to the
+    // default company, so single-entity clients call this exactly as before.
+    const companyId = await coerceCompanyId(rawCompanyId);
+
+    // Prevent duplicate run for this company/month
     const existing = await (prisma as any).payrollRun.findUnique({
-      where: { month_year: { month: Number(month), year: Number(year) } },
+      where: { companyId_month_year: { companyId, month: Number(month), year: Number(year) } },
     });
     if (existing) return res.status(409).json({ message: `Payroll run for ${month}/${year} already exists` });
 
-    // Fetch all active employees with a salary structure
+    // Active employees of THIS company that have a salary structure. Legacy
+    // rows with a NULL companyId are picked up by the default company so no
+    // employee silently drops out of payroll mid-rollout.
+    const isDefaultCompany = await (prisma as any).company.findFirst({
+      where: { id: companyId, isDefault: true },
+      select: { id: true },
+    });
+
     const employees = await prisma.employee.findMany({
       where: {
         employmentStatus: 'ACTIVE',
         salaryStructure: { isNot: null },
+        ...(isDefaultCompany
+          ? { OR: [{ companyId }, { companyId: null }] }
+          : { companyId }),
       } as any,
       select: { id: true },
     });
 
     // Create run first
     const run = await (prisma as any).payrollRun.create({
-      data: { month: Number(month), year: Number(year), notes, processedBy: performedBy, status: 'DRAFT' },
+      data: {
+        companyId, month: Number(month), year: Number(year),
+        notes, processedBy: performedBy, status: 'DRAFT',
+      },
     });
 
-    // Build all payslips
+    // Build all payslips. Sequential on purpose: each payslip reads the
+    // employee's FY payslip history for the TDS projection, so concurrency here
+    // would hammer the remote DB for no wall-clock gain.
     const payslipData: any[] = [];
     for (const emp of employees) {
-      const ps = await buildPayslip(emp.id, Number(month), Number(year), run.id);
+      const ps = await buildPayslip(emp.id, Number(month), Number(year), run.id, companyId);
       if (ps) payslipData.push(ps);
     }
 
@@ -346,24 +440,54 @@ export const getPayrollRun = async (req: Request, res: Response) => {
 export const publishPayrollRun = async (req: Request, res: Response) => {
   try {
     const runId = Number(req.params.id);
+
+    // Publishing is the point money is committed, so guard against doing it
+    // twice — a second publish would settle every loan instalment again.
+    const existing = await (prisma as any).payrollRun.findUnique({ where: { id: runId } });
+    if (!existing) return res.status(404).json({ message: 'Payroll run not found' });
+    if (existing.status === 'PUBLISHED') {
+      return res.status(409).json({ message: 'This payroll run is already published' });
+    }
+
     const run = await (prisma as any).payrollRun.update({
       where: { id: runId },
       data: { status: 'PUBLISHED' },
     });
 
-    // 🔔 Notify every employee who has a payslip in this run
     const payslips = await (prisma as any).payslip.findMany({
       where: { payrollRunId: runId },
-      select: { employeeId: true }
+      select: {
+        id: true, employeeId: true, month: true, year: true,
+        loanRecovery: true, incentivePayout: true,
+      },
     });
+
+    // Settle loan repayments and mark incentives paid. Done per payslip and
+    // outside a single transaction on purpose: the remote DB would time out on
+    // 250 employees in one transaction, and each settlement is individually
+    // idempotent, so a partial failure can be resolved by re-publishing.
+    const settlement = { loansSettled: 0, incentivesPaid: 0, notes: [] as string[] };
+    for (const p of payslips) {
+      if (!p.loanRecovery && !p.incentivePayout) continue;
+      try {
+        const r = await settleForPayslip(p);
+        settlement.loansSettled += r.loansSettled;
+        settlement.incentivesPaid += r.incentivesPaid;
+        settlement.notes.push(...r.notes);
+      } catch (err: any) {
+        settlement.notes.push(`Employee ${p.employeeId}: settlement failed — ${err?.message}`);
+      }
+    }
+
+    // 🔔 Notify every employee who has a payslip in this run
     for (const p of payslips) {
       await createNotification(
         p.employeeId,
         `Your payslip for ${monthName(run.month)} ${run.year} is now available. Visit the Payroll section to view it.`
-      );
+      ).catch(() => undefined);
     }
 
-    res.json(run);
+    res.json({ ...run, settlement });
   } catch (err: any) {
     res.status(500).json({ message: err.message });
   }
@@ -380,10 +504,56 @@ export const deletePayrollRun = async (req: Request, res: Response) => {
     const run = await (prisma as any).payrollRun.findUnique({ where: { id: runId } });
     if (!run) return res.status(404).json({ message: 'Not found' });
     if (run.status === 'PUBLISHED') return res.status(400).json({ message: 'Cannot delete a published payroll run' });
+    if (run.lockedAt) return res.status(409).json({ message: 'This payroll month is locked. Unlock it first.' });
 
     await (prisma as any).payslip.deleteMany({ where: { payrollRunId: runId } });
     await (prisma as any).payrollRun.delete({ where: { id: runId } });
     res.json({ message: 'Deleted' });
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ─── month-end freeze ─────────────────────────────────────────────────────────
+// Locking is the accounting full stop for a payroll month: after it, the run
+// cannot be deleted, re-imported or have arrears pushed into it. Publishing
+// makes payslips visible; locking asserts the figures are final.
+
+export const lockPayrollRun = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const runId = Number(req.params.id);
+    const run = await (prisma as any).payrollRun.findUnique({ where: { id: runId } });
+    if (!run) return res.status(404).json({ message: 'Payroll run not found' });
+
+    if (run.status !== 'PUBLISHED') {
+      return res.status(409).json({
+        message: 'Publish the payroll run before locking it — locking a draft would freeze unissued figures.',
+      });
+    }
+    if (run.lockedAt) return res.status(409).json({ message: 'This run is already locked' });
+
+    const updated = await (prisma as any).payrollRun.update({
+      where: { id: runId },
+      data: { lockedAt: new Date(), lockedBy: currentEmployeeId(req as any) },
+    });
+    res.json(updated);
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+export const unlockPayrollRun = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const runId = Number(req.params.id);
+    const run = await (prisma as any).payrollRun.findUnique({ where: { id: runId } });
+    if (!run) return res.status(404).json({ message: 'Payroll run not found' });
+    if (!run.lockedAt) return res.status(409).json({ message: 'This run is not locked' });
+
+    const updated = await (prisma as any).payrollRun.update({
+      where: { id: runId },
+      data: { lockedAt: null, lockedBy: null },
+    });
+    res.json(updated);
   } catch (err: any) {
     res.status(500).json({ message: err.message });
   }

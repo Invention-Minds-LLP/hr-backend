@@ -5,7 +5,7 @@ import {
   saveHrReview, upsertFeedback,
   recordConsent,
   listReferences, addReference, updateReference, deleteReference, recordReferenceCheck,
-  initiateBgv, getBgv, updateBgvCheck, resolveBgvDiscrepancy, completeBgv,
+  initiateBgv, getBgv, updateBgvCheck, uploadBgvCheckEvidence, resolveBgvDiscrepancy, completeBgv, uploadBgvReport,
   addBgvDocument, listBgvDocuments, deleteBgvDocument,
   updateReferralBonus,
 } from './recruiting.controller';
@@ -64,6 +64,7 @@ recruitingRouter.post('/offers/:id/send',     ...recruiter, rc.sendOffer);
 // Candidates can also fetch their own letter via the same endpoint
 // (authenticated, but not role-gated — same pattern as /offers/:id/view).
 recruitingRouter.get('/offers/:id/pdf',       authenticateToken, rc.downloadOfferLetterPdf);
+recruitingRouter.post('/offers/:id/preview',  ...recruiter, rc.previewOfferLetterPdf); // render PDF from unsaved values
 recruitingRouter.post('/offers/:id/view',     authenticateToken, rc.markOfferViewed); // candidate
 recruitingRouter.post('/offers/:id/sign',     authenticateToken, rc.markOfferSigned); // candidate
 recruitingRouter.post('/offers/:id/decline',  authenticateToken, rc.declineOffer);    // candidate
@@ -89,6 +90,7 @@ recruitingRouter.post('/applications/:id/tests/:aid/start', authenticateToken, r
 recruitingRouter.get('/applications/:id/summary', ...recruiter, rc.getApplicationSummary);
 
 // Candidate-facing test endpoints (logged-in candidate, not employee role-checked)
+recruitingRouter.get('/candidate/:candidateId/offers', authenticateToken, rc.getCandidateOffers);
 recruitingRouter.get('/candidate/:candidateId/tests', authenticateToken, rc.getCandidateAssignedTests);
 recruitingRouter.get('/candidate/tests/:assignedId',  authenticateToken, rc.getAssignedTestDetail);
 recruitingRouter.post('/candidate/tests/:assignedId/submit', authenticateToken, rc.submitCandidateAssignedTest);
@@ -119,7 +121,9 @@ recruitingRouter.post  ('/references/:id/check',        ...recruiter, recordRefe
 recruitingRouter.post('/applications/:id/bgv',                    ...recruiter, initiateBgv);
 recruitingRouter.get ('/applications/:id/bgv',                    ...recruiter, getBgv);
 recruitingRouter.patch('/bgv/:bgvId/checks/:checkId',             ...recruiter, updateBgvCheck);
+recruitingRouter.post ('/bgv/:bgvId/checks/:checkId/evidence',    ...recruiter, uploadBgvCheckEvidence);
 recruitingRouter.post ('/bgv/:bgvId/checks/:checkId/resolve',     ...recruiter, resolveBgvDiscrepancy);
+recruitingRouter.post ('/bgv/:id/report',                         ...recruiter, uploadBgvReport);
 recruitingRouter.post ('/bgv/:id/complete',                       ...recruiter, completeBgv);
 recruitingRouter.get  ('/bgv/:id/documents',                      ...recruiter, listBgvDocuments);
 recruitingRouter.post ('/bgv/:id/documents',                      ...recruiter, addBgvDocument);

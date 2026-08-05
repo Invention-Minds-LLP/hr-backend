@@ -79,15 +79,16 @@ export function invalidateAccessCache(employeeId?: number) {
  * stop the rest):
  *   1. Delete DeviceToken rows  → no more mobile push
  *   2. Delete MobileAuthSession → mobile app forced to re-authenticate
- *   3. Stamp accessRevokedAt = now → existing JWTs (browser) become invalid
+ *   3. Delete RefreshToken rows → no web/mobile session can be renewed
+ *   4. Stamp accessRevokedAt = now → existing JWTs (browser) become invalid
  *      because the auth middleware compares decoded.iat against this.
- *   4. Invalidate the in-memory cache so the next request sees the change.
+ *   5. Invalidate the in-memory cache so the next request sees the change.
  */
 export async function revokeEmployeeAccess(
   employeeId: number,
   reason?: string,
-): Promise<{ tokensDeleted: number; sessionsDeleted: number }> {
-  const summary = { tokensDeleted: 0, sessionsDeleted: 0 };
+): Promise<{ tokensDeleted: number; sessionsDeleted: number; refreshTokensDeleted: number }> {
+  const summary = { tokensDeleted: 0, sessionsDeleted: 0, refreshTokensDeleted: 0 };
   console.log(`[access] revoking access for employee ${employeeId}${reason ? ` — ${reason}` : ''}`);
 
   // 1. Wipe FCM device tokens so push notifications stop immediately.
@@ -106,7 +107,26 @@ export async function revokeEmployeeAccess(
     console.error(`[access] MobileAuthSession cleanup failed for emp ${employeeId}:`, e);
   }
 
-  // 3. Stamp the revoke timestamp so authenticateToken can refuse old JWTs.
+  // 3. Revoke refresh tokens (web httpOnly-cookie sessions AND mobile's opaque
+  //    tokens). Without this, accessRevokedAt only kills the current access
+  //    token — the holder could immediately mint a new one from their refresh
+  //    token, because a refresh doesn't carry an old `iat` to compare against.
+  try {
+    const emp = await prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { employeeCode: true },
+    });
+    if (emp?.employeeCode) {
+      const r = await prisma.refreshToken.deleteMany({
+        where: { user: { employeeCode: emp.employeeCode } },
+      });
+      summary.refreshTokensDeleted = r.count;
+    }
+  } catch (e) {
+    console.error(`[access] RefreshToken cleanup failed for emp ${employeeId}:`, e);
+  }
+
+  // 4. Stamp the revoke timestamp so authenticateToken can refuse old JWTs.
   try {
     await prisma.employee.update({
       where: { id: employeeId },
@@ -116,14 +136,15 @@ export async function revokeEmployeeAccess(
     console.error(`[access] accessRevokedAt update failed for emp ${employeeId}:`, e);
   }
 
-  // 4. Bust the cache so the next authenticated request actually sees the
+  // 5. Bust the cache so the next authenticated request actually sees the
   //    new state without waiting for the 60s TTL.
   invalidateAccessCache(employeeId);
 
   console.log(
     `[access] employee ${employeeId} revoked: ` +
     `${summary.tokensDeleted} push token(s) deleted, ` +
-    `${summary.sessionsDeleted} mobile session(s) deleted.`,
+    `${summary.sessionsDeleted} mobile session(s) deleted, ` +
+    `${summary.refreshTokensDeleted} refresh token(s) deleted.`,
   );
   return summary;
 }

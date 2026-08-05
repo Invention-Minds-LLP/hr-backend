@@ -5,6 +5,12 @@ import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
 
+import { precheckLeave } from "./leavePrecheck.controller";
+
+// Read-only pre-flight: tells the employee what will be unpaid and whether
+// payroll for those dates has already been run, BEFORE they submit.
+router.post("/precheck", authenticateToken, precheckLeave);
+
 router.post("/",authenticateToken, createLeaveRequest);
 router.get("/",authenticateToken, getLeaveRequests);
 router.post("/types",authenticateToken, createLeaveType);

@@ -5,6 +5,8 @@ import { startOfMonth, endOfMonth } from 'date-fns';
 import { createNotification } from '../notifications/notifications.controller';
 import * as ExcelJS from 'exceljs';
 import { create } from 'qrcode';
+import { withEmployeeScope } from '../../lib/dataScope';
+import type { AuthenticatedRequest } from '../../middleware/authMiddleware';
 
 const prisma = new PrismaClient();
 const IST = 'Asia/Kolkata';
@@ -173,8 +175,16 @@ export class DashboardController {
                 : location !== 'ALL' ? { Branch: { name: location } } : {}),
         };
 
+        // The branchId/location query params above are a USER-CHOSEN filter;
+        // this is the scope they are not allowed to widen past. A global caller
+        // is unaffected, so the management view keeps seeing every branch.
+        const scopedEmployeeWhere = await withEmployeeScope(
+            Number((req as AuthenticatedRequest).user?.empId ?? 0),
+            employeeWhere,
+        );
+
         const employees = await prisma.employee.findMany({
-            where: employeeWhere,
+            where: scopedEmployeeWhere,
             select: {
                 id: true,
                 firstName: true,
