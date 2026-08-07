@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import { revokeEmployeeAccess } from "../../lib/employeeAccess";
-import { withEmployeeScope, guardInScope } from "../../lib/dataScope";
+import { withEmployeeScope, guardInScope, isViewerGlobal, resolveScope } from "../../lib/dataScope";
 import type { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { buildEmployeeDiff, auditCtxFromReq } from "../../lib/employeeAudit";
 import type { Prisma } from "@prisma/client";
@@ -147,7 +147,7 @@ async function generateEmployeeCode(employmentType: string) {
 }
 
 // CREATE Employee (with emergency contacts & qualifications)
-export const createEmployee = async (req: Request, res: Response) => {
+export const createEmployee = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const {
       employeeCode,
@@ -211,6 +211,19 @@ export const createEmployee = async (req: Request, res: Response) => {
       return res.status(400).json({
         error: "Reporting Manager and Incharge cannot be the same person",
       });
+    }
+
+    // A branch-scoped (non-global) HR can only create employees inside a
+    // branch they're actually scoped to — mirrors the read-side guard on
+    // getEmployeeById/updateEmployee below.
+    const creatorId = Number(req.user?.empId ?? 0);
+    if (!(await isViewerGlobal(creatorId))) {
+      const creatorScope = await resolveScope(creatorId);
+      if (!branchId || !creatorScope.branchIds.includes(Number(branchId))) {
+        return res.status(403).json({
+          error: "Cannot create an employee outside your assigned branch",
+        });
+      }
     }
 
     let finalCode = employeeCode;
@@ -1894,15 +1907,24 @@ export const getSpecificRoles = async (req: Request, res: Response) => {
 export const getEmployeesByRole = async (req: Request, res: Response) => {
   try {
     const roleId = Number(req.query.roleId);
+    // Alternative: return every ACTIVE employee EXCEPT the given roles (CSV).
+    // Used by the interview panel picker to show all-but-Executives/Management.
+    const excludeRaw = req.query.excludeRoleIds as string | undefined;
+    const excludeRoleIds = excludeRaw
+      ? String(excludeRaw).split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n))
+      : [];
 
-    if (!roleId) {
-      return res.status(400).json({ error: "roleId is required" });
+    let where: any;
+    if (excludeRoleIds.length) {
+      where = { roleId: { notIn: excludeRoleIds }, employmentStatus: 'ACTIVE' };
+    } else if (roleId) {
+      where = { roleId };
+    } else {
+      return res.status(400).json({ error: "roleId or excludeRoleIds is required" });
     }
 
     const employees = await prisma.employee.findMany({
-      where: {
-        roleId: roleId
-      },
+      where,
       select: {
         id: true,
         firstName: true,
