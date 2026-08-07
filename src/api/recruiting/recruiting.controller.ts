@@ -208,7 +208,11 @@ const canAdvanceTo: Record<ApplicationStatus, ApplicationStatus[]> = {
   INTERVIEW_SCHEDULED: ['INTERVIEWED', 'REJECTED', 'WITHDRAWN', 'NO_SHOW'],
   INTERVIEWED: ['OFFERED', 'REJECTED', 'WITHDRAWN'],
   OFFERED: ['OFFER_ACCEPTED', 'OFFER_DECLINED', 'WITHDRAWN'],
-  OFFER_ACCEPTED: ['HIRED', 'NO_SHOW'],
+  // HIRED is intentionally NOT reachable via the status dropdown — it must go
+  // through Mark Joined (POST /offers/:id/mark-joined), which creates the
+  // Employee record and then sets HIRED. A direct move here would leave a HIRED
+  // application with no employee.
+  OFFER_ACCEPTED: ['NO_SHOW'],
   OFFER_DECLINED: [],
   REJECTED: [],
   WITHDRAWN: [],
