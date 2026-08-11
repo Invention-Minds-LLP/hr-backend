@@ -18,6 +18,9 @@ import { saveLocal, publicUrl } from "../../lib/fileStorage";
 import path from "path";
 import { max } from "date-fns";
 import { config } from "../../config";
+import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { withEmployeeScope, guardInScope, isInScope } from "../../lib/dataScope";
+import { checkELApplication, getELAvailableBalance } from "../../lib/elApplicationRules";
 
 // Legacy FTP credentials — no longer used now that uploads are stored locally.
 // const FTP_CONFIG = {
@@ -99,6 +102,18 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
       return res.status(400).json({
         error: "Casual Leave (CL) can be applied for a maximum of 2 days at a time",
       });
+    }
+
+    // ── EL application rules: 3–7 days, 28 to apply, 25 always retained ─────
+    // The 3/7 limits also exist in the web form, but that can be bypassed by
+    // calling the API directly, and the balance floors were never enforced
+    // anywhere.
+    if (isEarnedLeave) {
+      const elAvailable = await getELAvailableBalance(Number(employeeId), year);
+      const elCheck = checkELApplication(elAvailable, requestedUnits);
+      if (!elCheck.ok) {
+        return res.status(400).json({ error: elCheck.error, code: elCheck.code });
+      }
     }
 
     // ── RH (Restricted Holiday) validations ───────────────────────────────
@@ -437,9 +452,15 @@ export const cancelLeaveRequest = async (req: Request, res: Response) => {
 };
 
 // Get All Leave Requests (optional)
-export const getLeaveRequests = async (_req: Request, res: Response) => {
+export const getLeaveRequests = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    // Branch/department-scoped HR only see requests from employees in their
+    // scope; a global (unscoped) viewer is unaffected — same contract as
+    // employee.controller.ts's list endpoint.
+    const employeeScope = await withEmployeeScope(Number(req.user?.empId ?? 0), {});
+
     const leaves = await prisma.leaveRequest.findMany({
+      where: Object.keys(employeeScope).length ? { employee: employeeScope } : undefined,
       select: {
         id: true,
         status: true,
@@ -1344,7 +1365,7 @@ export const getLeaveTypes = async (_req: Request, res: Response) => {
 //     return res.status(500).json({ error: "Failed to update leave" });
 //   }
 // };
-export const updateLeaveStatus = async (req: Request, res: Response) => {
+export const updateLeaveStatus = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const leaveId = Number(req.params.id);
     const { role, status, userId, declineReason } = req.body as {
@@ -1360,6 +1381,12 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
     if (!["Approved", "Declined"].includes(status)) {
       return res.status(400).json({ error: "Invalid status" });
     }
+
+    // Identity comes from the verified token, not the body — `role` above is
+    // only used to pick which branch of the approval ladder to evaluate;
+    // every branch below re-checks that this specific caller is entitled to
+    // act on this specific employee before writing anything.
+    const approverId = Number(req.user?.empId ?? 0);
 
     const approved = status === "Approved";
 
@@ -1396,12 +1423,20 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
         // INCHARGE LEVEL (if exists)
         // --------------------------
         if (hasIncharge && role === "INCHARGE") {
+          if (approverId !== emp.inchargeId) {
+            return {
+              kind: "ERR" as const,
+              status: 403,
+              body: { error: "Only the assigned incharge can approve this leave" },
+            };
+          }
+
           data.inChargeDecision = approved ? "APPROVED" : "REJECTED";
           data.inChargeDecidedAt = new Date();
 
           if (!approved) {
             data.status = "REJECTED";
-            data.declinedBy = userId ?? null;
+            data.declinedBy = approverId;
             data.declinedDate = new Date();
             data.declineReason = declineReason || null;
           }
@@ -1435,6 +1470,13 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
               body: { error: "Only HR Manager can approve HR employees" },
             };
           }
+          if (!(await isInScope(approverId, emp.id))) {
+            return {
+              kind: "ERR" as const,
+              status: 403,
+              body: { error: "This employee is outside your assigned branch/department" },
+            };
+          }
 
           data.hodDecision = approved ? "APPROVED" : "REJECTED";
           data.hodDecidedAt = new Date();
@@ -1443,7 +1485,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
           data.status = approved ? "APPROVED" : "REJECTED";
 
           if (!approved) {
-            data.declinedBy = userId ?? null;
+            data.declinedBy = approverId;
             data.declinedDate = new Date();
             data.declineReason = declineReason || null;
           }
@@ -1468,7 +1510,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
           data.status = approved ? "APPROVED" : "REJECTED";
 
           if (!approved) {
-            data.declinedBy = userId ?? null;
+            data.declinedBy = approverId;
             data.declinedDate = new Date();
             data.declineReason = declineReason || null;
           }
@@ -1486,7 +1528,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
 
             if (!approved) {
               data.status = "REJECTED";
-              data.declinedBy = userId ?? null;
+              data.declinedBy = approverId;
               data.declinedDate = new Date();
               data.declineReason = declineReason || null;
             }
@@ -1498,13 +1540,20 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
                 body: { error: "Management approval required first" },
               };
             }
+            if (!(await isInScope(approverId, emp.id))) {
+              return {
+                kind: "ERR" as const,
+                status: 403,
+                body: { error: "This employee is outside your assigned branch/department" },
+              };
+            }
 
             data.hrDecision = approved ? "APPROVED" : "REJECTED";
             data.hrDecidedAt = new Date();
             data.status = approved ? "APPROVED" : "REJECTED";
 
             if (!approved) {
-              data.declinedBy = userId ?? null;
+              data.declinedBy = approverId;
               data.declinedDate = new Date();
               data.declineReason = declineReason || null;
             }
@@ -1536,7 +1585,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
                 body: { error: "No reporting manager assigned for this employee" },
               };
             }
-            if (!userId || userId !== emp.reportingManager) {
+            if (approverId !== emp.reportingManager) {
               return {
                 kind: "ERR" as const,
                 status: 403,
@@ -1549,7 +1598,7 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
 
             if (!approved) {
               data.status = "REJECTED";
-              data.declinedBy = userId ?? null;
+              data.declinedBy = approverId;
               data.declinedDate = new Date();
               data.declineReason = declineReason || null;
             }
@@ -1561,13 +1610,20 @@ export const updateLeaveStatus = async (req: Request, res: Response) => {
                 body: { error: "Manager approval required first" },
               };
             }
+            if (!(await isInScope(approverId, emp.id))) {
+              return {
+                kind: "ERR" as const,
+                status: 403,
+                body: { error: "This employee is outside your assigned branch/department" },
+              };
+            }
 
             data.hrDecision = approved ? "APPROVED" : "REJECTED";
             data.hrDecidedAt = new Date();
             data.status = approved ? "APPROVED" : "REJECTED";
 
             if (!approved) {
-              data.declinedBy = userId ?? null;
+              data.declinedBy = approverId;
               data.declinedDate = new Date();
               data.declineReason = declineReason || null;
             }
@@ -2474,8 +2530,9 @@ export async function sendWhatsAppTemplate({
   // }
   // return resp.data;
 }
-export const getBlockedDates = async (req: Request, res: Response) => {
+export const getBlockedDates = async (req: AuthenticatedRequest, res: Response) => {
   const employeeId = Number(req.params.employeeId);
+  if (!(await guardInScope(req, res, employeeId))) return;
 
   const existing = await prisma.leaveRequest.findMany({
     where: {
@@ -2511,9 +2568,10 @@ export const getBlockedDates = async (req: Request, res: Response) => {
 //     res.status(500).json({ error: "Failed to fetch leave balance" });
 //   }
 // };
-export const getLeaveBalance = async (req: Request, res: Response) => {
+export const getLeaveBalance = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const employeeId = Number(req.params.employeeId);
+    if (!(await guardInScope(req, res, employeeId))) return;
     // const year = Number(req.query.year) || getFinancialYear(new Date());
     const yearParam = Number(req.query.year);
 
@@ -3317,11 +3375,163 @@ export async function creditELAnniversary(overrideToday?: Date) {
   };
 }
 
+// ── EL monthly eligibility (client policy, confirmed Aug 2026) ──────────────
+// A day counts towards the minimum only if the employee was on duty or on CL/SL.
+// Attendance.status is a free-text column, so compare upper-cased.
+const EL_WORKED_STATUSES = new Set(["PRESENT", "PERMISSION", "FIELD_DUTY", "FORCE_PRESENT"]);
+const EL_NON_WORKING_STATUSES = new Set(["WEEK_OFF", "HOLIDAY"]);
+const EL_ELIGIBLE_LEAVE = new Set(["CL", "SL"]);
+const EL_BLOCKING_LEAVE = new Set(["MATERNITY LEAVE", "PATERNITY LEAVE"]);
+/// Unauthorised absence has no leave type — it is an "Absent" attendance day.
+const EL_UNAUTHORISED_STATUS = "ABSENT";
+/// >= this many Maternity/Paternity/Unauthorised days disqualifies the month.
+const EL_BLOCKING_THRESHOLD = 12;
+
+/**
+ * Eligible working days for EL accrual in one calendar month.
+ *
+ * Per the confirmed policy:
+ *  - counted: days on duty (Present / Permission / Field duty / Force present)
+ *    and days on CL or SL;
+ *  - not counted: weekly offs, declared holidays, and LOP days — LOP is read
+ *    from the leave record, never from attendance, because a day approved as
+ *    LOP is frequently still marked "Present" in the attendance table;
+ *  - disqualifying: Maternity, Paternity or unauthorised absence, which void
+ *    the whole month once they reach EL_BLOCKING_THRESHOLD days.
+ *
+ * Attendance, leave and holiday dates are stored inconsistently — some rows at
+ * UTC midnight, some at IST midnight (18:30Z the previous day), and some leave
+ * rows carry a wall-clock time. Everything is therefore bucketed by IST
+ * calendar day, and the DB window is padded a day either side so the 1st and
+ * last of the month are not clipped.
+ */
+export async function getELEligibleDays(employeeId: number, calYear: number, calMonth: number) {
+  const daysInMonth = new Date(Date.UTC(calYear, calMonth, 0)).getUTCDate();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const from = new Date(Date.UTC(calYear, calMonth - 1, 1) - DAY_MS);
+  const to = new Date(Date.UTC(calYear, calMonth - 1, daysInMonth) + 2 * DAY_MS);
+
+  const [attendance, leaves, holidays] = await Promise.all([
+    prisma.attendance.findMany({
+      where: { employeeId, date: { gte: from, lte: to } },
+      select: { date: true, status: true },
+    }),
+    prisma.leaveRequest.findMany({
+      where: {
+        employeeId,
+        status: "APPROVED",
+        startDate: { lte: to },
+        endDate: { gte: from },
+      },
+      select: {
+        startDate: true,
+        endDate: true,
+        leaveType: { select: { name: true, isLop: true } },
+      },
+    }),
+    prisma.holiday.findMany({
+      where: { isOptional: false, date: { gte: from, lte: to } },
+      select: { date: true },
+    }),
+  ]);
+
+  /** IST day-of-month, or 0 when the timestamp falls outside the target month. */
+  const dayInMonth = (d: Date) => {
+    const p = istParts(d);
+    return p.year === calYear && p.month === calMonth ? p.day : 0;
+  };
+
+  const statusByDay = new Map<number, string>();
+  for (const a of attendance) {
+    const d = dayInMonth(a.date);
+    if (d) statusByDay.set(d, String(a.status ?? "").toUpperCase());
+  }
+
+  const holidayDays = new Set<number>();
+  for (const h of holidays) {
+    const d = dayInMonth(h.date);
+    if (d) holidayDays.add(d);
+  }
+
+  // A day can be touched by more than one leave record; the most restrictive
+  // classification wins.
+  type LeaveKind = "OTHER" | "ELIGIBLE" | "BLOCKING" | "LOP";
+  const rank: Record<LeaveKind, number> = { OTHER: 0, ELIGIBLE: 1, BLOCKING: 2, LOP: 3 };
+  const leaveByDay = new Map<number, LeaveKind>();
+
+  for (const l of leaves) {
+    const name = (l.leaveType?.name ?? "").toUpperCase();
+    const kind: LeaveKind = l.leaveType?.isLop
+      ? "LOP"
+      : EL_BLOCKING_LEAVE.has(name)
+        ? "BLOCKING"
+        : EL_ELIGIBLE_LEAVE.has(name)
+          ? "ELIGIBLE"
+          : "OTHER";
+
+    const s = istParts(l.startDate);
+    const e = istParts(l.endDate);
+    const endUtc = utcDateOf(e.year, e.month, e.day);
+    for (
+      let cur = utcDateOf(s.year, s.month, s.day);
+      cur <= endUtc;
+      cur = new Date(cur.getTime() + DAY_MS)
+    ) {
+      const d = dayInMonth(cur);
+      if (!d) continue;
+      const prev = leaveByDay.get(d);
+      if (!prev || rank[kind] > rank[prev]) leaveByDay.set(d, kind);
+    }
+  }
+
+  let eligibleDays = 0, lopDays = 0, blockingDays = 0, nonWorkingDays = 0;
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const leave = leaveByDay.get(d);
+    const status = statusByDay.get(d);
+
+    if (leave === "LOP") { lopDays++; continue; }
+    if (leave === "BLOCKING") { blockingDays++; continue; }
+    if (status === EL_UNAUTHORISED_STATUS) { blockingDays++; continue; }
+    if (status && EL_NON_WORKING_STATUSES.has(status)) { nonWorkingDays++; continue; }
+    if (holidayDays.has(d)) { nonWorkingDays++; continue; }
+    if (leave === "ELIGIBLE") { eligibleDays++; continue; }
+    if (status && EL_WORKED_STATUSES.has(status)) { eligibleDays++; continue; }
+    // Anything else (no record, IN_PROGRESS, ON_HOLD, CO/RH) is simply not a
+    // counted day — it neither helps nor disqualifies.
+  }
+
+  return {
+    eligibleDays,
+    lopDays,
+    blockingDays,
+    nonWorkingDays,
+    disqualified: blockingDays >= EL_BLOCKING_THRESHOLD,
+  };
+}
+
 // ── Core EL accrual logic — called by cron AND manual trigger ──────────────
 async function runELAccrual(overrideYear?: number, overrideMonth?: number) {
   const today = atStartOfDay(new Date());
-  const year = overrideYear ?? getFinancialYear(today);
-  const month = overrideMonth ?? (today.getMonth() + 1);
+
+  // Credit the month that has just ENDED, not the current one. The cron fires
+  // on the 1st, so crediting "this month" would test eligibility against a
+  // month with a single day of attendance in it and deny everybody.
+  // overrideYear is the FINANCIAL year (the manual trigger's contract), so it
+  // is converted to a calendar year here and derived back below.
+  const nowIst = istParts(new Date());
+  let calMonth: number, calYear: number;
+  if (overrideMonth !== undefined) {
+    calMonth = overrideMonth;
+    calYear = overrideYear !== undefined
+      ? getCalendarYear(overrideYear, overrideMonth)
+      : nowIst.year;
+  } else {
+    calMonth = nowIst.month === 1 ? 12 : nowIst.month - 1;
+    calYear = nowIst.month === 1 ? nowIst.year - 1 : nowIst.year;
+  }
+  const month = calMonth;
+  const year = calMonth >= 4 ? calYear : calYear - 1; // financial year
 
   // 1-year completion credit runs first so it lands ahead of this month's 1.5
   // in the ledger. Skipped when re-running a specific past month, since the
@@ -3363,10 +3573,46 @@ async function runELAccrual(overrideYear?: number, overrideMonth?: number) {
 
   let credited = 0, skipped = 0;
   const errors: string[] = [];
+  const denied: string[] = [];
 
   // 4️⃣ Loop employees
   for (const emp of employees) {
     try {
+      // Cheap pre-check outside the transaction — skips the eligibility queries
+      // entirely for anyone already credited for this month. The authoritative
+      // guard is still inside the transaction below.
+      const alreadyCredited = await prisma.leaveAccrual.findUnique({
+        where: {
+          employeeId_leaveTypeId_year_month: {
+            employeeId: emp.id, leaveTypeId: el.id, year, month,
+          },
+        },
+        select: { id: true },
+      });
+      if (alreadyCredited) { skipped++; continue; }
+
+      // 4.1️⃣ Monthly eligibility — minimum working days, blocking leave types
+      const elig = await getELEligibleDays(emp.id, calYear, month);
+      const workedDays = elig.eligibleDays;
+
+      if (elig.disqualified) {
+        denied.push(
+          `emp ${emp.id}: ${elig.blockingDays} day(s) maternity/paternity/unauthorised ` +
+          `(>= ${EL_BLOCKING_THRESHOLD}) — month not eligible`
+        );
+        skipped++;
+        continue;
+      }
+
+      if (workingDaysRequired && workedDays < workingDaysRequired) {
+        denied.push(
+          `emp ${emp.id}: ${workedDays} eligible day(s) < ${workingDaysRequired} required ` +
+          `(lop=${elig.lopDays}, offs/holidays=${elig.nonWorkingDays})`
+        );
+        skipped++;
+        continue;
+      }
+
       let didCredit = false;
 
       await prisma.$transaction(async (tx) => {
@@ -3383,21 +3629,6 @@ async function runELAccrual(overrideYear?: number, overrideMonth?: number) {
         });
 
         if (exists) { skipped++; return; }
-
-        // 4.1️⃣ & 4.2️⃣ Working days check — PAUSED for now
-        // TODO: Uncomment when attendance data is ready
-        // const shift = await tx.shiftApproval.findFirst({
-        //   where: { employeeId: emp.id, status: "APPROVED", month, year },
-        //   select: { weekOffConfig: true }
-        // });
-        // const weekOffConfig = shift?.weekOffConfig ?? null;
-        // const workedDays = await getWorkedDaysOptimized(emp.id, year, month, weekOffConfig);
-        // if (workingDaysRequired && workedDays < workingDaysRequired) {
-        //   console.log(`❌ Skipping EL for emp ${emp.id}, worked: ${workedDays}`);
-        //   skipped++;
-        //   return;
-        // }
-        const workedDays = 'N/A (check paused)';
 
         // 4.3️⃣ Balance row
         const bal = await tx.employeeLeaveBalance.upsert({
@@ -3460,7 +3691,7 @@ async function runELAccrual(overrideYear?: number, overrideMonth?: number) {
           action: "CREDIT",
           referenceType: "ACCRUAL",
           source: "SYSTEM",
-          remarks: `EL credited (worked ${workedDays} days)`
+          remarks: `EL credited (${workedDays} eligible working days)`
         });
 
         // 4.7b️⃣ Auto-encash excess over maxBalance
@@ -3505,8 +3736,18 @@ async function runELAccrual(overrideYear?: number, overrideMonth?: number) {
     }
   }
 
-  console.log(`✅ EL accrual done for ${year}-${month}: credited=${credited}, skipped=${skipped}`);
-  return { year, month, totalEmployees: employees.length, credited, skipped, errors, anniversary };
+  console.log(
+    `✅ EL accrual done for FY${year} month ${month} (${calYear}-${String(month).padStart(2, "0")}): ` +
+    `credited=${credited}, skipped=${skipped}, notEligible=${denied.length}`
+  );
+  if (denied.length) console.log("EL not accrued:\n  " + denied.join("\n  "));
+
+  return {
+    year, month, calendarMonth: `${calYear}-${String(month).padStart(2, "0")}`,
+    minimumWorkingDays: workingDaysRequired,
+    totalEmployees: employees.length,
+    credited, skipped, notEligible: denied, errors, anniversary,
+  };
 }
 
 // ── Manual trigger endpoint ────────────────────────────────────────────────

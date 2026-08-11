@@ -32,7 +32,7 @@ export const createHolidayCalendar = async (req: Request, res: Response) => {
 export const addHoliday = async (req: Request, res: Response) => {
   try {
     const { calendarId } = req.params;
-    const { title, date, description, isOptional } = req.body;
+    const { title, date, description, isOptional, branchId } = req.body;
 
     if (!title || !date) {
       return res.status(400).json({ message: "Title and date are required" });
@@ -44,7 +44,9 @@ export const addHoliday = async (req: Request, res: Response) => {
         title,
         date: new Date(date),
         description,
-        isOptional: isOptional ?? false
+        isOptional: isOptional ?? false,
+        // Null = org-wide holiday; set = only that branch's regional holiday.
+        branchId: branchId ? Number(branchId) : null
       }
     });
 
@@ -61,11 +63,19 @@ export const addHoliday = async (req: Request, res: Response) => {
 export const getHolidaysByYear = async (req: Request, res: Response) => {
   try {
     const { year } = req.params;
+    // Optional: an employee-facing caller passes their own branchId to get
+    // org-wide holidays plus their branch's regional ones. Omitted (the
+    // masters admin screen) returns every holiday across every branch, since
+    // that screen manages the whole org's calendars.
+    const branchId = req.query.branchId ? Number(req.query.branchId) : undefined;
 
     const calendar = await prisma.holidayCalendar.findUnique({
       where: { year: Number(year) },
       include: {
         holidays: {
+          where: branchId !== undefined
+            ? { OR: [{ branchId: null }, { branchId }] }
+            : undefined,
           orderBy: { date: "asc" }
         }
       }

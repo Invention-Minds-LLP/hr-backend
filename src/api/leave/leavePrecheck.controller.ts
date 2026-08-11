@@ -22,6 +22,8 @@ import { AuthenticatedRequest } from '../../middleware/authMiddleware';
 import { currentEmployeeId } from '../../lib/currentUser';
 import { resolveLopForRequest, leaveDuration } from '../../lib/leaveLop';
 import { checkPayrollCutoff } from '../../lib/payrollCutoff';
+import { checkELApplication, getELAvailableBalance } from '../../lib/elApplicationRules';
+import { countWorkingDays } from './leave.controller';
 
 /**
  * POST /api/leaves/precheck
@@ -127,6 +129,31 @@ export const precheckLeave = async (req: AuthenticatedRequest, res: Response) =>
       });
     }
 
+    // EL is the one type this endpoint can refuse outright: the balance floors
+    // are hard rules, so warning about them and then letting the submission fail
+    // would just move the rejection one screen later.
+    let elBlock: { code: string; message: string } | null = null;
+    if ((leaveType as any).name === 'EL') {
+      const financialYear = start.getMonth() + 1 >= 4 ? start.getFullYear() : start.getFullYear() - 1;
+      // Must match createLeaveRequest exactly, or the pre-flight check and the
+      // submit can disagree: EL counts week-offs but still skips mandatory
+      // holidays, so a range spanning one is a day shorter than the calendar
+      // span that `duration` reports.
+      const elUnits = isHalfDay
+        ? 0.5
+        : await countWorkingDays(employeeId, start, end, { includeWeekOffs: true });
+      const available = await getELAvailableBalance(employeeId, financialYear);
+      const elCheck = checkELApplication(available, elUnits);
+      if (!elCheck.ok) {
+        elBlock = { code: elCheck.code!, message: elCheck.error! };
+        warnings.push({
+          level: 'danger',
+          title: 'Earned Leave not permitted',
+          message: elCheck.error!,
+        });
+      }
+    }
+
     res.json({
       employeeId,
       leaveType: { id: leaveType.id, name: leaveType.name, isLop: (leaveType as any).isLop },
@@ -144,9 +171,10 @@ export const precheckLeave = async (req: AuthenticatedRequest, res: Response) =>
         status: o.status,
       })),
       warnings,
+      elBlock,
       // The employee can still submit — this informs, it does not block. Only a
-      // genuine overlap is worth refusing, and that is the caller's decision.
-      canSubmit: overlapping.length === 0,
+      // genuine overlap, or an EL rule breach, is worth refusing.
+      canSubmit: overlapping.length === 0 && !elBlock,
     });
   } catch (err: any) {
     res.status(500).json({ message: err.message });

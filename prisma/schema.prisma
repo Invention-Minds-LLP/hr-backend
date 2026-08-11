@@ -331,6 +331,7 @@ model Branch {
 
   employees  Employee[]
   dataScopes EmployeeDataScope[]
+  holidays   Holiday[]
 }
 
 enum AttendanceMode {
@@ -2732,10 +2733,19 @@ model Holiday {
   isOptional  Boolean         @default(false)
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @default(now()) @updatedAt
+  /// Null = org-wide holiday, shown to every branch. Set = applies only to
+  /// that branch (regional holidays), layered on top of the org-wide list.
+  branchId    Int?
   calendar    HolidayCalendar @relation(fields: [calendarId], references: [id])
+  branch      Branch?         @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
-  @@unique([calendarId, date])
+  // MySQL treats NULLs as distinct in a unique index (same tradeoff as
+  // EmployeeDataScope): this dedupes per-branch holidays on the same date,
+  // but doesn't stop two org-wide (branchId null) rows landing on the same
+  // date — that's still prevented at the controller level.
+  @@unique([calendarId, date, branchId])
   @@index([date])
+  @@index([branchId])
 }
 
 model ShiftApproval {

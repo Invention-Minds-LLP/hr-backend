@@ -8,6 +8,8 @@ type WeekOffConfig = {
 
 
 import { prisma } from "../../lib/prisma";
+import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { withEmployeeScope } from "../../lib/dataScope";
 
 export const getAttendanceCalendar = async (req: Request, res: Response) => {
   try {
@@ -608,7 +610,7 @@ export const approveAttendance = async (req: Request, res: Response) => {
 //     res.status(500).json({ message: 'Server error' });
 //   }
 // };
-export const getTodayAttendanceList = async (req: Request, res: Response) => {
+export const getTodayAttendanceList = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -616,13 +618,14 @@ export const getTodayAttendanceList = async (req: Request, res: Response) => {
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    // 1️⃣ Get employees
+    // 1️⃣ Get employees — branch/department-scoped HR only see their own;
+    // a global (unscoped) viewer is unaffected.
     const employees = await prisma.employee.findMany({
-      where: {
+      where: await withEmployeeScope(Number(req.user?.empId ?? 0), {
         employmentStatus: {
           in: ['ACTIVE', 'NOTICE_PERIOD'],
         },
-      },
+      }),
       include: {
         Department: true,
         designation: true,
@@ -738,7 +741,7 @@ export const getTodayAttendanceList = async (req: Request, res: Response) => {
 };
 
 
-export const getAttendanceHistory = async (req: Request, res: Response) => {
+export const getAttendanceHistory = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const dateParam = req.query.date as string;
 
@@ -752,13 +755,13 @@ export const getAttendanceHistory = async (req: Request, res: Response) => {
     const nextDay = new Date(selectedDate);
     nextDay.setDate(nextDay.getDate() + 1);
 
-    // 1️⃣ Get employees
+    // 1️⃣ Get employees — branch/department-scoped HR only see their own.
     const employees = await prisma.employee.findMany({
-      where: {
+      where: await withEmployeeScope(Number(req.user?.empId ?? 0), {
         employmentStatus: {
           in: ['ACTIVE', 'NOTICE_PERIOD'],
         },
-      },
+      }),
       include: {
         Department: true,
         designation: true,
@@ -872,7 +875,7 @@ export const getAttendanceHistory = async (req: Request, res: Response) => {
   }
 };
 
-export const getMonthlyAttendanceRegister = async (req: Request, res: Response) => {
+export const getMonthlyAttendanceRegister = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const month = req.query.month as string; // YYYY-MM
     if (!month) {
@@ -883,10 +886,11 @@ export const getMonthlyAttendanceRegister = async (req: Request, res: Response) 
     const end = new Date(start);
     end.setMonth(end.getMonth() + 1);
 
+    // Branch/department-scoped HR only see their own employees.
     const employees = await prisma.employee.findMany({
-      where: {
+      where: await withEmployeeScope(Number(req.user?.empId ?? 0), {
         employmentStatus: { in: ['ACTIVE', 'NOTICE_PERIOD'] }
-      }
+      })
     });
 
     const attendance = await prisma.attendance.findMany({
