@@ -17,7 +17,29 @@ export const getCompOffCredits = async (req: Request, res: Response) => {
       orderBy: { createdAt: "desc" },
     });
 
-    return res.json(credits);
+    // leaveId has no Prisma relation, so pull the consuming leave separately and
+    // attach it — the UI shows the leave's dates, not the approval timestamp.
+    const leaveIds = [...new Set(credits.map(c => c.leaveId).filter((id): id is number => !!id))];
+    const leaves = leaveIds.length
+      ? await prisma.leaveRequest.findMany({
+          where: { id: { in: leaveIds } },
+          select: {
+            id: true,
+            startDate: true,
+            endDate: true,
+            isHalfDay: true,
+            leaveType: { select: { name: true } },
+          },
+        })
+      : [];
+    const leaveById = new Map(leaves.map(l => [l.id, l]));
+
+    return res.json(
+      credits.map(c => ({
+        ...c,
+        leave: c.leaveId ? leaveById.get(c.leaveId) ?? null : null,
+      })),
+    );
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }

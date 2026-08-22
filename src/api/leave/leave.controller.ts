@@ -1690,13 +1690,19 @@ export const updateLeaveStatus = async (req: AuthenticatedRequest, res: Response
         // ---- CO: consume credits only (leave balance untouched)
         if (updatedLeave.leaveType.name === "CO") {
           const today = atStartOfDay(new Date());
+          const leaveDay = atStartOfDay(startDate);
           const requiredDays = Math.ceil(requestedUnits);
 
+          // Only credits that were valid FOR THE LEAVE DAY qualify: earned on or
+          // before it, and not expired on it. Filtering by "expiry >= today"
+          // instead let approval silently burn a newer credit the employee never
+          // applied against, once the intended one expired during the approval delay.
           const credits = await tx.compOffCredit.findMany({
             where: {
               employeeId: updatedLeave.employeeId,
               used: false,
-              expiryDate: { gte: today },
+              workDate: { lte: leaveDay },
+              expiryDate: { gte: leaveDay },
             },
             orderBy: { expiryDate: "asc" },
           });
@@ -1705,14 +1711,43 @@ export const updateLeaveStatus = async (req: AuthenticatedRequest, res: Response
             return {
               kind: "ERR" as const,
               status: 400,
-              body: { error: "Not enough comp-off credits" },
+              body: {
+                error: `Not enough comp-off credits earned on or before ${fmtDate(startDate)} `
+                     + `— ${credits.length} available, ${requiredDays} needed.`,
+              },
             };
           }
 
-          for (const c of credits.slice(0, requiredDays)) {
+          const toUse = credits.slice(0, requiredDays);
+
+          // The credit was alive on the leave day but has expired since. Approval
+          // was too slow — refuse rather than substitute a different credit.
+          const expired = toUse.filter(c => atStartOfDay(c.expiryDate) < today);
+          if (expired.length) {
+            const c = expired[0];
+            const lateBy = Math.floor(
+              (today.getTime() - atStartOfDay(c.expiryDate).getTime()) / MS_PER_DAY,
+            );
+            return {
+              kind: "ERR" as const,
+              status: 400,
+              body: {
+                error: `Cannot approve — the comp-off credit earned on ${fmtDate(c.workDate)} `
+                     + `expired on ${fmtDate(c.expiryDate)}, ${lateBy} day(s) ago. `
+                     + `The request was applied on ${fmtDate(updatedLeave.createdAt)} for `
+                     + `${fmtDate(startDate)} and is only being approved now. `
+                     + `Grant a fresh comp-off credit (or extend this one) before approving.`,
+              },
+            };
+          }
+
+          // usedOn = the leave day this credit was consumed for, NOT the moment
+          // of approval. The approval instant already lives on
+          // LeaveRequest.approvedDate / hrDecidedAt.
+          for (const c of toUse) {
             await tx.compOffCredit.update({
               where: { id: c.id },
-              data: { used: true, usedOn: new Date(), leaveId: updatedLeave.id },
+              data: { used: true, usedOn: updatedLeave.startDate, leaveId: updatedLeave.id },
             });
           }
 

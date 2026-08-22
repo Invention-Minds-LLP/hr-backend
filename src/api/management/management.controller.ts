@@ -1607,6 +1607,29 @@ export const getDeptAttendanceToday = async (_req: Request, res: Response) => {
       attnByEmp.set(a.employeeId, { status: (a.status || "").toUpperCase(), checkIn: a.checkIn, checkOut: a.checkOut });
     }
 
+    // Mobile punches carry the GPS fix captured at the moment of check-in / check-out.
+    // Ordered ascending so the first CHECK_IN and the last CHECK_OUT win.
+    const todayPunches = await prisma.attendancePunch.findMany({
+      where: { timestamp: { gte: todayStart, lte: todayEnd } },
+      select: { employeeId: true, type: true, latitude: true, longitude: true, address: true },
+      orderBy: { timestamp: "asc" },
+    });
+    type PunchLoc = { latitude: number; longitude: number; address: string | null };
+    const punchLocByEmp = new Map<number, { checkIn: PunchLoc | null; checkOut: PunchLoc | null }>();
+    for (const p of todayPunches) {
+      let entry = punchLocByEmp.get(p.employeeId);
+      if (!entry) {
+        entry = { checkIn: null, checkOut: null };
+        punchLocByEmp.set(p.employeeId, entry);
+      }
+      const loc: PunchLoc = { latitude: p.latitude, longitude: p.longitude, address: p.address ?? null };
+      if (p.type === "CHECK_IN") {
+        if (!entry.checkIn) entry.checkIn = loc;
+      } else if (p.type === "CHECK_OUT") {
+        entry.checkOut = loc;
+      }
+    }
+
     const holiday = await prisma.holiday.findFirst({
       where: { date: { gte: todayStart, lte: todayEnd } },
       select: { title: true },
@@ -1644,7 +1667,11 @@ export const getDeptAttendanceToday = async (_req: Request, res: Response) => {
       }
     }
 
-    type Emp = { name: string; employeeCode: string; designation: string; status: string; checkIn: string | null; checkOut: string | null };
+    type Emp = {
+      name: string; employeeCode: string; designation: string; status: string;
+      checkIn: string | null; checkOut: string | null;
+      checkInLocation: PunchLoc | null; checkOutLocation: PunchLoc | null;
+    };
     const deptMap = new Map<string, {
       dept: string; headcount: number;
       present: number; leave: number; permission: number; absent: number; weekoff: number;
@@ -1675,6 +1702,8 @@ export const getDeptAttendanceToday = async (_req: Request, res: Response) => {
         status: category,
         checkIn: rec?.checkIn ? format(rec.checkIn, "HH:mm") : null,
         checkOut: rec?.checkOut ? format(rec.checkOut, "HH:mm") : null,
+        checkInLocation: punchLocByEmp.get(e.id)?.checkIn ?? null,
+        checkOutLocation: punchLocByEmp.get(e.id)?.checkOut ?? null,
       });
     }
 

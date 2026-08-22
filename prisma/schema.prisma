@@ -156,6 +156,7 @@ model Employee {
   WFHRequest                 WFHRequest[]
   sabbaticals                Sabbatical[]
   compOffCredits             CompOffCredit[]
+  compOffRequests            CompOffRequest[]
   verifiedItems              ResignationClearanceItem[]
   locationSessions           LocationSession[]
   leaveAccruals              LeaveAccrual[]
@@ -1945,8 +1946,19 @@ model SurveyResponse {
 model PerformanceFormTemplate {
   id           Int                   @id @default(autoincrement())
   departmentId Int
+  /// Legacy. Templates are per-department question sets valid for every cycle;
+  /// new rows carry the TEMPLATE_CYCLE_ANY constant. Kept so existing labels
+  /// remain readable.
   cycle        String
   title        String                @default("Default")
+  /// Score bands as a percentage of this template's own weighted maximum, e.g.
+  ///   [{ "label": "Outstanding",    "minPercent": 100 },
+  ///    { "label": "Commendable",    "minPercent": 84 },
+  ///    { "label": "Acceptable",     "minPercent": 63 },
+  ///    { "label": "Not Acceptable", "minPercent": 0 }]
+  /// Departments word and cut their bands differently, so this is JSON rather
+  /// than fixed columns. Null falls back to the system default.
+  scoreBands   Json?
   createdAt    DateTime              @default(now())
   updatedAt    DateTime              @default(now()) @updatedAt
   department   Department            @relation(fields: [departmentId], references: [id])
@@ -1959,7 +1971,13 @@ model PerformanceFormTemplate {
 model PerformanceQuestion {
   id         Int                     @id @default(autoincrement())
   templateId Int
+  /// Outer grouping, printed in the sheet's first column
+  /// (e.g. "Quality of work", "Knowledge of job").
   category   String
+  /// Inner grouping, printed in the "Header" column
+  /// (e.g. "Professionalism / general aspects", "Competency").
+  /// Same two-level shape SelfAppraisalQuestion already uses.
+  section    String?
   text       String
   orderNo    Int
   weight     Int?
@@ -1980,6 +1998,11 @@ model PerformanceResponse {
   period       EvaluationPeriod
   score        Int?
   reviewerId   Int?
+  /// Who this score came from: SELF | INCHARGE | SUPERVISOR | HOD.
+  /// Part of the unique key, so one question can hold a score from each
+  /// reviewer instead of a single shared one. "REVIEWER" is the default that
+  /// existing single-score rows fall back to.
+  reviewerRole String              @default("REVIEWER")
   comments     String?
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @default(now()) @updatedAt
@@ -1987,7 +2010,7 @@ model PerformanceResponse {
   employee     Employee            @relation(fields: [employeeId], references: [id])
   question     PerformanceQuestion @relation(fields: [questionId], references: [id])
 
-  @@unique([employeeId, cycle, period, questionId])
+  @@unique([employeeId, cycle, period, questionId, reviewerRole])
   @@index([employeeId])
   @@index([departmentId])
   @@index([cycle])
@@ -2835,12 +2858,61 @@ model CompOffCredit {
   isManualGrant Boolean   @default(false)
   grantedBy     Int?
   grantReason   String?
+  /// The CompOffRequest this credit was issued from. Null for HR's direct
+  /// grants and for legacy credits auto-created before the approval flow.
+  requestId     Int?
+  /// Day-offset reminders already sent for this credit (e.g. "7,1"), so the
+  /// daily expiry cron cannot notify the same employee twice for the same day.
+  expiryRemindersSent String? @default("")
   createdAt     DateTime  @default(now())
 
   employee Employee @relation(fields: [employeeId], references: [id])
 
   @@index([employeeId])
   @@index([expiryDate])
+}
+
+/// A claim to a comp-off, raised when an employee works a full shift on a
+/// holiday or week-off. Nothing reaches the employee's balance until their
+/// reporting manager AND HR have both approved — auto-crediting is what made
+/// the entitlement arguable in the first place.
+model CompOffRequest {
+  id               Int       @id @default(autoincrement())
+  employeeId       Int
+  workDate         DateTime
+  /// AUTO (detected from attendance) | HR (raised on the employee's behalf)
+  source           String    @default("AUTO")
+  /// Why the day qualified: a holiday, or the employee's week-off.
+  qualifier        String?
+  /// What was actually worked vs the shift it was measured against. Kept so an
+  /// approver can see the basis of the claim instead of trusting the flag.
+  workedMinutes    Int?
+  shiftMinutes     Int?
+  reason           String?   @db.Text
+
+  /// PENDING_MANAGER | PENDING_HR | APPROVED | REJECTED | WITHDRAWN
+  status           String    @default("PENDING_MANAGER")
+
+  managerId        Int?
+  managerStatus    String    @default("PENDING")
+  managerDecidedAt DateTime?
+  managerNote      String?   @db.Text
+
+  hrId             Int?
+  hrStatus         String    @default("PENDING")
+  hrDecidedAt      DateTime?
+  hrNote           String?   @db.Text
+
+  /// The credit issued at HR approval. Null until then.
+  creditId         Int?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@unique([employeeId, workDate])
+  @@index([status])
+  @@index([managerId])
 }
 
 model ClearanceTemplateItem {

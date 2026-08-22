@@ -72,6 +72,9 @@ export const PERMISSION_CATALOG = [
   { name: 'admin.hrCorrections.view', label: 'HR Force Entry', module: 'HR Manual Entries' },
   { name: 'admin.encashment.view', label: 'Encashment', module: 'HR Manual Entries' },
   { name: 'admin.compOff.view', label: 'Comp Off', module: 'HR Manual Entries' },
+  // Separate from .view: seeing the comp-off register is not the same act as
+  // issuing the credit that lands in someone's leave balance.
+  { name: 'admin.compOff.approve', label: 'Comp Off Approval', module: 'HR Manual Entries' },
   { name: 'admin.incentives.view', label: 'Incentives', module: 'HR Manual Entries' },
   { name: 'admin.loans.view', label: 'Loans', module: 'HR Manual Entries' },
 
@@ -235,6 +238,7 @@ export function computePermissions(ctx: PermissionContext): PermissionKey[] {
     'admin.hrCorrections.view': hrManualSection,
     'admin.encashment.view': hrManualSection,
     'admin.compOff.view': hrManualSection,
+    'admin.compOff.approve': hrManualSection,
     'admin.incentives.view': hrManualSection,
     'admin.loans.view': hrManualSection,
 

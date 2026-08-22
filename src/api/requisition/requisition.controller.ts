@@ -3,7 +3,12 @@ import { Request, Response } from "express";
 
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
+import type { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { createNotification } from "../notifications/notifications.controller";
+
+// HR department id. The HR Use Only closure block is theirs alone — same gate
+// the frontend uses to decide whether to render that panel.
+const HR_DEPT_ID = 1;
 
 export const createRequisition = async (req: Request, res: Response) => {
   try {
@@ -259,7 +264,7 @@ function composeEducation(r: any): string | null {
   return r.education && String(r.education).trim() ? String(r.education).trim() : null;
 }
 
-export const updateRequisitionStatus = async (req: Request, res: Response) => {
+export const updateRequisitionStatus = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
     const {
@@ -443,6 +448,13 @@ export const updateRequisitionStatus = async (req: Request, res: Response) => {
         break;
 
       case "HR_USE_ONLY": // 👈 new step for final closure
+        // Only HR closes a requisition. Every other step is gated by the
+        // requisition's own status, but this one stays open on completed rows,
+        // so without this check any authenticated user (e.g. the COO viewing an
+        // already-approved requisition) could write the closure fields.
+        if (Number(req.user?.deptId ?? 0) !== HR_DEPT_ID) {
+          return res.status(403).json({ message: "Forbidden: HR only" });
+        }
         updateData = {
           hrReferenceNo: req.body.hrReferenceNo,
           salaryRange: req.body.salaryRange,

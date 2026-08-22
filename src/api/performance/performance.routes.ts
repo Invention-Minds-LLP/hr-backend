@@ -3,6 +3,7 @@ import {
   createTemplate,
   getTemplateByDept,
   getTemplateDetail,
+  cloneTemplate,
   updateTemplate,
   deleteTemplate,
   listTemplatesByDept,
@@ -13,7 +14,9 @@ import {
   submitFullForm,
   assignFormToEmployee,
   assignSummaryTemplate,
-  getAllSummaries
+  getAllSummaries,
+  getEmployeeCycles,
+  exportPerformanceSheet
 } from "./performance.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -22,8 +25,11 @@ const router = Router();
 router.post("/template", authenticateToken, createTemplate);
 router.get("/templates", authenticateToken, listTemplatesByDept);
 router.get("/template-detail/:id", authenticateToken, getTemplateDetail);
+router.post("/template/:id/clone", authenticateToken, cloneTemplate);
 router.patch("/template/:id", authenticateToken, updateTemplate);
 router.delete("/template/:id", authenticateToken, deleteTemplate);
+router.get("/cycles", authenticateToken, getEmployeeCycles);
+router.get("/export/:employeeId", authenticateToken, exportPerformanceSheet);
 router.post("/assign", authenticateToken, assignFormToEmployee);
 router.patch("/summary/:id/template", authenticateToken, assignSummaryTemplate);
 router.get("/summaries", authenticateToken, getAllSummaries);

@@ -29,6 +29,7 @@ interface SummaryDupe {
   employeeId: number;
   cycle: string;
   period: string;
+  templateId: number | null;
   keepId: number;
   total: bigint;
 }
@@ -50,11 +51,14 @@ async function main() {
 
   console.log(`PerformanceResponse: ${responseDupes.length} duplicate groups → ${respToDelete} rows to delete`);
 
+  // templateId MUST be in the grouping key: the schema's unique constraint is
+  // [employeeId, cycle, period, templateId], so two summaries for the same
+  // period under two different templates are legitimate, not duplicates.
   const summaryDupes = await prisma.$queryRaw<SummaryDupe[]>`
-    SELECT employeeId, cycle, period,
+    SELECT employeeId, cycle, period, templateId,
            MAX(id) AS keepId, COUNT(*) AS total
     FROM PerformanceSummary
-    GROUP BY employeeId, cycle, period
+    GROUP BY employeeId, cycle, period, templateId
     HAVING COUNT(*) > 1
   `;
 
@@ -95,6 +99,7 @@ async function main() {
         employeeId: d.employeeId,
         cycle: d.cycle,
         period: d.period as any,
+        templateId: d.templateId,
         id: { not: d.keepId },
       },
     });
