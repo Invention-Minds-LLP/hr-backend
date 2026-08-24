@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
 import { getEffectiveMonthsSinceJoining, getPausedDaysBetween, assertNotPausedOrHR } from "./appraisal-pause.controller";
+import { managerIdsAmong } from "./appraisal.controller";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SELF-APPRAISAL QUESTIONS (Master)
@@ -166,6 +167,44 @@ const inchargeDone = (a: {
   inchargeAppraisalSubmittedAt?: Date | null;
   employee?: { inchargeId?: number | null } | null;
 }) => !inchargeRequired(a) || !!a?.inchargeAppraisalSubmittedAt;
+
+/**
+ * Whether a separate Management review is needed.
+ *
+ * When the subject's own reporting manager IS Management — the normal case for
+ * a Reporting Manager being appraised — the manager review already is the
+ * management review. Asking the same person to file twice adds nothing and
+ * leaves the appraisal sitting at PENDING_FILL forever.
+ *
+ * AppraisalForm carries `managerId` but has no `manager` relation, so this
+ * looks the person up rather than relying on an include.
+ */
+const MANAGEMENT_ROLE_ID = 4;
+
+const managementRequired = async (a: { managerId?: number | null }): Promise<boolean> => {
+  // managerId is stamped from the employee's reportingManager at creation.
+  const mgrId = a?.managerId ?? null;
+  if (!mgrId) return true; // nobody on record — keep the step
+
+  const mgr = await prisma.employee.findUnique({
+    where: { id: mgrId },
+    select: { roleId: true, role: { select: { name: true } } },
+  });
+  if (!mgr) return true;
+
+  // Checked by id AND name: the Role table has near-duplicate names, and ids
+  // have drifted before, so neither alone is trustworthy.
+  const byId = Number(mgr.roleId) === MANAGEMENT_ROLE_ID;
+  const byName = (mgr.role?.name ?? "").trim().toLowerCase() === "management";
+  return !(byId || byName);
+};
+
+/** True when the Management step is either not required, or has been submitted. */
+const managementDone = async (a: {
+  managementAppraisalSubmittedAt?: Date | null;
+  managerId?: number | null;
+}): Promise<boolean> =>
+  !!a?.managementAppraisalSubmittedAt || !(await managementRequired(a));
 
 type EditLevel = "SELF" | "INCHARGE" | "MANAGER" | "MANAGEMENT";
 
@@ -422,8 +461,9 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
       // All required levels must submit → HR_REVIEW. In-charge only counts
       // when the appraisal has an in-charge assigned.
       const managerAlreadySubmitted = !!appraisal.managerAppraisalSubmittedAt;
-      const managementAlreadySubmitted = !!appraisal.managementAppraisalSubmittedAt;
-      const allSubmitted = managerAlreadySubmitted && managementAlreadySubmitted && inchargeDone(appraisal);
+      // Management only counts when the subject's manager isn't Management
+      // themselves — otherwise the same person would have to file twice.
+      const allSubmitted = managerAlreadySubmitted && (await managementDone(appraisal)) && inchargeDone(appraisal);
       const newStatus = allSubmitted ? "HR_REVIEW" : "PENDING_FILL";
 
       await prisma.appraisalForm.update({
@@ -559,9 +599,9 @@ export const submitManagerAppraisalV2 = async (req: Request, res: Response) => {
 
     if (!isDraft) {
       const selfAlreadySubmitted = !!appraisal.selfAppraisalSubmittedAt;
-      const managementAlreadySubmitted = !!appraisal.managementAppraisalSubmittedAt;
-      // In-charge only blocks when the appraisal has one assigned.
-      const allSubmitted = selfAlreadySubmitted && managementAlreadySubmitted && inchargeDone(appraisal);
+      // In-charge only blocks when the appraisal has one assigned; Management
+      // only when the subject's manager isn't Management themselves.
+      const allSubmitted = selfAlreadySubmitted && (await managementDone(appraisal)) && inchargeDone(appraisal);
       const newStatus = allSubmitted ? "HR_REVIEW" : "PENDING_FILL";
 
       await prisma.appraisalForm.update({
@@ -1523,10 +1563,21 @@ export const initAppraisalAutoDraftCron = () => {
     console.log("Running appraisal auto-draft cron...");
     try {
       const today = new Date();
-      const employees = await prisma.employee.findMany({
+      const allActive = await prisma.employee.findMany({
         where: { employmentStatus: "ACTIVE" },
         select: { id: true, dateOfJoining: true, reportingManager: true },
       });
+
+      // Managerial appraisal is only for people who manage someone; everyone
+      // else is appraised through the Dept Performance Indicator. Without this
+      // the cron quietly drafted a managerial form for every executive, which
+      // is how they ended up in both modules.
+      const managerSet = await managerIdsAmong(allActive.map((e) => e.id));
+      const employees = allActive.filter((e) => managerSet.has(e.id));
+      const skipped = allActive.length - employees.length;
+      if (skipped) {
+        console.log(`Appraisal auto-draft: skipped ${skipped} non-manager(s) — indicator module handles them.`);
+      }
 
       let created = 0;
 

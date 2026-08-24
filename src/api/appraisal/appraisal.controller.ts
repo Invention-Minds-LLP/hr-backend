@@ -28,7 +28,22 @@ export const bulkCreateAppraisals = async (req: Request, res: Response) => {
     }
 
     const result = await createAppraisalsForEmployees(employeeIds, cycle, 'Draft');
-    return res.status(201).json({ message: 'Appraisals created', count: result.count });
+
+    // Managerial appraisal is for people who manage someone. Refusing outright
+    // rather than warning, so executives cannot end up in both modules.
+    if (!result.count && result.rejected.length) {
+      return res.status(400).json({
+        error: 'Managerial appraisal is only for employees who manage someone. '
+          + 'Appraise the others through the Dept Performance Indicator.',
+        rejected: result.rejected,
+      });
+    }
+
+    return res.status(201).json({
+      message: 'Appraisals created',
+      count: result.count,
+      rejected: result.rejected,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to create appraisals' });
@@ -39,6 +54,25 @@ const generateUniqueAppraisalId = (employeeId: number) => {
   const date = new Date();
   return `${date.getFullYear()}${(date.getMonth() + 1)
     .toString().padStart(2, '0')}${date.getDate().toString().padStart(2, '0')}-${employeeId}`;
+};
+
+/**
+ * Who the managerial appraisal is for: people who manage someone.
+ *
+ * Decided by direct reports rather than a role name — the Role table holds both
+ * "Incharge" (5) and "Incharges" (10), and new roles keep being added, so a
+ * string check would quietly let the wrong people through. Everyone else is
+ * appraised via the Dept Performance Indicator.
+ */
+export const managerIdsAmong = async (employeeIds: number[]): Promise<Set<number>> => {
+  if (!employeeIds.length) return new Set();
+  const withReports = await prisma.employee.groupBy({
+    by: ['reportingManager'],
+    where: { reportingManager: { in: employeeIds }, employmentStatus: 'ACTIVE' },
+  });
+  return new Set(
+    withReports.map((r) => r.reportingManager).filter((id): id is number => id != null),
+  );
 };
 
 // Create appraisals for given employees
@@ -55,7 +89,23 @@ export const createAppraisalsForEmployees = async (
     select: { id: true, reportingManager: true, firstName: true, lastName: true }
   });
 
-  const data = employees.map(emp => ({
+  // Guard lives here rather than in the route, so none of the four creation
+  // paths (HR endpoint, scheduler, auto-draft cron, admin route) can bypass it.
+  const managerSet = await managerIdsAmong(employees.map((e) => e.id));
+  const rejected = employees
+    .filter((e) => !managerSet.has(e.id))
+    .map((e) => ({
+      employeeId: e.id,
+      name: `${e.firstName ?? ''} ${e.lastName ?? ''}`.trim() || `#${e.id}`,
+      reason: 'Has no direct reports — appraise through the Dept Performance Indicator instead.',
+    }));
+
+  const eligible = employees.filter((e) => managerSet.has(e.id));
+  if (!eligible.length) {
+    return { count: 0, rejected };
+  }
+
+  const data = eligible.map(emp => ({
     employeeId: emp.id,
     managerId: emp.reportingManager, // store reporting manager
     cycle,
@@ -66,7 +116,7 @@ export const createAppraisalsForEmployees = async (
 
   const created = await prisma.appraisalForm.createMany({ data });
   const managerIds = Array.from(
-    new Set(employees.map(e => e.reportingManager).filter((id): id is number => !!id))
+    new Set(eligible.map(e => e.reportingManager).filter((id): id is number => !!id))
   );
 
   const managers = await prisma.employee.findMany({
@@ -78,7 +128,7 @@ export const createAppraisalsForEmployees = async (
 
   // Fire-and-forget WhatsApp notifications; don't block/throw the API
   await Promise.all(
-    employees.map(async (emp) => {
+    eligible.map(async (emp) => {
       const mgr = emp.reportingManager ? mgrById.get(emp.reportingManager) : undefined;
       if (!mgr) return;
       const mgrPhone = formatPhoneNumber(mgr?.phone || "");
@@ -105,7 +155,9 @@ export const createAppraisalsForEmployees = async (
     })
   );
 
-  return created;
+  // `rejected` names anyone refused so callers can report it rather than
+  // silently creating fewer rows than were asked for.
+  return { ...created, rejected };
 };
 
 // function getEmployeeCycle(doj: Date, now: Date) {

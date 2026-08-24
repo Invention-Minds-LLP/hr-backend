@@ -16,6 +16,7 @@ import {
   isReviewerRole,
   isHRViewer,
   canSeeReviewerScore,
+  reviewerProgressState,
   parseScoreBands,
   templateMaxMarks,
   bandFor,
@@ -37,9 +38,35 @@ async function callerReviewerRole(req: Request, employeeId: number): Promise<Rev
   });
   if (!subject) return null;
   return resolveReviewerRole(
-    { empId: user?.empId ?? null, role: user?.role ?? "", deptId: user?.deptId ?? null },
+    {
+      empId: user?.empId ?? null,
+      role: user?.role ?? "",
+      deptId: user?.deptId ?? null,
+      roleId: user?.roleId ?? null,
+    },
     subject,
   );
+}
+
+/**
+ * The caller's role if they may write scores, else an error message explaining
+ * why not. SELF never scores here — that is the self-appraisal.
+ */
+async function scoringRoleOrReason(
+  req: Request,
+  employeeId: number,
+): Promise<{ role: string } | { error: string }> {
+  const role = await callerReviewerRole(req, employeeId);
+  if (role === "SELF") {
+    return { error: "Score your own performance through Self Appraisal, not here." };
+  }
+  if (!role) {
+    return {
+      error: "You are not a reviewer for this employee. Only their in-charge, "
+        + "reporting manager (HOD) or Management can score.",
+    };
+  }
+  return { role };
 }
 
 /**
@@ -400,7 +427,9 @@ export const submitResponses = async (req: Request, res: Response) => {
     // and blows the 5s default.
     // The caller writes their own column only — they cannot overwrite another
     // reviewer's scores.
-    const reviewerRole = (await callerReviewerRole(req, Number(employeeId))) ?? LEGACY_REVIEWER_ROLE;
+    const resolved = await scoringRoleOrReason(req, Number(employeeId));
+    if ("error" in resolved) return res.status(403).json({ error: resolved.error });
+    const reviewerRole = resolved.role;
 
     await prisma.$transaction(async (tx) => {
       for (const r of (responses || [])) {
@@ -622,6 +651,7 @@ export const getEmployeeForm = async (req: Request, res: Response) => {
       empId: user?.empId ?? null,
       role: user?.role ?? "",
       deptId: user?.deptId ?? null,
+      roleId: user?.roleId ?? null,
     });
     const visibleResponses = responses.filter((r) =>
       canSeeReviewerScore(reviewerRole, isHR, r.reviewerRole),
@@ -654,7 +684,12 @@ export const submitFullForm = async (req: Request, res: Response) => {
     const guard = await assertNotPausedOrHR(Number(data.employeeId), callerEmpId);
     if (guard.blocked) return res.status(423).json({ error: guard.message });
     const templateId: number | null = data.templateId ?? null;
-    const reviewerRole = (await callerReviewerRole(req, Number(data.employeeId))) ?? LEGACY_REVIEWER_ROLE;
+
+    // Only score if this caller has a column. Refusing here rather than writing
+    // to a fallback keeps one reviewer's marks from landing in another's row.
+    const resolvedRole = await scoringRoleOrReason(req, Number(data.employeeId));
+    if ("error" in resolvedRole) return res.status(403).json({ error: resolvedRole.error });
+    const reviewerRole = resolvedRole.role;
 
     // A period can only be filled once its milestone has passed — you cannot
     // rate performance for time the employee hasn't worked yet. Backfilling a
@@ -1069,11 +1104,16 @@ export const getAllSummaries = async (req: Request, res: Response) => {
         ],
       };
     } else {
-      // Default (HODs, in-charges, executives outside HR): own department's
-      // rows plus their own. Previously this branch fell through to "everything".
+      // In-charges and plain executives: the people they are in-charge of, plus
+      // their own row. Deliberately NOT the whole department — an executive has
+      // no business seeing every colleague's appraisal.
+      //
+      // NOTE: this returns nothing for an in-charge until `inchargeId` is set on
+      // their reports. That field is editable on the employee form; it is empty
+      // across the board today.
       whereClause = {
         OR: [
-          ...(Number.isFinite(deptId) ? [{ departmentId: deptId }] : []),
+          { employee: { inchargeId: empId } },
           { employeeId: empId },
         ],
       };
@@ -1104,11 +1144,59 @@ export const getAllSummaries = async (req: Request, res: Response) => {
           }
         },
         template: {
-          select: { id: true, title: true }
+          select: { id: true, title: true, _count: { select: { questions: true } } }
         }
       },
       orderBy: { createdAt: "desc" }
     });
+
+    // Who has finished their part. Derived, not stored — two grouped queries
+    // rather than one per row. Only sent to HR/Management: completion status is
+    // not a score, but it is still not a reviewer's business who else has filed.
+    const showProgress = isHRManager || isManagement || isHRExecutive;
+    let progressFor: (s: (typeof summaries)[number]) => Record<string, string> | undefined =
+      () => undefined;
+
+    if (showProgress && summaries.length) {
+      const empIds = [...new Set(summaries.map((s) => s.employeeId))];
+
+      // Scored answers per (employee, cycle, period, reviewer).
+      const scored = await prisma.performanceResponse.groupBy({
+        by: ["employeeId", "cycle", "period", "reviewerRole"],
+        where: { employeeId: { in: empIds }, score: { not: null } },
+        _count: { _all: true },
+      });
+      const scoredMap = new Map<string, number>();
+      for (const r of scored) {
+        scoredMap.set(`${r.employeeId}|${r.cycle}|${r.period}|${r.reviewerRole}`, r._count._all);
+      }
+
+      // Self-appraisal is per CYCLE, so it reads the same across that cycle's
+      // period rows — unlike the reviewer columns, which are per period.
+      const selfs = await prisma.performanceSelfAppraisal.findMany({
+        where: { employeeId: { in: empIds } },
+        select: { employeeId: true, cycle: true, submittedAt: true },
+      });
+      const selfMap = new Map(
+        selfs.map((s) => [`${s.employeeId}|${s.cycle}`, s.submittedAt ? "done" : "partial"]),
+      );
+
+      progressFor = (s) => {
+        const total = s.template?._count?.questions ?? 0;
+        const state = (role: string) =>
+          reviewerProgressState(
+            scoredMap.get(`${s.employeeId}|${s.cycle}|${s.period}|${role}`) ?? 0,
+            total,
+          );
+        return {
+          SELF: selfMap.get(`${s.employeeId}|${s.cycle}`) ?? "none",
+          INCHARGE: state("INCHARGE"),
+          HOD: state("HOD"),
+          MANAGEMENT: state("MANAGEMENT"),
+          REVIEWER: state(LEGACY_REVIEWER_ROLE),
+        };
+      };
+    }
 
     // A recurring review is stored as YEAR_1 whatever year it covers, so the raw
     // period would show "1 Year" on a third-year row. Label each row by the year
@@ -1120,6 +1208,8 @@ export const getAllSummaries = async (req: Request, res: Response) => {
         s.cycle,
         s.period as string,
       ),
+      // Absent for non-HR callers, so the column simply doesn't render.
+      progress: progressFor(s),
     }));
 
     res.json(rows);

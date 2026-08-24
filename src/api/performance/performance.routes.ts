@@ -18,6 +18,12 @@ import {
   getEmployeeCycles,
   exportPerformanceSheet
 } from "./performance.controller";
+import {
+  listSelfAppraisalCycles,
+  getSelfAppraisal,
+  submitSelfAppraisal,
+  reopenSelfAppraisal,
+} from "./performanceSelfAppraisal.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
@@ -29,6 +35,13 @@ router.post("/template/:id/clone", authenticateToken, cloneTemplate);
 router.patch("/template/:id", authenticateToken, updateTemplate);
 router.delete("/template/:id", authenticateToken, deleteTemplate);
 router.get("/cycles", authenticateToken, getEmployeeCycles);
+
+// Self-appraisal for the indicator. Registered before "/self-appraisal" so the
+// literal "cycles" segment is not swallowed by a parameterised route.
+router.get("/self-appraisal/cycles", authenticateToken, listSelfAppraisalCycles);
+router.get("/self-appraisal", authenticateToken, getSelfAppraisal);
+router.post("/self-appraisal", authenticateToken, submitSelfAppraisal);
+router.patch("/self-appraisal/:id/reopen", authenticateToken, reopenSelfAppraisal);
 router.get("/export/:employeeId", authenticateToken, exportPerformanceSheet);
 router.post("/assign", authenticateToken, assignFormToEmployee);
 router.patch("/summary/:id/template", authenticateToken, assignSummaryTemplate);

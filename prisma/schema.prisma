@@ -139,6 +139,7 @@ model Employee {
   PerformanceFinalReview     PerformanceFinalReview[]
   PerformanceResponse        PerformanceResponse[]
   PerformanceSummary         PerformanceSummary[]
+  performanceSelfAppraisals  PerformanceSelfAppraisal[]
   permissions                PermissionRequest[]
   poshAccusations            PoshCase[]                  @relation("AccusedCases")
   poshComplaints             PoshCase[]                  @relation("ComplainantCases")
@@ -945,6 +946,9 @@ model SelfAppraisalQuestion {
   createdAt    DateTime @default(now())
 
   answers SelfAppraisalAnswer[]
+  /// Same question master serves the Dept Performance Indicator's own
+  /// self-appraisal, so both flows ask an employee the same things.
+  performanceAnswers PerformanceSelfAppraisalAnswer[]
 }
 
 model SelfAppraisal {
@@ -1910,17 +1914,46 @@ model OvertimeApproval {
   @@unique([employeeId, date], name: "employeeId_date")
 }
 
+/// One org-wide survey campaign, e.g. "Employee Satisfaction Survey — Sep 2026".
+/// Replaces the old per-employee anniversary schedule: every eligible employee
+/// shares one window. Closing a cycle spawns the next one `recurrenceMonths`
+/// later, so the half-yearly repeat is self-sustaining.
+model SurveyCycle {
+  id               Int              @id @default(autoincrement())
+  name             String
+  /// Submission window. endDate is the hard cut-off — anything still DRAFT
+  /// after it is marked EXPIRED by the cron.
+  startDate        DateTime
+  endDate          DateTime
+  /// SCHEDULED → OPEN → CLOSED
+  status           String           @default("SCHEDULED")
+  /// Employees who joined within this many days before startDate are skipped.
+  exclusionDays    Int              @default(15)
+  /// Months to the next cycle's startDate. 6 = the requested cadence.
+  recurrenceMonths Int              @default(6)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @default(now()) @updatedAt
+  surveys          EmployeeSurvey[]
+
+  @@index([status, startDate])
+}
+
 model EmployeeSurvey {
   id          Int              @id @default(autoincrement())
   employeeId  Int
+  /// Null for legacy rows created by the old anniversary scheduler.
+  cycleId     Int?
   date        DateTime
   createdAt   DateTime         @default(now())
   status      String           @default("DRAFT")
   submittedAt DateTime?
   employee    Employee         @relation(fields: [employeeId], references: [id])
+  cycle       SurveyCycle?     @relation(fields: [cycleId], references: [id])
   responses   SurveyResponse[]
 
+  @@unique([cycleId, employeeId], name: "cycleId_employeeId")
   @@index([employeeId], map: "EmployeeSurvey_employeeId_fkey")
+  @@index([cycleId], map: "EmployeeSurvey_cycleId_fkey")
 }
 
 model SurveyQuestion {
@@ -2059,6 +2092,58 @@ model PerformanceFinalReview {
 
   @@index([departmentId], map: "PerformanceFinalReview_departmentId_fkey")
   @@index([employeeId], map: "PerformanceFinalReview_employeeId_fkey")
+}
+
+/// Self-appraisal for the Dept Performance Indicator — the executive's own
+/// assessment, while their in-charge and supervisor score the indicator.
+///
+/// Deliberately SEPARATE from SelfAppraisal, which belongs to AppraisalForm and
+/// serves the managerial flow. One table with two optional parents would be a
+/// polymorphic FK: nothing at the DB level could enforce "exactly one is set",
+/// and the nullable unique keys would stop constraining anything. Both paths
+/// share the SelfAppraisalQuestion master, so it is the same questionnaire —
+/// only the parent differs.
+///
+/// Keyed by employee + cycle rather than by a PerformanceSummary FK: an
+/// employee has several summary rows per cycle (one per milestone) and no one
+/// of them owns the self-appraisal. Same shape PerformanceFinalReview already
+/// uses. Creation is gated on a matching PerformanceSummary existing, so these
+/// can never float free of an assigned indicator.
+model PerformanceSelfAppraisal {
+  id             Int       @id @default(autoincrement())
+  employeeId     Int
+  cycle          String
+  achievements   String?   @db.Text
+  goalsObjective String?   @db.Text
+  challenges     String?   @db.Text
+  trainingNeeds  String?   @db.Text
+  /// Null while still a draft.
+  submittedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @default(now()) @updatedAt
+
+  employee Employee                         @relation(fields: [employeeId], references: [id])
+  answers  PerformanceSelfAppraisalAnswer[]
+
+  @@unique([employeeId, cycle])
+  @@index([employeeId])
+}
+
+model PerformanceSelfAppraisalAnswer {
+  id              Int      @id @default(autoincrement())
+  selfAppraisalId Int
+  questionId      Int
+  rating          Float?
+  comments        String?  @db.Text
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+
+  selfAppraisal PerformanceSelfAppraisal @relation(fields: [selfAppraisalId], references: [id], onDelete: Cascade)
+  question      SelfAppraisalQuestion    @relation(fields: [questionId], references: [id])
+
+  @@unique([selfAppraisalId, questionId])
+  @@index([selfAppraisalId])
+  @@index([questionId])
 }
 
 model ManpowerRequisition {

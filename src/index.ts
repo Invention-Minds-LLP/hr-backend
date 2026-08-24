@@ -36,7 +36,6 @@ import poshRouter from "./api/posh/posh.routes";
 import notificationRouter from "./api/notifications/notifications.routes";
 import trainingRouter from "./api/training/training.routes";
 import attendanceCalendarRoutes from "./api/attendance/attendance.routes";
-import { initSurveyScheduler } from "./api/survey/survery.controller";
 import { initNoticePeriodSchedular } from "./api/resignation/resignation.controller";
 import incidentRouter from "./api/incident/incident.routes";
 import committeeRouter from "./api/committee/committee.routes";

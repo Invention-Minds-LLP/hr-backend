@@ -109,6 +109,15 @@ async function loadSheet(opts: SheetOptions) {
     orderBy: { id: "desc" },
   });
 
+  // No FK to PerformanceSummary — joined on employee + cycle, the same way
+  // PerformanceFinalReview is. The tenure filter is empty, so that scope picks
+  // up one self-appraisal per cycle.
+  const selfAppraisals = await prisma.performanceSelfAppraisal.findMany({
+    where: { employeeId: opts.employeeId, ...cycleFilter },
+    include: { answers: { include: { question: true } } },
+    orderBy: { cycle: "asc" },
+  });
+
   const doj = employee.dateOfJoining ? new Date(employee.dateOfJoining) : null;
 
   const seen = new Set<string>();
@@ -130,7 +139,7 @@ async function loadSheet(opts: SheetOptions) {
   }
   columns.sort((a, b) => a.sort - b.sort);
 
-  return { employee, doj, summaries, template, responses, finalReview, columns };
+  return { employee, doj, summaries, template, responses, finalReview, selfAppraisals, columns };
 }
 
 function drawRow(
@@ -164,7 +173,7 @@ export async function buildPerformanceSheetPdf(
   const data = await loadSheet(opts);
   if (!data) return null;
 
-  const { employee, doj, summaries, template, responses, finalReview, columns } = data;
+  const { employee, doj, summaries, template, responses, finalReview, selfAppraisals, columns } = data;
 
   // Default to HR-equivalent so an internal caller that forgets to pass a viewer
   // produces the complete record rather than a silently blank one; the route
@@ -311,8 +320,10 @@ export async function buildPerformanceSheetPdf(
               r.score != null &&
               canSeeReviewerScore(viewerRole, viewerIsHR, r.reviewerRole),
           );
-          const pick = forCell.find((r) => r.reviewerRole === "HOD")
-            ?? forCell.find((r) => r.reviewerRole === "SUPERVISOR")
+          // Most senior available reviewer, mirroring how the paper form carries
+          // one number per period: Management, then HOD, then In-charge.
+          const pick = forCell.find((r) => r.reviewerRole === "MANAGEMENT")
+            ?? forCell.find((r) => r.reviewerRole === "HOD")
             ?? forCell.find((r) => r.reviewerRole === "INCHARGE")
             ?? forCell.find((r) => r.reviewerRole !== "SELF")
             ?? forCell[0];
@@ -409,6 +420,71 @@ export async function buildPerformanceSheetPdf(
     y += rowH;
   }
   y += 12;
+
+  // ── Self-appraisal ───────────────────────────────────────────────────────
+  // The employee's own words, between them and HR. An in-charge or supervisor
+  // downloading the sheet must not get it, or the PDF would leak round the
+  // front what the API now withholds.
+  const mayReadSelf = viewerIsHR || (opts.viewer?.role === "SELF");
+  if (mayReadSelf && selfAppraisals.length) {
+    for (const sa of selfAppraisals) {
+      ensure(46);
+      doc.font(FONT_BOLD).fontSize(9).fillColor("#000")
+        .text(`SELF-APPRAISAL — ${sa.cycle}${sa.submittedAt ? "" : "  (draft)"}`, left, y);
+      y = doc.y + 4;
+
+      if (sa.answers.length) {
+        const qw = [usable * 0.58, usable * 0.12, usable * 0.30];
+        const saHeader = () => {
+          y += drawRow(doc, [
+            { text: "Question", bold: true },
+            { text: "Rating", bold: true, align: "center" },
+            { text: "Comments", bold: true },
+          ], qw, left, y, 20);
+        };
+        saHeader();
+
+        // Grouped by section, as the on-screen form presents them.
+        const bySection = new Map<string, typeof sa.answers>();
+        for (const a of sa.answers) {
+          const sec = a.question?.section || "General";
+          if (!bySection.has(sec)) bySection.set(sec, [] as any);
+          bySection.get(sec)!.push(a);
+        }
+
+        for (const [section, items] of bySection) {
+          if (y + 24 > bottom) { doc.addPage(); y = margins.top; saHeader(); }
+          y += drawRow(doc, [{ text: section, bold: true }, { text: "" }, { text: "" }], qw, left, y, 16);
+
+          for (const a of items) {
+            if (y + 24 > bottom) { doc.addPage(); y = margins.top; saHeader(); }
+            y += drawRow(doc, [
+              { text: a.question?.text ?? "" },
+              { text: a.rating != null ? String(a.rating) : "", align: "center" },
+              { text: a.comments ?? "" },
+            ], qw, left, y);
+          }
+        }
+        y += 6;
+      }
+
+      const saText: Array<[string, string | null]> = [
+        ["Achievements", sa.achievements],
+        ["Goals & objectives", sa.goalsObjective],
+        ["Challenges", sa.challenges],
+        ["Training needs", sa.trainingNeeds],
+      ];
+      for (const [k, v] of saText) {
+        if (!v) continue;
+        ensure(34);
+        doc.font(FONT_BOLD).fontSize(8).text(`${k}:`, left, y);
+        y = doc.y + 1;
+        doc.font(FONT).fontSize(8).text(v, left, y, { width: usable });
+        y = doc.y + 5;
+      }
+      y += 8;
+    }
+  }
 
   // ── Appreciations ────────────────────────────────────────────────────────
   const blocks: Array<[string, string]> = [

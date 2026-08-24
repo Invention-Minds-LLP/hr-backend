@@ -1,12 +1,12 @@
 import { Request, Response } from "express";
 // import { PrismaClient } from "@prisma/client";
-import cron from "node-cron";
 import { EmploymentStatus } from "@prisma/client";
 
 // const prisma = new PrismaClient();
 import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { excludedEmployees } from "../../schedulers/survey-cycle.scheduler";
 
 // ================== GET QUESTIONS ==================
 export async function getSurveyQuestions(req: Request, res: Response) {
@@ -76,6 +76,7 @@ export async function submitSurvey(req: AuthenticatedRequest, res: Response) {
     // 1️⃣ Check if survey exists and is still DRAFT
     const survey = await prisma.employeeSurvey.findUnique({
       where: { id: Number(surveyId) },
+      include: { cycle: true },
     });
 
     if (!survey) {
@@ -87,8 +88,27 @@ export async function submitSurvey(req: AuthenticatedRequest, res: Response) {
       return res.status(403).json({ error: "Forbidden: survey does not belong to you" });
     }
 
+    if (survey.status === "EXPIRED") {
+      return res.status(400).json({
+        error: "The window for this survey has closed. Please contact HR.",
+      });
+    }
+
     if (survey.status !== "DRAFT") {
       return res.status(400).json({ error: "Survey already submitted" });
+    }
+
+    // Window enforcement. Legacy surveys (cycleId null, created by the old
+    // anniversary scheduler) carry no deadline and stay submittable.
+    if (survey.cycle) {
+      const closed =
+        survey.cycle.status === "CLOSED" || new Date() > new Date(survey.cycle.endDate);
+      if (closed) {
+        const on = new Date(survey.cycle.endDate).toLocaleDateString("en-IN");
+        return res.status(400).json({
+          error: `This survey closed on ${on} and can no longer be submitted. Please contact HR.`,
+        });
+      }
     }
 
     // 2️⃣ Update survey + create responses
@@ -208,73 +228,10 @@ export async function getAllSurveys(_req: Request, res: Response) {
       .json({ error: e?.message || "Failed to fetch surveys" });
   }
 }
-/**
- * Runs every day at midnight
- * Creates surveys for employees whose next survey date == today
- */
-export const initSurveyScheduler = () => {
-  cron.schedule("0 0 * * *", async () => {
-    console.log("🕐 Running 6-month Employee Survey Scheduler...");
+// The old per-employee anniversary scheduler (survey due 6 months after each
+// employee's joining date) lived here. It has been replaced by the fixed
+// org-wide cycle engine in src/schedulers/survey-cycle.scheduler.ts.
 
-    try {
-      const today = new Date();
-      const todayStr = today.toISOString().split("T")[0]; // YYYY-MM-DD
-
-      // Get all active employees
-      const activeEmployees = await prisma.employee.findMany({
-        where: { employmentStatus: "ACTIVE" },
-        select: { id: true, dateOfJoining: true, firstName: true, lastName: true },
-      });
-
-      for (const emp of activeEmployees) {
-        // 1️⃣ Get the latest survey
-        const lastSurvey = await prisma.employeeSurvey.findFirst({
-          where: { employeeId: emp.id },
-          orderBy: { date: "desc" },
-        });
-
-        // 2️⃣ Determine reference date
-        const referenceDate = lastSurvey
-          ? new Date(lastSurvey.date)
-          : new Date(emp.dateOfJoining);
-
-        // 3️⃣ Calculate the exact next due date
-        const nextSurveyDate = new Date(referenceDate);
-        nextSurveyDate.setMonth(nextSurveyDate.getMonth() + 6);
-
-        const nextSurveyStr = nextSurveyDate.toISOString().split("T")[0];
-
-        // 4️⃣ If the next survey date is today or already past (catch-up for
-        //    missed cron runs). Safe against duplicates: once a DRAFT exists,
-        //    lastSurvey.date is that DRAFT's date, so the next due is 6 months
-        //    out and the condition won't re-fire.
-        if (nextSurveyStr <= todayStr) {
-          await prisma.employeeSurvey.create({
-            data: {
-              employeeId: emp.id,
-              date: new Date(),
-              status: "DRAFT",
-            },
-          });
-          console.log(`✅ Created new survey for employee ${emp.id}`);
-            // 🔔 Notify employee
-          try {
-            const empName = `${emp.firstName} ${emp.lastName}`;
-            const message = `${empName}, your 6-month employee survey is now available. Please complete it at your earliest convenience.`;
-
-            await createNotification(emp.id, message);
-          } catch (err) {
-            console.error(`Notification failed for employee ${emp.id}:`, err);
-          }
-        }
-      }
-
-      console.log("🎯 Employee survey scheduling complete.");
-    } catch (error) {
-      console.error("❌ Error running survey scheduler:", error);
-    }
-  });
-};
 // ================== GET DRAFT SURVEYS (BY EMPLOYEE) ==================
 export async function getDraftSurveys(req: Request, res: Response) {
   try {
@@ -291,6 +248,9 @@ export async function getDraftSurveys(req: Request, res: Response) {
       },
       include: {
         responses: { include: { question: true } },
+        // Carries the deadline so the employee's own dashboard can show when
+        // the window closes rather than an open-ended "Take Survey".
+        cycle: { select: { id: true, name: true, startDate: true, endDate: true, status: true } },
         employee: {
           select: {
             id: true,
@@ -324,6 +284,86 @@ async function getHRIds(): Promise<number[]> {
   });
 
   return hrs.map(h => h.id);
+}
+
+// ================== SURVEY CYCLES ==================
+/**
+ * Cycle list for the dashboard's cycle picker. Each row carries its own
+ * submitted/pending/expired tally so HR sees completion without a second call.
+ */
+export async function getSurveyCycles(_req: Request, res: Response) {
+  try {
+    const cycles = await prisma.surveyCycle.findMany({
+      orderBy: { startDate: "desc" },
+    });
+
+    const tallies = await prisma.employeeSurvey.groupBy({
+      by: ["cycleId", "status"],
+      _count: { _all: true },
+      where: { cycleId: { not: null } },
+    });
+
+    const out = cycles.map((c) => {
+      const rows = tallies.filter((t) => t.cycleId === c.id);
+      const of = (status: string) =>
+        rows.find((r) => r.status === status)?._count._all ?? 0;
+      const submitted = of("SUBMITTED");
+      const pending = of("DRAFT");
+      const expired = of("EXPIRED");
+      const assigned = submitted + pending + expired;
+      return {
+        ...c,
+        assigned,
+        submitted,
+        pending,
+        expired,
+        completionPct: assigned ? +((submitted / assigned) * 100).toFixed(1) : 0,
+      };
+    });
+
+    return res.json(out);
+  } catch (e: any) {
+    console.error("getSurveyCycles error:", e);
+    return res.status(500).json({ error: e?.message || "Failed to fetch cycles" });
+  }
+}
+
+/**
+ * ACTIVE employees a cycle skipped under the joining-date rule. HR asked to be
+ * able to see who was left out and why, so this is derived on demand rather
+ * than stored at assignment time.
+ */
+export async function getCycleExclusions(req: Request, res: Response) {
+  try {
+    const cycleId = Number(req.params.cycleId);
+    if (Number.isNaN(cycleId)) {
+      return res.status(400).json({ error: "Invalid cycleId" });
+    }
+    const cycle = await prisma.surveyCycle.findUnique({ where: { id: cycleId } });
+    if (!cycle) return res.status(404).json({ error: "Cycle not found" });
+
+    const excluded = await excludedEmployees(cycle.startDate, cycle.exclusionDays);
+    return res.json({
+      cycle: {
+        id: cycle.id,
+        name: cycle.name,
+        startDate: cycle.startDate,
+        endDate: cycle.endDate,
+        exclusionDays: cycle.exclusionDays,
+      },
+      total: excluded.length,
+      employees: excluded.map((e) => ({
+        id: e.id,
+        name: `${e.firstName} ${e.lastName}`,
+        employeeCode: e.employeeCode,
+        department: e.Department?.name ?? "—",
+        dateOfJoining: e.dateOfJoining,
+      })),
+    });
+  } catch (e: any) {
+    console.error("getCycleExclusions error:", e);
+    return res.status(500).json({ error: e?.message || "Failed to fetch exclusions" });
+  }
 }
 
 // ====================================================================
@@ -397,6 +437,7 @@ function parseFilters(req: Request) {
   const q = req.query;
   const from = q.from ? new Date(String(q.from)) : undefined;
   const to = q.to ? new Date(String(q.to)) : undefined;
+  const cycleId = q.cycleId ? Number(q.cycleId) : undefined;
   const departmentId = q.departmentId ? Number(q.departmentId) : undefined;
   const departmentIds = q.departmentIds
     ? String(q.departmentIds).split(",").map((s) => Number(s.trim())).filter(Boolean)
@@ -406,7 +447,7 @@ function parseFilters(req: Request) {
   const sections = q.sections
     ? String(q.sections).split(",").map((s) => s.trim()).filter(Boolean)
     : undefined;
-  return { from, to, departmentId, departmentIds, gender, designationId, sections };
+  return { from, to, cycleId, departmentId, departmentIds, gender, designationId, sections };
 }
 
 function buildSurveyWhere(f: ReturnType<typeof parseFilters>) {
@@ -417,7 +458,10 @@ function buildSurveyWhere(f: ReturnType<typeof parseFilters>) {
   if (f.designationId) employeeWhere.designationId = f.designationId;
 
   const where: any = { status: "SUBMITTED" };
-  if (f.from || f.to) {
+  // A cycle IS a date window, so it supersedes any from/to the caller passed.
+  if (f.cycleId) {
+    where.cycleId = f.cycleId;
+  } else if (f.from || f.to) {
     where.submittedAt = {};
     if (f.from) where.submittedAt.gte = f.from;
     if (f.to) where.submittedAt.lte = f.to;
@@ -464,9 +508,10 @@ export async function getAnalyticsSummary(req: Request, res: Response) {
     const filters = parseFilters(req);
     const surveyWhere = buildSurveyWhere(filters);
 
-    const [submitted, drafts, responses] = await Promise.all([
+    const [submitted, drafts, expired, responses] = await Promise.all([
       prisma.employeeSurvey.count({ where: surveyWhere }),
       prisma.employeeSurvey.count({ where: { ...surveyWhere, status: "DRAFT" } }),
+      prisma.employeeSurvey.count({ where: { ...surveyWhere, status: "EXPIRED" } }),
       prisma.surveyResponse.findMany({
         where: { survey: surveyWhere },
         select: { answer: true },
@@ -477,21 +522,45 @@ export async function getAnalyticsSummary(req: Request, res: Response) {
     for (const r of responses) bump(counts, r.answer);
     const totals = totalsFrom(counts);
 
-    // Previous-cycle delta: compare to the prior equal-length window.
+    // Delta vs the previous run. With a cycle selected that means the cycle
+    // before it (the like-for-like comparison HR actually wants); without one
+    // we fall back to the prior equal-length date window.
     let prevAvgScore: number | null = null;
     let scoreDelta: number | null = null;
-    if (filters.from && filters.to) {
+    let prevCycle: { id: number; name: string } | null = null;
+
+    let prevSurveyWhere: any = null;
+    if (filters.cycleId) {
+      const current = await prisma.surveyCycle.findUnique({ where: { id: filters.cycleId } });
+      if (current) {
+        const before = await prisma.surveyCycle.findFirst({
+          where: { startDate: { lt: current.startDate } },
+          orderBy: { startDate: "desc" },
+          select: { id: true, name: true },
+        });
+        if (before) {
+          prevCycle = before;
+          prevSurveyWhere = {
+            status: "SUBMITTED",
+            cycleId: before.id,
+            ...(surveyWhere.employee ? { employee: surveyWhere.employee } : {}),
+          };
+        }
+      }
+    } else if (filters.from && filters.to) {
       const span = filters.to.getTime() - filters.from.getTime();
       const prevTo = new Date(filters.from.getTime() - 1);
       const prevFrom = new Date(prevTo.getTime() - span);
+      prevSurveyWhere = {
+        status: "SUBMITTED",
+        submittedAt: { gte: prevFrom, lte: prevTo },
+        ...(surveyWhere.employee ? { employee: surveyWhere.employee } : {}),
+      };
+    }
+
+    if (prevSurveyWhere) {
       const prevResponses = await prisma.surveyResponse.findMany({
-        where: {
-          survey: {
-            status: "SUBMITTED",
-            submittedAt: { gte: prevFrom, lte: prevTo },
-            ...(surveyWhere.employee ? { employee: surveyWhere.employee } : {}),
-          },
-        },
+        where: { survey: prevSurveyWhere },
         select: { answer: true },
       });
       const pc = emptyCounts();
@@ -501,12 +570,15 @@ export async function getAnalyticsSummary(req: Request, res: Response) {
       scoreDelta = +(totals.avgScore - pt.avgScore).toFixed(2);
     }
 
-    const totalSurveys = submitted + drafts;
+    // Expired counts against completion — an unanswered survey is a
+    // non-response, not an absence of one.
+    const totalSurveys = submitted + drafts + expired;
     const completionPct = totalSurveys ? +((submitted / totalSurveys) * 100).toFixed(1) : 0;
 
     return res.json({
       totalSubmitted: submitted,
       totalDrafts: drafts,
+      totalExpired: expired,
       completionPct,
       avgScore: totals.avgScore,
       pctPositive: totals.pctPositive,
@@ -514,6 +586,7 @@ export async function getAnalyticsSummary(req: Request, res: Response) {
       distribution: counts,
       prevAvgScore,
       scoreDelta,
+      prevCycle,
     });
   } catch (e: any) {
     console.error("getAnalyticsSummary error:", e);
@@ -932,6 +1005,7 @@ export async function getAnalyticsPending(req: Request, res: Response) {
     const drafts = await prisma.employeeSurvey.findMany({
       where: {
         status: "DRAFT",
+        ...(filters.cycleId ? { cycleId: filters.cycleId } : {}),
         ...(Object.keys(employeeWhere).length ? { employee: employeeWhere } : {}),
       },
       include: {

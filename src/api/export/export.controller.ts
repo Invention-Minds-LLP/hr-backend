@@ -73,7 +73,7 @@ async function getEmployeeMap(): Promise<Map<number, string>> {
 
 export const exportTable = async (req: Request, res: Response): Promise<void> => {
   const table = req.params.table;
-  const { startDate, endDate, year, month, employeeId } = req.query;
+  const { startDate, endDate, year, month, employeeId, cycleId } = req.query;
 
   try {
     switch (table) {
@@ -1508,7 +1508,12 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
       // ─── SURVEY SUBMISSION SUMMARY ────────────────────────────────────────────
       case 'survey-submission-summary': {
         const where: any = {};
-        if (startDate || endDate) {
+        // A cycle IS a date window, so it supersedes startDate/endDate. Without
+        // it the sheet blends every cycle together, which is what these reports
+        // did before the cycle engine existed.
+        if (cycleId) {
+          where.cycleId = Number(cycleId);
+        } else if (startDate || endDate) {
           where.date = {};
           if (startDate) where.date.gte = new Date(startDate as string);
           if (endDate) where.date.lte = new Date(endDate as string);
@@ -1518,18 +1523,20 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
           where,
           include: {
             employee: { select: { employeeCode: true, firstName: true, lastName: true } },
+            cycle: { select: { name: true, endDate: true } },
           },
         });
 
         const headers = [
-          'Survey ID', 'Employee Code', 'Employee Name', 'Survey Date',
-          'Submission Status', 'Submitted On', 'Created On',
+          'Survey ID', 'Cycle', 'Employee Code', 'Employee Name', 'Survey Date',
+          'Due On', 'Submission Status', 'Submitted On', 'Created On',
         ];
 
         const rows = surveys.map(s => [
-          s.id, s.employee.employeeCode,
+          s.id, s.cycle?.name ?? '—', s.employee.employeeCode,
           `${s.employee.firstName} ${s.employee.lastName}`,
-          fmt(s.date), s.status, fmt(s.submittedAt), fmt(s.createdAt),
+          fmt(s.date), s.cycle ? fmt(s.cycle.endDate) : '—',
+          s.status, fmt(s.submittedAt), fmt(s.createdAt),
         ]);
 
         sendExcel(res, 'Survey_Submission_Summary', headers, rows);
@@ -1552,7 +1559,9 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
       // ─── SURVEY RESPONSE DETAILS ──────────────────────────────────────────────
       case 'survey-response-details': {
         const where: any = {};
-        if (startDate || endDate) {
+        if (cycleId) {
+          where.survey = { cycleId: Number(cycleId) };
+        } else if (startDate || endDate) {
           where.survey = { date: {} };
           if (startDate) where.survey.date.gte = new Date(startDate as string);
           if (endDate) where.survey.date.lte = new Date(endDate as string);
@@ -1564,6 +1573,7 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
             survey: {
               include: {
                 employee: { select: { employeeCode: true, firstName: true, lastName: true } },
+                cycle: { select: { name: true } },
               },
             },
             question: { select: { section: true, questionText: true } },
@@ -1571,12 +1581,12 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
         });
 
         const headers = [
-          'Survey ID', 'Employee Code', 'Employee Name', 'Survey Date',
+          'Survey ID', 'Cycle', 'Employee Code', 'Employee Name', 'Survey Date',
           'Section / Topic', 'Question', 'Answer', 'Submission Status', 'Submitted On',
         ];
 
         const rows = responses.map(r => [
-          r.surveyId, r.survey.employee.employeeCode,
+          r.surveyId, r.survey.cycle?.name ?? '—', r.survey.employee.employeeCode,
           `${r.survey.employee.firstName} ${r.survey.employee.lastName}`,
           fmt(r.survey.date), r.question.section, r.question.questionText,
           r.answer, r.survey.status, fmt(r.survey.submittedAt),
@@ -1589,10 +1599,12 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
       // ─── SURVEY TOPIC WISE EXPORT ─────────────────────────────────────────────
       case 'survey-topic-wise': {
         const responses = await prisma.surveyResponse.findMany({
+          where: cycleId ? { survey: { cycleId: Number(cycleId) } } : {},
           include: {
             survey: {
               include: {
                 employee: { select: { employeeCode: true, firstName: true, lastName: true } },
+                cycle: { select: { name: true } },
               },
             },
             question: { select: { section: true, questionText: true } },
@@ -1601,12 +1613,12 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
         });
 
         const headers = [
-          'Section / Topic', 'Employee Code', 'Employee Name', 'Survey Date',
+          'Section / Topic', 'Cycle', 'Employee Code', 'Employee Name', 'Survey Date',
           'Question', 'Answer', 'Submitted On',
         ];
 
         const rows = responses.map(r => [
-          r.question.section, r.survey.employee.employeeCode,
+          r.question.section, r.survey.cycle?.name ?? '—', r.survey.employee.employeeCode,
           `${r.survey.employee.firstName} ${r.survey.employee.lastName}`,
           fmt(r.survey.date), r.question.questionText,
           r.answer, fmt(r.survey.submittedAt),
@@ -1618,8 +1630,10 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
 
       // ─── EMPLOYEE WISE SURVEY EXPORT ──────────────────────────────────────────
       case 'employee-wise-survey': {
-        const where: any = {};
-        if (employeeId) where.survey = { employeeId: Number(employeeId) };
+        const surveyWhere: any = {};
+        if (employeeId) surveyWhere.employeeId = Number(employeeId);
+        if (cycleId) surveyWhere.cycleId = Number(cycleId);
+        const where: any = Object.keys(surveyWhere).length ? { survey: surveyWhere } : {};
 
         const responses = await prisma.surveyResponse.findMany({
           where,
@@ -1627,6 +1641,7 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
             survey: {
               include: {
                 employee: { select: { employeeCode: true, firstName: true, lastName: true } },
+                cycle: { select: { name: true } },
               },
             },
             question: { select: { section: true, questionText: true } },
@@ -1635,13 +1650,14 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
         });
 
         const headers = [
-          'Employee Code', 'Employee Name', 'Survey Date', 'Section / Topic',
+          'Employee Code', 'Employee Name', 'Cycle', 'Survey Date', 'Section / Topic',
           'Question', 'Answer', 'Submission Status', 'Submitted On',
         ];
 
         const rows = responses.map(r => [
           r.survey.employee.employeeCode,
           `${r.survey.employee.firstName} ${r.survey.employee.lastName}`,
+          r.survey.cycle?.name ?? '—',
           fmt(r.survey.date), r.question.section, r.question.questionText,
           r.answer, r.survey.status, fmt(r.survey.submittedAt),
         ]);
@@ -1653,10 +1669,12 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
       // ─── QUESTION WISE SURVEY EXPORT ──────────────────────────────────────────
       case 'question-wise-survey': {
         const responses = await prisma.surveyResponse.findMany({
+          where: cycleId ? { survey: { cycleId: Number(cycleId) } } : {},
           include: {
             survey: {
               include: {
                 employee: { select: { employeeCode: true, firstName: true, lastName: true } },
+                cycle: { select: { name: true } },
               },
             },
             question: { select: { section: true, questionText: true } },
@@ -1665,12 +1683,13 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
         });
 
         const headers = [
-          'Section / Topic', 'Question', 'Employee Code', 'Employee Name',
+          'Section / Topic', 'Question', 'Cycle', 'Employee Code', 'Employee Name',
           'Survey Date', 'Answer', 'Submitted On',
         ];
 
         const rows = responses.map(r => [
           r.question.section, r.question.questionText,
+          r.survey.cycle?.name ?? '—',
           r.survey.employee.employeeCode,
           `${r.survey.employee.firstName} ${r.survey.employee.lastName}`,
           fmt(r.survey.date), r.answer, fmt(r.survey.submittedAt),
@@ -1682,21 +1701,37 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
 
       // ─── SURVEY PENDING / NOT SUBMITTED ───────────────────────────────────────
       case 'survey-pending': {
+        // Covers both states a non-submission can be in: DRAFT (window still
+        // open, still actionable) and EXPIRED (window closed, permanent
+        // non-response). Without the cycle column this sheet grows into an
+        // undifferentiated list of everyone who ever missed a survey, so the
+        // cycle and its due date are carried on every row.
         const surveys = await prisma.employeeSurvey.findMany({
-          where: { status: { not: 'SUBMITTED' } },
+          where: {
+            status: { not: 'SUBMITTED' },
+            ...(cycleId ? { cycleId: Number(cycleId) } : {}),
+          },
           include: {
             employee: { select: { employeeCode: true, firstName: true, lastName: true } },
+            cycle: { select: { name: true, endDate: true, status: true } },
           },
+          orderBy: [{ cycleId: 'desc' }, { employeeId: 'asc' }],
         });
 
         const headers = [
-          'Employee Code', 'Employee Name', 'Survey Date', 'Submission Status', 'Created On',
+          'Employee Code', 'Employee Name', 'Cycle', 'Survey Date', 'Due On',
+          'Submission Status', 'Window', 'Created On',
         ];
 
         const rows = surveys.map(s => [
           s.employee.employeeCode,
           `${s.employee.firstName} ${s.employee.lastName}`,
-          fmt(s.date), s.status, fmt(s.createdAt),
+          s.cycle?.name ?? '—',
+          fmt(s.date),
+          s.cycle ? fmt(s.cycle.endDate) : '—',
+          s.status === 'EXPIRED' ? 'Not submitted' : 'Pending',
+          s.cycle ? (s.cycle.status === 'CLOSED' ? 'Closed' : 'Open') : 'No deadline',
+          fmt(s.createdAt),
         ]);
 
         sendExcel(res, 'Survey_Pending', headers, rows);

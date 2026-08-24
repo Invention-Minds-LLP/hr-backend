@@ -22,7 +22,7 @@ import { AuthenticatedRequest } from '../../middleware/authMiddleware';
 import { currentEmployeeId } from '../../lib/currentUser';
 import { resolveLopForRequest, leaveDuration } from '../../lib/leaveLop';
 import { checkPayrollCutoff } from '../../lib/payrollCutoff';
-import { checkELApplication, getELAvailableBalance } from '../../lib/elApplicationRules';
+import { checkELApplication, getELAvailableBalance, getELRequestCountForYear } from '../../lib/elApplicationRules';
 import { countWorkingDays } from './leave.controller';
 
 /**
@@ -142,8 +142,11 @@ export const precheckLeave = async (req: AuthenticatedRequest, res: Response) =>
       const elUnits = isHalfDay
         ? 0.5
         : await countWorkingDays(employeeId, start, end, { includeWeekOffs: true });
-      const available = await getELAvailableBalance(employeeId, financialYear);
-      const elCheck = checkELApplication(available, elUnits);
+      const [available, requestCount] = await Promise.all([
+        getELAvailableBalance(employeeId, financialYear),
+        getELRequestCountForYear(employeeId, financialYear),
+      ]);
+      const elCheck = checkELApplication(available, elUnits, requestCount);
       if (!elCheck.ok) {
         elBlock = { code: elCheck.code!, message: elCheck.error! };
         warnings.push({

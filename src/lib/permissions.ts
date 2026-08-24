@@ -60,6 +60,9 @@ export const PERMISSION_CATALOG = [
   { name: 'admin.incentiveRequests.view', label: 'Incentive Requests', module: 'Administration · HR Ops' },
   { name: 'admin.shifts.view', label: 'Shifts', module: 'Administration · HR Ops' },
   { name: 'admin.otApprovals.view', label: 'OT Approvals', module: 'Administration · HR Ops' },
+  // Stage one of the comp-off flow belongs to reporting managers, so it cannot
+  // reuse admin.compOff.view — that key is the HR register, HR-Manager-only.
+  { name: 'admin.compOffApprovals.view', label: 'Comp Off Approvals', module: 'Administration · HR Ops' },
   { name: 'admin.reports.view', label: 'Data Export', module: 'Administration · HR Ops' },
   { name: 'admin.payroll.view', label: 'Payroll', module: 'Administration · HR Ops' },
   { name: 'admin.taxDeclarations.view', label: 'Tax Declarations', module: 'Administration · HR Ops' },
@@ -220,6 +223,9 @@ export function computePermissions(ctx: PermissionContext): PermissionKey[] {
     'admin.incentiveRequests.view': adminSection && !isRestricted && !isIncharge,
     'admin.shifts.view': adminSection && roleId !== 4,
     'admin.otApprovals.view': adminSection && (isReportingManager || isHRManager),
+    // Same shape as OT approvals, plus in-charges: they hold reports too, and
+    // stage one of a comp-off is the reporting manager's to decide.
+    'admin.compOffApprovals.view': adminSection && (isReportingManager || isHRManager || isIncharge),
     'admin.reports.view': adminSection && !isRestricted && !isIncharge && !isReportingManager,
     'admin.payroll.view': adminSection && deptId === 1,
     // Tax review and statutory setup are payroll-adjacent: same HR-department

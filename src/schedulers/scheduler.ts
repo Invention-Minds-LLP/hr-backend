@@ -1,4 +1,4 @@
-import { initSurveyScheduler } from "../api/survey/survery.controller";
+import { initSurveyCycleScheduler } from "./survey-cycle.scheduler";
 import { initNoticePeriodSchedular } from "../api/resignation/resignation.controller";
 import { initLeaveEndScheduler } from "../api/leave/leave.controller";
 import { initQuarterlyAppraisalScheduler, sendAppraisalCountReminders } from "../api/appraisal/appraisal.controller";
@@ -21,7 +21,7 @@ import { prisma } from "../lib/prisma";
 // import { sendInternshipEndReminders } from "../api/internship/internship.controller";
 
 export async function startSchedulers() {
-  initSurveyScheduler();
+  initSurveyCycleScheduler();
   initNoticePeriodSchedular();
   initLeaveEndScheduler();
   // initQuarterlyAppraisalScheduler();

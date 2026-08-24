@@ -20,7 +20,7 @@ import { max } from "date-fns";
 import { config } from "../../config";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { withEmployeeScope, guardInScope, isInScope } from "../../lib/dataScope";
-import { checkELApplication, getELAvailableBalance } from "../../lib/elApplicationRules";
+import { checkELApplication, getELAvailableBalance, getELRequestCountForYear } from "../../lib/elApplicationRules";
 
 // Legacy FTP credentials — no longer used now that uploads are stored locally.
 // const FTP_CONFIG = {
@@ -109,8 +109,11 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
     // calling the API directly, and the balance floors were never enforced
     // anywhere.
     if (isEarnedLeave) {
-      const elAvailable = await getELAvailableBalance(Number(employeeId), year);
-      const elCheck = checkELApplication(elAvailable, requestedUnits);
+      const [elAvailable, elRequestCount] = await Promise.all([
+        getELAvailableBalance(Number(employeeId), year),
+        getELRequestCountForYear(Number(employeeId), year),
+      ]);
+      const elCheck = checkELApplication(elAvailable, requestedUnits, elRequestCount);
       if (!elCheck.ok) {
         return res.status(400).json({ error: elCheck.error, code: elCheck.code });
       }

@@ -15,6 +15,8 @@ import {
   getAnalyticsScatter,
   getAnalyticsPending,
   sendPendingReminders,
+  getSurveyCycles,
+  getCycleExclusions,
 } from "./survery.controller";
 import { authenticateToken, requireRoleOrDept } from "../../middleware/authMiddleware";
 
@@ -33,6 +35,10 @@ router.get("/drafts", authenticateToken, getDraftSurveys);
 
 // HR analytics dashboard. Restricted to HR roles or anyone in the HR dept (deptId = 1).
 const hrOnly = requireRoleOrDept(["HR_MANAGER", "ADMIN"], [1]);
+
+// Survey cycles (fixed org-wide windows). Drives the dashboard's cycle picker.
+router.get("/cycles", authenticateToken, hrOnly, getSurveyCycles);
+router.get("/cycles/:cycleId/exclusions", authenticateToken, hrOnly, getCycleExclusions);
 router.get("/analytics/summary", authenticateToken, hrOnly, getAnalyticsSummary);
 router.get("/analytics/by-section", authenticateToken, hrOnly, getAnalyticsBySection);
 router.get("/analytics/by-question", authenticateToken, hrOnly, getAnalyticsByQuestion);

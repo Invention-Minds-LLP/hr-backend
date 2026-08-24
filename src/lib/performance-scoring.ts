@@ -15,17 +15,36 @@
  * table.
  */
 
-export const REVIEWER_ROLES = ["SELF", "INCHARGE", "SUPERVISOR", "HOD"] as const;
+/**
+ * Matches the printed sheet's signature columns:
+ *   Employee | Supervisor / In-charge | HOD
+ * plus Management, who also scores here.
+ *
+ * HOD is the employee's REPORTING MANAGER — there is no separate department-head
+ * field in this system, and that is who signs the HOD column.
+ *
+ * SELF is retained for VISIBILITY only: the employee's own assessment lives in
+ * the separate self-appraisal, so nothing is ever written under this role. It
+ * exists so canSeeReviewerScore can recognise the subject looking at their own
+ * sheet and show them nobody's marks.
+ */
+export const REVIEWER_ROLES = ["SELF", "INCHARGE", "HOD", "MANAGEMENT"] as const;
 export type ReviewerRole = (typeof REVIEWER_ROLES)[number];
+
+/** Roles that may actually write a score. SELF is deliberately absent. */
+export const SCORING_ROLES: ReviewerRole[] = ["INCHARGE", "HOD", "MANAGEMENT"];
 
 /** Value carried by rows written before reviewer roles existed. */
 export const LEGACY_REVIEWER_ROLE = "REVIEWER";
 
+/** Role id of Management in the Role table. */
+export const MANAGEMENT_ROLE_ID = 4;
+
 export const REVIEWER_ROLE_LABELS: Record<string, string> = {
   SELF: "Self",
   INCHARGE: "In-charge",
-  SUPERVISOR: "Supervisor",
   HOD: "HOD",
+  MANAGEMENT: "Management",
   [LEGACY_REVIEWER_ROLE]: "Reviewer",
 };
 
@@ -37,6 +56,8 @@ export interface ViewerContext {
   empId: number | null;
   role: string;
   deptId: number | null;
+  /** Checked alongside the name — role ids and names have both drifted here. */
+  roleId?: number | null;
 }
 
 export interface SubjectContext {
@@ -56,19 +77,24 @@ export interface SubjectContext {
 export function resolveReviewerRole(viewer: ViewerContext, subject: SubjectContext): ReviewerRole | null {
   if (!viewer.empId) return null;
 
+  // The subject themselves: recognised so they see none of their reviewers'
+  // marks, but they never score here — that is the self-appraisal.
   if (viewer.empId === subject.id) return "SELF";
+
+  // Both derived from the relationship, not a role name: the Role table holds
+  // near-duplicates ("Incharge" and "Incharges"), so names cannot be trusted.
   if (subject.inchargeId && viewer.empId === subject.inchargeId) return "INCHARGE";
-  if (subject.reportingManager && viewer.empId === subject.reportingManager) return "SUPERVISOR";
+  if (subject.reportingManager && viewer.empId === subject.reportingManager) return "HOD";
 
-  // HR and Management sign off as HOD on the paper form; so does a department
-  // head reviewing their own department.
-  const role = viewer.role || "";
-  const isHR = role === "HR" || role === "HR Manager" || role === "Management";
-  if (isHR) return "HOD";
-  if (viewer.deptId && subject.departmentId && viewer.deptId === subject.departmentId) {
-    if (role === "Reporting Manager") return "SUPERVISOR";
-  }
+  // Management scores everyone, and needs its own column: previously it shared
+  // "HOD" with HR, so whichever of them saved second overwrote the other.
+  const role = (viewer.role || "").trim();
+  if (role === "Management" || viewer.roleId === MANAGEMENT_ROLE_ID) return "MANAGEMENT";
 
+  // HR administers — assigns, tracks, and signs the final review. On the printed
+  // sheet they do not sign the per-period grid, so they get no scoring column
+  // unless they happen to be this employee's own reporting manager (handled
+  // above). isHRViewer still grants them full visibility.
   return null;
 }
 
@@ -107,6 +133,25 @@ export function canSeeReviewerScore(
   if (viewerRole === "SELF") return scoreRole === "SELF";
   if (!viewerRole) return scoreRole === LEGACY_REVIEWER_ROLE;
   return scoreRole === viewerRole || scoreRole === LEGACY_REVIEWER_ROLE;
+}
+
+// ── Completion tracking ─────────────────────────────────────────────────────
+
+export type ProgressState = "none" | "partial" | "done" | "unknown";
+
+/**
+ * How far one reviewer has got on one row, from how many questions they have
+ * scored against how many the template holds.
+ *
+ * `unknown` covers rows with no template attached: there is no denominator, so
+ * completeness cannot be judged. Reporting those as "partial" would strand them
+ * as permanently unfinished — they show "Assign Template" in the action column
+ * instead.
+ */
+export function reviewerProgressState(scored: number, totalQuestions: number): ProgressState {
+  if (!scored) return "none";
+  if (totalQuestions <= 0) return "unknown";
+  return scored >= totalQuestions ? "done" : "partial";
 }
 
 // ── Score banding ───────────────────────────────────────────────────────────
