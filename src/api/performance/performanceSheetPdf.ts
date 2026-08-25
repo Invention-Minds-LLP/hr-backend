@@ -115,7 +115,7 @@ async function loadSheet(opts: SheetOptions) {
   const selfAppraisals = await prisma.performanceSelfAppraisal.findMany({
     where: { employeeId: opts.employeeId, ...cycleFilter },
     include: { answers: { include: { question: true } } },
-    orderBy: { cycle: "asc" },
+    orderBy: [{ cycle: "asc" }, { period: "asc" }],
   });
 
   const doj = employee.dateOfJoining ? new Date(employee.dateOfJoining) : null;
@@ -429,8 +429,12 @@ export async function buildPerformanceSheetPdf(
   if (mayReadSelf && selfAppraisals.length) {
     for (const sa of selfAppraisals) {
       ensure(46);
+      const saLabel = labelForCyclePeriod(doj, sa.cycle, sa.period as string);
       doc.font(FONT_BOLD).fontSize(9).fillColor("#000")
-        .text(`SELF-APPRAISAL — ${sa.cycle}${sa.submittedAt ? "" : "  (draft)"}`, left, y);
+        .text(
+          `SELF-APPRAISAL — ${saLabel} · ${sa.cycle}${sa.submittedAt ? "" : "  (draft)"}`,
+          left, y,
+        );
       y = doc.y + 4;
 
       if (sa.answers.length) {

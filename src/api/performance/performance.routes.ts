@@ -24,6 +24,12 @@ import {
   submitSelfAppraisal,
   reopenSelfAppraisal,
 } from "./performanceSelfAppraisal.controller";
+import {
+  setHrReviewed,
+  requestEdit,
+  listEditRequests,
+  decideEditRequest,
+} from "./performanceEditRequest.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
@@ -45,6 +51,13 @@ router.patch("/self-appraisal/:id/reopen", authenticateToken, reopenSelfAppraisa
 router.get("/export/:employeeId", authenticateToken, exportPerformanceSheet);
 router.post("/assign", authenticateToken, assignFormToEmployee);
 router.patch("/summary/:id/template", authenticateToken, assignSummaryTemplate);
+
+// HR sign-off and the edit requests it gates. Static "edit-requests" is
+// registered before the parameterised summary routes so it isn't swallowed.
+router.get("/edit-requests", authenticateToken, listEditRequests);
+router.patch("/edit-requests/:id", authenticateToken, decideEditRequest);
+router.patch("/summary/:id/review", authenticateToken, setHrReviewed);
+router.post("/summary/:id/edit-request", authenticateToken, requestEdit);
 router.get("/summaries", authenticateToken, getAllSummaries);
 router.get("/template/:departmentId", authenticateToken, getTemplateByDept);
 router.post("/responses", authenticateToken, submitResponses);

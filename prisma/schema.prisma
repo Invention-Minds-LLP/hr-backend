@@ -2059,6 +2059,11 @@ model PerformanceSummary {
   templateId    Int?
   marksScored   Int?
   overallPerf   String?
+  /// Set when HR marks this period's review complete. Until then reviewers edit
+  /// freely; afterwards a change needs an approved PerformanceEditRequest.
+  /// Per period, not per cycle — each milestone completes at its own time.
+  hrReviewedAt  DateTime?
+  hrReviewedBy  Int?
   employeeSig   String?                  @db.Text
   supervisorSig String?                  @db.Text
   hodSig        String?                  @db.Text
@@ -2067,6 +2072,7 @@ model PerformanceSummary {
   department    Department               @relation(fields: [departmentId], references: [id])
   employee      Employee                 @relation(fields: [employeeId], references: [id])
   template      PerformanceFormTemplate? @relation(fields: [templateId], references: [id])
+  editRequests  PerformanceEditRequest[]
 
   @@unique([employeeId, cycle, period, templateId])
   @@index([employeeId, cycle])
@@ -2104,15 +2110,49 @@ model PerformanceFinalReview {
 /// share the SelfAppraisalQuestion master, so it is the same questionnaire —
 /// only the parent differs.
 ///
-/// Keyed by employee + cycle rather than by a PerformanceSummary FK: an
-/// employee has several summary rows per cycle (one per milestone) and no one
-/// of them owns the self-appraisal. Same shape PerformanceFinalReview already
-/// uses. Creation is gated on a matching PerformanceSummary existing, so these
-/// can never float free of an assigned indicator.
+/// Reopens one already-reviewed period for one reviewer.
+///
+/// Mirrors AppraisalEditRequest, which serves the managerial flow — a separate
+/// table rather than a shared one because that model is FK'd to AppraisalForm,
+/// and pointing a single table at two different parents would be a polymorphic
+/// FK the database cannot enforce.
+///
+/// Approval unlocks a single edit: consumedAt is stamped once the reviewer
+/// saves, so an approval cannot be reused indefinitely.
+model PerformanceEditRequest {
+  id              Int       @id @default(autoincrement())
+  summaryId       Int
+  requestedBy     Int
+  /// Which column the request is for: SELF | INCHARGE | HOD | MANAGEMENT.
+  requestedRole   String
+  requestedAt     DateTime  @default(now())
+  reason          String    @db.Text
+  status          String    @default("PENDING") // PENDING, APPROVED, REJECTED
+  approvedBy      Int?
+  approvedAt      DateTime?
+  rejectionReason String?
+  /// Set when the unlocked edit is actually saved.
+  consumedAt      DateTime?
+
+  summary PerformanceSummary @relation(fields: [summaryId], references: [id], onDelete: Cascade)
+
+  @@index([summaryId])
+  @@index([status])
+}
+
+/// One per assessment period, matching the reviewers: the in-charge and HOD
+/// score at each milestone, so the employee self-assesses at each milestone too
+/// and the two can be compared like for like.
+///
+/// Keyed by employee + cycle + period rather than by a PerformanceSummary FK —
+/// a summary row can be reassigned to a different template without orphaning
+/// the employee's own words. Creation is gated on a matching PerformanceSummary
+/// existing, so these can never float free of an assigned indicator.
 model PerformanceSelfAppraisal {
-  id             Int       @id @default(autoincrement())
+  id             Int              @id @default(autoincrement())
   employeeId     Int
   cycle          String
+  period         EvaluationPeriod
   achievements   String?   @db.Text
   goalsObjective String?   @db.Text
   challenges     String?   @db.Text
@@ -2125,7 +2165,7 @@ model PerformanceSelfAppraisal {
   employee Employee                         @relation(fields: [employeeId], references: [id])
   answers  PerformanceSelfAppraisalAnswer[]
 
-  @@unique([employeeId, cycle])
+  @@unique([employeeId, cycle, period])
   @@index([employeeId])
 }
 

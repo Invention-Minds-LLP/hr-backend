@@ -135,6 +135,35 @@ export function canSeeReviewerScore(
   return scoreRole === viewerRole || scoreRole === LEGACY_REVIEWER_ROLE;
 }
 
+// ── Edit gate ───────────────────────────────────────────────────────────────
+
+export interface EditGate {
+  allowed: boolean;
+  message?: string;
+  /** The approved request that unlocked this edit, so it can be consumed. */
+  requestId?: number;
+}
+
+/**
+ * Whether a reviewer may still change a period they have scored.
+ *
+ * Free until HR marks the period reviewed; after that a change needs an
+ * approved PerformanceEditRequest for that reviewer's own column. Mirrors
+ * resolveEditGate in the managerial flow, with HR's sign-off as the trigger
+ * instead of a due date.
+ */
+export function resolvePerformanceEditGate(
+  summary: { hrReviewedAt?: Date | null } | null,
+  approvedRequest: { id: number } | null,
+): EditGate {
+  if (!summary?.hrReviewedAt) return { allowed: true };
+  if (approvedRequest) return { allowed: true, requestId: approvedRequest.id };
+  return {
+    allowed: false,
+    message: "HR has marked this review complete. Raise an edit request to make changes.",
+  };
+}
+
 // ── Completion tracking ─────────────────────────────────────────────────────
 
 export type ProgressState = "none" | "partial" | "done" | "unknown";

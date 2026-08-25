@@ -11,6 +11,8 @@ import {
   CyclePlan,
 } from "../../lib/appraisal-cycle";
 import { buildPerformanceSheetPdf } from "./performanceSheetPdf";
+import { managerIdsAmong } from "../appraisal/appraisal.controller";
+import { performanceEditGate, consumeEditRequest } from "./performanceEditRequest.controller";
 import {
   resolveReviewerRole,
   isReviewerRole,
@@ -728,6 +730,29 @@ export const submitFullForm = async (req: Request, res: Response) => {
       });
     }
 
+    // Once HR has marked a period reviewed, changing it needs an approved edit
+    // request for this reviewer's own column. Checked per period, since each is
+    // signed off separately. The approval is consumed after a successful save.
+    const consumeAfterSave: number[] = [];
+    for (const period of submitted) {
+      const row = await prisma.performanceSummary.findFirst({
+        where: {
+          employeeId: Number(data.employeeId),
+          cycle: data.cycle,
+          period: period as any,
+          ...(templateId ? { templateId } : {}),
+        },
+        select: { id: true },
+      });
+      if (!row) continue;
+
+      const gate = await performanceEditGate(row.id, reviewerRole);
+      if (!gate.allowed) {
+        return res.status(423).json({ error: gate.message, period, summaryId: row.id });
+      }
+      if (gate.requestId) consumeAfterSave.push(gate.requestId);
+    }
+
     // Evaluate once — the notification below and the write inside the
     // transaction must agree on whether a real final review was supplied.
     const finalReviewSupplied = hasFinalReviewContent(data.finalReview);
@@ -792,6 +817,11 @@ export const submitFullForm = async (req: Request, res: Response) => {
       }
     }, { maxWait: 15000, timeout: 60000 });
 
+    // Approvals buy one correction each — stamped only after the write lands.
+    for (const requestId of consumeAfterSave) {
+      await consumeEditRequest(requestId);
+    }
+
     // 4) Notify HR when summaries are submitted without a final review yet.
     if (!finalReviewSupplied && data.summaries?.length) {
       const employee = await prisma.employee.findUnique({
@@ -849,6 +879,11 @@ export const assignFormToEmployee = async (req: Request, res: Response) => {
     const ids: number[] = (employeeIds?.length ? employeeIds : employeeId ? [employeeId] : []).map(Number);
     if (!ids.length) return res.status(400).json({ error: "No employees provided" });
 
+    // The mirror of the managerial guard: anyone who manages someone belongs in
+    // Managerial Appraisal, not here. Same helper decides both, so the two
+    // modules can never disagree about who is a manager.
+    const managerSet = await managerIdsAmong(ids);
+
     const results: any[] = [];
 
     for (const id of ids) {
@@ -860,6 +895,15 @@ export const assignFormToEmployee = async (req: Request, res: Response) => {
       }
       if (!employee.dateOfJoining) {
         results.push({ employeeId: id, assigned: false, message: "No date of joining — cannot derive a cycle" });
+        continue;
+      }
+      if (managerSet.has(id)) {
+        results.push({
+          employeeId: id,
+          assigned: false,
+          employeeName: `${employee.firstName ?? ""} ${employee.lastName ?? ""}`.trim(),
+          message: "Manages other employees — appraise through Managerial Appraisal instead",
+        });
         continue;
       }
       // The question set belongs to the employee's own department.
@@ -898,10 +942,32 @@ export const assignFormToEmployee = async (req: Request, res: Response) => {
       const yearOne = plan.periods.find((p) => p.period === "YEAR_1");
       const isBackfill = plan.track === "FIRST_YEAR" && !!yearOne?.reached;
 
+      // Only periods the employee has actually reached. Assigning a milestone
+      // months before it opens leaves Draft rows cluttering the list with
+      // nothing to do; catching up happens naturally, because every reached
+      // period that isn't already assigned gets created on the next assign.
+      const due = plan.periods.filter((p) => p.reached);
+      const notOpen = plan.periods.filter((p) => !p.reached);
+
+      if (!due.length) {
+        const next = notOpen[0];
+        results.push({
+          employeeId: id,
+          assigned: false,
+          track: plan.track,
+          cycle: plan.cycle,
+          employeeName: `${employee.firstName ?? ""} ${employee.lastName ?? ""}`.trim(),
+          message: next
+            ? `No period has opened yet — the first one opens on ${next.milestoneDate.toISOString().slice(0, 10)}.`
+            : "No period has opened yet.",
+        });
+        continue;
+      }
+
       const created: string[] = [];
       const skipped: string[] = [];
 
-      for (const p of plan.periods) {
+      for (const p of due) {
         const exists = await prisma.performanceSummary.findFirst({
           where: {
             employeeId: id,
@@ -934,6 +1000,9 @@ export const assignFormToEmployee = async (req: Request, res: Response) => {
         cycle: plan.cycle,
         created,
         skipped,
+        // Periods that exist in this cycle but haven't opened yet — they get
+        // created by a later assign, once their milestone arrives.
+        notOpen: notOpen.map((p) => p.period),
         backfill: isBackfill,
         employeeName: `${employee.firstName ?? ""} ${employee.lastName ?? ""}`.trim(),
         message: created.length ? undefined : "Already assigned",
@@ -1171,14 +1240,17 @@ export const getAllSummaries = async (req: Request, res: Response) => {
         scoredMap.set(`${r.employeeId}|${r.cycle}|${r.period}|${r.reviewerRole}`, r._count._all);
       }
 
-      // Self-appraisal is per CYCLE, so it reads the same across that cycle's
-      // period rows — unlike the reviewer columns, which are per period.
+      // Self-appraisal is per period now, like the reviewer columns, so each
+      // row reports its own state rather than repeating the cycle's.
       const selfs = await prisma.performanceSelfAppraisal.findMany({
         where: { employeeId: { in: empIds } },
-        select: { employeeId: true, cycle: true, submittedAt: true },
+        select: { employeeId: true, cycle: true, period: true, submittedAt: true },
       });
       const selfMap = new Map(
-        selfs.map((s) => [`${s.employeeId}|${s.cycle}`, s.submittedAt ? "done" : "partial"]),
+        selfs.map((s) => [
+          `${s.employeeId}|${s.cycle}|${s.period}`,
+          s.submittedAt ? "done" : "partial",
+        ]),
       );
 
       progressFor = (s) => {
@@ -1189,7 +1261,7 @@ export const getAllSummaries = async (req: Request, res: Response) => {
             total,
           );
         return {
-          SELF: selfMap.get(`${s.employeeId}|${s.cycle}`) ?? "none",
+          SELF: selfMap.get(`${s.employeeId}|${s.cycle}|${s.period}`) ?? "none",
           INCHARGE: state("INCHARGE"),
           HOD: state("HOD"),
           MANAGEMENT: state("MANAGEMENT"),

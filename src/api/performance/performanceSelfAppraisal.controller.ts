@@ -14,9 +14,9 @@
 
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
-import { assertNotPausedOrHR } from "../appraisal/appraisal-pause.controller";
+import { assertNotPausedOrHR, getPausedDaysBetween } from "../appraisal/appraisal-pause.controller";
 import { isHRViewer } from "../../lib/performance-scoring";
-import { labelForCyclePeriod } from "../../lib/appraisal-cycle";
+import { labelForCyclePeriod, resolveCyclesForEmployee } from "../../lib/appraisal-cycle";
 
 function viewerOf(req: Request) {
   const user = (req as any).user;
@@ -38,8 +38,9 @@ function canAccess(req: Request, employeeId: number): boolean {
 
 /**
  * GET /performance/self-appraisal/cycles?employeeId=
- * Cycles the employee may self-appraise for — exactly those with an assigned
- * indicator. They never type or pick a cycle themselves.
+ * One entry per assessment period the employee has been assigned — the
+ * reviewers score at every milestone, so the employee self-assesses at every
+ * milestone too. They never type or pick a cycle themselves.
  */
 export const listSelfAppraisalCycles = async (req: Request, res: Response) => {
   try {
@@ -51,40 +52,66 @@ export const listSelfAppraisalCycles = async (req: Request, res: Response) => {
 
     const employee = await prisma.employee.findUnique({
       where: { id: employeeId },
-      select: { id: true, dateOfJoining: true, employeeType: true },
+      select: {
+        id: true, dateOfJoining: true, employeeType: true,
+        Department: {
+          select: {
+            appraisalCycleBasis: true,
+            appraisalPeriodMonths: true,
+            appraisalCalendarMonth: true,
+          },
+        },
+      },
     });
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 
     const summaries = await prisma.performanceSummary.findMany({
       where: { employeeId },
       select: { cycle: true, period: true },
-      orderBy: { cycle: "asc" },
+      orderBy: [{ cycle: "asc" }, { createdAt: "asc" }],
     });
 
     const existing = await prisma.performanceSelfAppraisal.findMany({
       where: { employeeId },
-      select: { cycle: true, submittedAt: true, updatedAt: true },
+      select: { cycle: true, period: true, submittedAt: true, updatedAt: true },
     });
-    const byCycle = new Map(existing.map((e) => [e.cycle, e]));
+    const byKey = new Map(existing.map((e) => [`${e.cycle}|${e.period}`, e]));
 
     const doj = employee.dateOfJoining ? new Date(employee.dateOfJoining) : null;
-    const grouped = new Map<string, string[]>();
-    for (const s of summaries) {
-      if (!grouped.has(s.cycle)) grouped.set(s.cycle, []);
-      grouped.get(s.cycle)!.push(labelForCyclePeriod(doj, s.cycle, s.period as string));
-    }
+    const pausedDays = await getPausedDaysBetween(employeeId, doj ?? new Date(), new Date());
+    const plans = doj
+      ? resolveCyclesForEmployee(doj, employee.Department, pausedDays)
+      : [];
 
-    const cycles = [...grouped.entries()].map(([cycle, periods]) => {
-      const row = byCycle.get(cycle);
-      return {
-        cycle,
-        periods,
-        submitted: !!row?.submittedAt,
-        submittedAt: row?.submittedAt ?? null,
-        started: !!row,
-        lastSaved: row?.updatedAt ?? null,
-      };
-    });
+    // One row per assigned (cycle, period), each with its own status and its
+    // own milestone — a period the employee has not reached yet cannot be filled.
+    const seen = new Set<string>();
+    const cycles = summaries
+      .filter((s) => {
+        const k = `${s.cycle}|${s.period}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      })
+      .map((s) => {
+        const row = byKey.get(`${s.cycle}|${s.period}`);
+        const milestone = plans
+          .find((p) => p.cycle === s.cycle)
+          ?.periods.find((p) => p.period === s.period);
+        return {
+          cycle: s.cycle,
+          period: s.period as string,
+          periodLabel: labelForCyclePeriod(doj, s.cycle, s.period as string),
+          milestoneDate: milestone?.milestoneDate ?? null,
+          // Falls back to open when no plan matches — legacy cycles have no
+          // derivable milestone and must not be locked out entirely.
+          open: milestone ? milestone.reached : true,
+          submitted: !!row?.submittedAt,
+          submittedAt: row?.submittedAt ?? null,
+          started: !!row,
+          lastSaved: row?.updatedAt ?? null,
+        };
+      });
 
     // Which self-appraisal a person gets is decided by what HR actually
     // assigned them, not by their role: the Role table holds both "Incharge"
@@ -123,8 +150,9 @@ export const getSelfAppraisal = async (req: Request, res: Response) => {
   try {
     const employeeId = Number(req.query.employeeId) || viewerOf(req).empId;
     const cycle = String(req.query.cycle ?? "").trim();
-    if (!employeeId || !cycle) {
-      return res.status(400).json({ error: "employeeId and cycle are required" });
+    const period = String(req.query.period ?? "").trim();
+    if (!employeeId || !cycle || !period) {
+      return res.status(400).json({ error: "employeeId, cycle and period are required" });
     }
     if (!canAccess(req, employeeId)) {
       return res.status(403).json({ error: "You cannot view this employee's self-appraisal" });
@@ -132,16 +160,21 @@ export const getSelfAppraisal = async (req: Request, res: Response) => {
 
     const employee = await prisma.employee.findUnique({
       where: { id: employeeId },
-      select: { id: true, firstName: true, lastName: true, employeeCode: true, employeeType: true },
+      select: {
+        id: true, firstName: true, lastName: true, employeeCode: true,
+        employeeType: true, dateOfJoining: true,
+      },
     });
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 
     const assigned = await prisma.performanceSummary.findFirst({
-      where: { employeeId, cycle },
+      where: { employeeId, cycle, period: period as any },
       select: { id: true },
     });
     if (!assigned) {
-      return res.status(400).json({ error: "No performance indicator has been assigned for this cycle." });
+      return res.status(400).json({
+        error: "No performance indicator has been assigned for this cycle and period.",
+      });
     }
 
     // Same rule the managerial flow uses: an employee sees the question set for
@@ -154,13 +187,17 @@ export const getSelfAppraisal = async (req: Request, res: Response) => {
     });
 
     const record = await prisma.performanceSelfAppraisal.findUnique({
-      where: { employeeId_cycle: { employeeId, cycle } },
+      where: { employeeId_cycle_period: { employeeId, cycle, period: period as any } },
       include: { answers: true },
     });
 
     res.json({
       employee,
       cycle,
+      period,
+      periodLabel: labelForCyclePeriod(
+        employee.dateOfJoining ? new Date(employee.dateOfJoining) : null, cycle, period,
+      ),
       questions,
       selfAppraisal: record
         ? {
@@ -192,10 +229,11 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
     const viewer = viewerOf(req);
     const employeeId = Number(req.body.employeeId) || viewer.empId;
     const cycle = String(req.body.cycle ?? "").trim();
+    const period = String(req.body.period ?? "").trim();
     const { answers, achievements, goalsObjective, challenges, trainingNeeds, isDraft } = req.body;
 
-    if (!employeeId || !cycle) {
-      return res.status(400).json({ error: "employeeId and cycle are required" });
+    if (!employeeId || !cycle || !period) {
+      return res.status(400).json({ error: "employeeId, cycle and period are required" });
     }
     // Nobody self-appraises on somebody else's behalf.
     if (viewer.empId !== employeeId) {
@@ -206,15 +244,45 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
     if (guard.blocked) return res.status(423).json({ error: guard.message });
 
     const assigned = await prisma.performanceSummary.findFirst({
-      where: { employeeId, cycle },
+      where: { employeeId, cycle, period: period as any },
       select: { id: true },
     });
     if (!assigned) {
-      return res.status(400).json({ error: "No performance indicator has been assigned for this cycle." });
+      return res.status(400).json({
+        error: "No performance indicator has been assigned for this cycle and period.",
+      });
+    }
+
+    // A period can't be self-assessed before the employee has reached it — the
+    // same rule the reviewers' scores are held to.
+    const subject = await prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        dateOfJoining: true,
+        Department: {
+          select: {
+            appraisalCycleBasis: true,
+            appraisalPeriodMonths: true,
+            appraisalCalendarMonth: true,
+          },
+        },
+      },
+    });
+    if (subject?.dateOfJoining) {
+      const doj = new Date(subject.dateOfJoining);
+      const pausedDays = await getPausedDaysBetween(employeeId, doj, new Date());
+      const plan = resolveCyclesForEmployee(doj, subject.Department, pausedDays)
+        .find((p) => p.cycle === cycle);
+      const milestone = plan?.periods.find((p) => p.period === period);
+      if (milestone && !milestone.reached) {
+        return res.status(400).json({
+          error: `This period opens on ${milestone.milestoneDate.toISOString().slice(0, 10)}.`,
+        });
+      }
     }
 
     const existing = await prisma.performanceSelfAppraisal.findUnique({
-      where: { employeeId_cycle: { employeeId, cycle } },
+      where: { employeeId_cycle_period: { employeeId, cycle, period: period as any } },
       select: { id: true, submittedAt: true },
     });
     if (existing?.submittedAt) {
@@ -234,7 +302,9 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
     const saved = await prisma.$transaction(async (tx) => {
       const record = existing
         ? await tx.performanceSelfAppraisal.update({ where: { id: existing.id }, data: fields })
-        : await tx.performanceSelfAppraisal.create({ data: { employeeId, cycle, ...fields } });
+        : await tx.performanceSelfAppraisal.create({
+            data: { employeeId, cycle, period: period as any, ...fields },
+          });
 
       for (const a of (answers || [])) {
         if (!a?.questionId) continue;
