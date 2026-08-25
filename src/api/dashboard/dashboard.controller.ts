@@ -643,7 +643,7 @@ export class DashboardController {
         // Announcements ack rate
         // Announcements ack rate + list
         const liveAnns = await prisma.announcement.findMany({
-            where: { startsAt: { lte: now }, OR: [{ endsAt: null }, { endsAt: { gte: now } }] },
+            where: { archivedAt: null, startsAt: { lte: now }, OR: [{ endsAt: null }, { endsAt: { gte: now } }] },
             include: { acks: true },
             orderBy: { startsAt: 'desc' },
         });

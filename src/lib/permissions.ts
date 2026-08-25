@@ -69,6 +69,11 @@ export const PERMISSION_CATALOG = [
   { name: 'admin.companies.view', label: 'Companies & Statutory', module: 'Administration · HR Ops' },
   { name: 'admin.letters.view', label: 'Letters', module: 'Administration · HR Ops' },
   { name: 'admin.assets.view', label: 'Asset Register', module: 'Administration · HR Ops' },
+  // The archive is one screen listing everything HR has retired across the
+  // modules, with restore. Retiring and restoring records is an administrative
+  // act, so the rule below seeds it to HR Manager only and it is widened from
+  // the Role Permissions screen.
+  { name: 'admin.archive.view', label: 'Archive', module: 'Administration · HR Ops' },
 
   // HR Manual Entries
   { name: 'admin.forcePresent.view', label: 'Force Present', module: 'HR Manual Entries' },
@@ -236,6 +241,7 @@ export function computePermissions(ctx: PermissionContext): PermissionKey[] {
     // the section rather than the narrower payroll/HR-department rule.
     'admin.letters.view': adminSection && !isRestricted && !isIncharge,
     'admin.assets.view': adminSection && !isRestricted && !isIncharge,
+    'admin.archive.view': adminSection && isHRManager,
     // Sits under /admin/* but is linked from the top-level nav, so no section gate.
     'admin.moduleUtilization.view': isManagement || isHRManager,
 

@@ -385,7 +385,9 @@ export const listIssued = async (req: AuthenticatedRequest, res: Response) => {
     const { employeeId, templateId, category, page = '1', limit = '20' } = req.query as any;
     const skip = (Number(page) - 1) * Number(limit);
 
+    // Archived letters are kept but stay out of the history list.
     const where: any = {
+      archivedAt: null,
       ...(employeeId ? { employeeId: Number(employeeId) } : {}),
       ...(templateId ? { templateId: Number(templateId) } : {}),
       ...(category ? { template: { category: String(category).toUpperCase() } } : {}),
@@ -421,7 +423,7 @@ export const listMyLetters = async (req: AuthenticatedRequest, res: Response) =>
     if (!employeeId) return res.status(401).json({ message: 'Unauthorized' });
 
     const rows = await (prisma as any).letterIssued.findMany({
-      where: { employeeId, status: { not: 'REVOKED' } },
+      where: { employeeId, archivedAt: null, status: { not: 'REVOKED' } },
       orderBy: { issuedAt: 'desc' },
       include: { template: { select: { name: true, category: true } } },
     });

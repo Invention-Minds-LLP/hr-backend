@@ -271,7 +271,9 @@ export class RecruitingController {
   listJobs = asyncHandler(async (req, res) => {
     const { status, dept, q, page = '1', pageSize = '20' } = req.query as any;
 
-    const where: any = {};
+    // Archived jobs are kept but stay out of the register. Distinct from
+    // status CLOSED, which is a hiring outcome the list still shows.
+    const where: any = { archivedAt: null };
     if (status) where.status = status as JobStatus;
     if (dept) where.departmentId = Number(dept);
     if (q) where.title = { contains: String(q), mode: 'insensitive' };

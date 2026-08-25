@@ -1008,7 +1008,7 @@ export const searchAppraisals = async (req: Request, res: Response) => {
     }
 
     const forms = await prisma.appraisalForm.findMany({
-      where: { employeeId },
+      where: { employeeId, archivedAt: null },
       orderBy: { createdAt: "desc" },
       select: {
         id: true,

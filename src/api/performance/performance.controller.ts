@@ -13,6 +13,7 @@ import {
 import { buildPerformanceSheetPdf } from "./performanceSheetPdf";
 import { managerIdsAmong } from "../appraisal/appraisal.controller";
 import { performanceEditGate, consumeEditRequest } from "./performanceEditRequest.controller";
+import { archiveRecord, restoreRecord } from "../../lib/archivable";
 import {
   resolveReviewerRole,
   isReviewerRole,
@@ -24,6 +25,7 @@ import {
   bandFor,
   ReviewerRole,
   REVIEWER_ROLES,
+  REVIEWER_ROLE_LABELS,
   LEGACY_REVIEWER_ROLE,
 } from "../../lib/performance-scoring";
 
@@ -975,6 +977,9 @@ export const assignFormToEmployee = async (req: Request, res: Response) => {
             cycle: plan.cycle,
             period: p.period,
             templateId: Number(templateId),
+            // An archived row must not block a fresh assignment — retiring a
+            // period exists precisely so it can be started again.
+            archivedAt: null,
           },
         });
         if (exists) {
@@ -1068,6 +1073,148 @@ export const assignSummaryTemplate = async (req: Request, res: Response) => {
   }
 };
 
+
+/**
+ * GET /performance/summary/:id/review-detail
+ *
+ * Everything HR needs to judge one period in one place: each reviewer's score
+ * per criterion side by side, and the employee's own self-appraisal beneath.
+ *
+ * The two halves are deliberately separate. Reviewers answer the department's
+ * PerformanceQuestion set; the self-appraisal answers SelfAppraisalQuestion,
+ * filtered by employeeType. They are different questions, so a row-by-row
+ * "self said 4, in-charge said 3" is not possible — presenting them as one
+ * table would imply a comparison that isn't there.
+ *
+ * HR only: this is the one view that shows every reviewer's marks together.
+ */
+export const getReviewDetail = async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const viewer = {
+      empId: user?.empId ?? null,
+      role: user?.role ?? "",
+      deptId: user?.deptId ?? null,
+      roleId: user?.roleId ?? null,
+    };
+    if (!isHRViewer(viewer)) {
+      return res.status(403).json({ error: "Only HR can view the combined review" });
+    }
+
+    const id = Number(req.params.id);
+    const summary = await prisma.performanceSummary.findUnique({
+      where: { id },
+      include: {
+        employee: {
+          select: {
+            id: true, firstName: true, lastName: true, employeeCode: true,
+            dateOfJoining: true, employeeType: true,
+          },
+        },
+        template: { include: { questions: { orderBy: { orderNo: "asc" } } } },
+      },
+    });
+    if (!summary) return res.status(404).json({ error: "Row not found" });
+
+    const questions = summary.template?.questions ?? [];
+
+    const responses = questions.length
+      ? await prisma.performanceResponse.findMany({
+          where: {
+            employeeId: summary.employeeId,
+            cycle: summary.cycle,
+            period: summary.period,
+            questionId: { in: questions.map((q) => q.id) },
+          },
+          select: { questionId: true, reviewerRole: true, score: true, comments: true },
+        })
+      : [];
+
+    // questionId -> { INCHARGE: 4, HOD: 3, ... }
+    const byQuestion = new Map<number, Record<string, number | null>>();
+    for (const r of responses) {
+      if (!byQuestion.has(r.questionId)) byQuestion.set(r.questionId, {});
+      byQuestion.get(r.questionId)![r.reviewerRole] = r.score;
+    }
+
+    const rows = questions.map((q) => ({
+      id: q.id,
+      category: q.category,
+      section: q.section,
+      text: q.text,
+      weight: q.weight,
+      scores: byQuestion.get(q.id) ?? {},
+    }));
+
+    // Per-reviewer totals, so HR can see at a glance where they disagree.
+    const bands = parseScoreBands(summary.template?.scoreBands);
+    const maxMarks = templateMaxMarks(questions);
+    const totals: Record<string, { total: number; answered: number; band: string | null }> = {};
+    for (const role of [...REVIEWER_ROLES, LEGACY_REVIEWER_ROLE]) {
+      const scored = responses.filter((r) => r.reviewerRole === role && r.score != null);
+      if (!scored.length) continue;
+      const total = scored.reduce((sum, r) => {
+        const w = questions.find((q) => q.id === r.questionId)?.weight || 1;
+        return sum + (r.score ?? 0) * w;
+      }, 0);
+      totals[role] = { total, answered: scored.length, band: bandFor(total, maxMarks, bands) };
+    }
+
+    const selfAppraisal = await prisma.performanceSelfAppraisal.findUnique({
+      where: {
+        employeeId_cycle_period: {
+          employeeId: summary.employeeId,
+          cycle: summary.cycle,
+          period: summary.period,
+        },
+      },
+      include: { answers: { include: { question: true } } },
+    });
+
+    res.json({
+      summary: {
+        id: summary.id,
+        cycle: summary.cycle,
+        period: summary.period,
+        periodLabel: labelForCyclePeriod(
+          summary.employee?.dateOfJoining ? new Date(summary.employee.dateOfJoining) : null,
+          summary.cycle,
+          summary.period as string,
+        ),
+        marksScored: summary.marksScored,
+        overallPerf: summary.overallPerf,
+        hrReviewedAt: summary.hrReviewedAt,
+      },
+      employee: summary.employee,
+      template: summary.template
+        ? { id: summary.template.id, title: summary.template.title }
+        : null,
+      maxMarks,
+      reviewerRoles: REVIEWER_ROLES,
+      reviewerLabels: REVIEWER_ROLE_LABELS,
+      questions: rows,
+      totals,
+      selfAppraisal: selfAppraisal
+        ? {
+            submittedAt: selfAppraisal.submittedAt,
+            achievements: selfAppraisal.achievements,
+            goalsObjective: selfAppraisal.goalsObjective,
+            challenges: selfAppraisal.challenges,
+            trainingNeeds: selfAppraisal.trainingNeeds,
+            answers: selfAppraisal.answers.map((a) => ({
+              questionId: a.questionId,
+              section: a.question?.section ?? "General",
+              text: a.question?.text ?? "",
+              rating: a.rating,
+              comments: a.comments,
+            })),
+          }
+        : null,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
 
 /**
  * GET /performance/export/:employeeId?scope=cycle|tenure&cycle=...
@@ -1188,8 +1335,13 @@ export const getAllSummaries = async (req: Request, res: Response) => {
       };
     }
 
+    // Archived rows are hidden unless HR explicitly asks for them — they hold
+    // real history, so they are retired rather than deleted.
+    const includeArchived = req.query.includeArchived === "true"
+      && (isHRManager || isManagement || isHRExecutive);
+
     const summaries = await prisma.performanceSummary.findMany({
-      where: whereClause,
+      where: includeArchived ? whereClause : { AND: [whereClause, { archivedAt: null }] },
       include: {
         employee: {
           select: {
@@ -1285,6 +1437,69 @@ export const getAllSummaries = async (req: Request, res: Response) => {
     }));
 
     res.json(rows);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * PATCH /performance/summary/:id/archive  { archived: boolean }
+ *
+ * Retires a period without deleting it. Rows created before the derived cycles
+ * went live still hold real appraisal history, so HR hides them rather than
+ * destroying them; restoring is the same call with archived:false.
+ *
+ * HR only — a reviewer must not be able to make a row they dislike disappear.
+ */
+export const setSummaryArchived = async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!isHRViewer({
+      empId: user?.empId ?? null,
+      role: user?.role ?? "",
+      deptId: user?.deptId ?? null,
+    })) {
+      return res.status(403).json({ error: "Only HR can archive a performance record" });
+    }
+
+    const id = Number(req.params.id);
+    const archived = req.body?.archived !== false;
+    const summary = await prisma.performanceSummary.findUnique({
+      where: { id },
+      select: { id: true, employeeId: true, cycle: true, period: true, archivedAt: true },
+    });
+    if (!summary) return res.status(404).json({ error: "Performance record not found" });
+
+    // Restoring is blocked when an active row already occupies the same slot —
+    // the unique-ish (employee, cycle, period) shape the working views assume
+    // would otherwise show two rows for one milestone.
+    if (!archived && summary.archivedAt) {
+      const clash = await prisma.performanceSummary.findFirst({
+        where: {
+          employeeId: summary.employeeId,
+          cycle: summary.cycle,
+          period: summary.period,
+          archivedAt: null,
+          id: { not: summary.id },
+        },
+        select: { id: true },
+      });
+      if (clash) {
+        return res.status(409).json({
+          error: "An active record already exists for this cycle and period. Archive it first.",
+        });
+      }
+    }
+
+    // Goes through the shared helper so the row's flag and HR's central
+    // Archive screen are written together — see lib/archivable.ts.
+    const actor = Number(user?.empId) || null;
+    const result = archived
+      ? await archiveRecord("PERFORMANCE_SUMMARY", id, actor, req.body?.reason)
+      : await restoreRecord("PERFORMANCE_SUMMARY", id, actor);
+    if (!result.ok) return res.status(result.status ?? 400).json({ error: result.error });
+
+    res.json({ ...result.record, archived: !!result.record?.archivedAt });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

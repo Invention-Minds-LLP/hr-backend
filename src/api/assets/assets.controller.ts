@@ -34,7 +34,10 @@ export const listAssets = async (req: Request, res: Response) => {
     const { search = '', status, category, page = '1', limit = '20' } = req.query as any;
     const skip = (Number(page) - 1) * Number(limit);
 
+    // Archived assets are kept but stay out of the register. Distinct from
+    // status RETIRED, which is a lifecycle fact the register still shows.
     const where: any = {
+      archivedAt: null,
       ...(status ? { status: String(status).toUpperCase() } : {}),
       ...(category ? { category: String(category).toUpperCase() } : {}),
       ...(search

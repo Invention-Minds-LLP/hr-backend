@@ -16,7 +16,9 @@ import {
   assignSummaryTemplate,
   getAllSummaries,
   getEmployeeCycles,
-  exportPerformanceSheet
+  exportPerformanceSheet,
+  getReviewDetail,
+  setSummaryArchived
 } from "./performance.controller";
 import {
   listSelfAppraisalCycles,
@@ -56,8 +58,11 @@ router.patch("/summary/:id/template", authenticateToken, assignSummaryTemplate);
 // registered before the parameterised summary routes so it isn't swallowed.
 router.get("/edit-requests", authenticateToken, listEditRequests);
 router.patch("/edit-requests/:id", authenticateToken, decideEditRequest);
+router.get("/summary/:id/review-detail", authenticateToken, getReviewDetail);
 router.patch("/summary/:id/review", authenticateToken, setHrReviewed);
 router.post("/summary/:id/edit-request", authenticateToken, requestEdit);
+// Retire / restore a period. HR only — enforced in the controller.
+router.patch("/summary/:id/archive", authenticateToken, setSummaryArchived);
 router.get("/summaries", authenticateToken, getAllSummaries);
 router.get("/template/:departmentId", authenticateToken, getTemplateByDept);
 router.post("/responses", authenticateToken, submitResponses);

@@ -66,7 +66,8 @@ export const listSelfAppraisalCycles = async (req: Request, res: Response) => {
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 
     const summaries = await prisma.performanceSummary.findMany({
-      where: { employeeId },
+      // Archived periods drop out of the employee's list entirely.
+      where: { employeeId, archivedAt: null },
       select: { cycle: true, period: true },
       orderBy: [{ cycle: "asc" }, { createdAt: "asc" }],
     });
@@ -120,7 +121,7 @@ export const listSelfAppraisalCycles = async (req: Request, res: Response) => {
     // managerial flow owns their self-appraisal; a PerformanceSummary means
     // this one does. Anyone holding both is surfaced so they don't fill two.
     const managerial = await prisma.appraisalForm.findMany({
-      where: { employeeId, status: { notIn: ["AUTO_DRAFT", "Draft"] } },
+      where: { employeeId, archivedAt: null, status: { notIn: ["AUTO_DRAFT", "Draft"] } },
       select: { id: true, cycle: true, status: true, selfAppraisalSubmittedAt: true },
       orderBy: { id: "desc" },
     });
@@ -168,7 +169,7 @@ export const getSelfAppraisal = async (req: Request, res: Response) => {
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 
     const assigned = await prisma.performanceSummary.findFirst({
-      where: { employeeId, cycle, period: period as any },
+      where: { employeeId, cycle, period: period as any, archivedAt: null },
       select: { id: true },
     });
     if (!assigned) {
@@ -244,7 +245,7 @@ export const submitSelfAppraisal = async (req: Request, res: Response) => {
     if (guard.blocked) return res.status(423).json({ error: guard.message });
 
     const assigned = await prisma.performanceSummary.findFirst({
-      where: { employeeId, cycle, period: period as any },
+      where: { employeeId, cycle, period: period as any, archivedAt: null },
       select: { id: true },
     });
     if (!assigned) {

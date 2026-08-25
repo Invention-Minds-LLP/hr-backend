@@ -212,7 +212,15 @@ model Employee {
   dataScopes        EmployeeDataScope[] @relation("DataScopeOwner")
   dataScopesGranted EmployeeDataScope[] @relation("DataScopeGrantedBy")
 
+  /// Archive: keep the row, take it out of the working lists. Deliberately not
+  /// folded into `employmentStatus` — that is business state the lists still show, so
+  /// reusing it would change what the module means. Null = active.
+  /// Written together with ArchiveLog by lib/archivable.ts.
+  archivedAt DateTime?
+  archivedBy Int?
+
   @@index([employmentStatus])
+  @@index([archivedAt])
   @@index([departmentId])
   @@index([branchId])
   @@index([roleId])
@@ -849,6 +857,12 @@ model AppraisalForm {
   hrApprovedBy                   Int?
   hrApprovedAt                   DateTime?
 
+  /// Set to retire an appraisal without deleting it. `status` only tracks where
+  /// the form is in its workflow, so it has no way to say "keep this but stop
+  /// showing it". Null means active. See ArchiveLog and lib/archivable.ts.
+  archivedAt                     DateTime?
+  archivedBy                     Int?
+
   employee         Employee                @relation(fields: [employeeId], references: [id])
   hrReview         HRAppraisal?
   managerReview    ManagerAppraisal?
@@ -1384,9 +1398,17 @@ model Job {
   department            Department           @relation(fields: [departmentId], references: [id])
   ManpowerRequisition   ManpowerRequisition?
 
+  /// Archive: keep the row, take it out of the working lists. Deliberately not
+  /// folded into `status` — that is business state the lists still show, so
+  /// reusing it would change what the module means. Null = active.
+  /// Written together with ArchiveLog by lib/archivable.ts.
+  archivedAt DateTime?
+  archivedBy Int?
+
   @@index([status])
   @@index([departmentId])
   @@index([title])
+  @@index([archivedAt])
 }
 
 model Candidate {
@@ -1709,6 +1731,15 @@ model Announcement {
   requireAck   Boolean           @default(false)
   type         String?
   acks         AnnouncementAck[]
+
+  /// Archive: keep the row, take it out of the working lists. Deliberately not
+  /// folded into `endsAt` — that is business state the lists still show, so
+  /// reusing it would change what the module means. Null = active.
+  /// Written together with ArchiveLog by lib/archivable.ts.
+  archivedAt DateTime?
+  archivedBy Int?
+
+  @@index([archivedAt])
 }
 
 model AnnouncementAck {
@@ -2064,6 +2095,12 @@ model PerformanceSummary {
   /// Per period, not per cycle — each milestone completes at its own time.
   hrReviewedAt  DateTime?
   hrReviewedBy  Int?
+  /// Set to retire a row without deleting it — rows created before the derived
+  /// cycles went live still hold real appraisal history, so they are hidden
+  /// rather than destroyed. Null means active. Archived rows drop out of the
+  /// working lists and stop blocking a fresh assignment for the same period.
+  archivedAt    DateTime?
+  archivedBy    Int?
   employeeSig   String?                  @db.Text
   supervisorSig String?                  @db.Text
   hodSig        String?                  @db.Text
@@ -4326,6 +4363,59 @@ model ApiAccessLog {
 }
 
 /// ──────────────────────────────────────────────────────────────────────
+///  ARCHIVE LOG — the index behind HR's single Archive screen.
+///
+///  Archiving means "keep the row, take it out of the working list". Each
+///  module records that on its own row: PerformanceSummary and AppraisalForm
+///  have archivedAt/archivedBy, while Employee, Job, Asset, Announcement and
+///  LetterIssued already carry the state in fields they had (DEACTIVATED,
+///  CLOSED, RETIRED, endsAt) and gained nothing new.
+///
+///  That is enough for each module to filter itself, but not for one screen
+///  that lists everything archived: it would mean querying every module and
+///  merging in memory, with no paging or sorting. This table is that screen's
+///  single indexed source. lib/archivable.ts writes the module's own field and
+///  this row together, so the index cannot drift from the records.
+///
+///  `label` is frozen at archive time rather than joined — rendering one page
+///  otherwise means joining every wired table. It is display text only; the
+///  module + recordId is what identifies the record.
+///
+///  One row per record, upserted: archiving again after a restore overwrites
+///  the previous stamps. Per-record history lives in EmployeeAuditLog and the
+///  module's own audit trail, not here.
+///
+///  archivedBy/restoredBy are plain Ints with no FK, matching archivedBy on
+///  PerformanceSummary — keeps the table additive and free of cascade rules.
+/// ──────────────────────────────────────────────────────────────────────
+model ArchiveLog {
+  id         Int       @id @default(autoincrement())
+  /// Which table the record lives in — see ARCHIVE_MODULES in lib/archivable.ts.
+  module     String
+  /// The archived row's own primary key, within that module.
+  recordId   Int
+  /// Who the record is about, when it is about someone. Null for Job,
+  /// Announcement and anything else not tied to one employee.
+  employeeId Int?
+  /// Display text captured at archive time, e.g.
+  /// "Ravi K — 1st Month — APR-2025 TO MAR-2026".
+  label      String    @db.Text
+  /// Optional note from HR explaining why.
+  reason     String?   @db.Text
+  archivedAt DateTime  @default(now())
+  archivedBy Int?
+  /// Set when the record is brought back. Rows stay so the screen can show
+  /// what was restored and when; the default view hides them.
+  restoredAt DateTime?
+  restoredBy Int?
+
+  @@unique([module, recordId])
+  @@index([employeeId])
+  @@index([archivedAt])
+  @@index([restoredAt])
+}
+
+/// ──────────────────────────────────────────────────────────────────────
 ///  COMMITTEE — POSH ICC and Grievance Redressal Committee.
 ///  One row per committee instance (e.g. "ICC 2026", "Grievance Committee").
 ///  Active members come via CommitteeMember.
@@ -4802,9 +4892,17 @@ model LetterIssued {
   employee Employee        @relation(fields: [employeeId], references: [id])
   company  Company?        @relation(fields: [companyId], references: [id])
 
+  /// Archive: keep the row, take it out of the working lists. Deliberately not
+  /// folded into `status` — that is business state the lists still show, so
+  /// reusing it would change what the module means. Null = active.
+  /// Written together with ArchiveLog by lib/archivable.ts.
+  archivedAt DateTime?
+  archivedBy Int?
+
   @@index([employeeId])
   @@index([templateId])
   @@index([issuedAt])
+  @@index([archivedAt])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -4850,9 +4948,17 @@ model Asset {
   company     Company?          @relation(fields: [companyId], references: [id])
   allocations AssetAllocation[]
 
+  /// Archive: keep the row, take it out of the working lists. Deliberately not
+  /// folded into `status` — that is business state the lists still show, so
+  /// reusing it would change what the module means. Null = active.
+  /// Written together with ArchiveLog by lib/archivable.ts.
+  archivedAt DateTime?
+  archivedBy Int?
+
   @@index([companyId])
   @@index([status])
   @@index([category])
+  @@index([archivedAt])
 }
 
 /// One issue-and-return cycle. History is kept: a laptop passed between three

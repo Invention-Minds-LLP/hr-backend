@@ -788,6 +788,7 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
       case 'jobs': {
         const empMap = await getEmployeeMap();
         const jobs = await prisma.job.findMany({
+          where: { archivedAt: null },
           include: { department: { select: { name: true } } },
         });
 
@@ -951,6 +952,7 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
       case 'appraisal-forms': {
         const empMap = await getEmployeeMap();
         const appraisals = await prisma.appraisalForm.findMany({
+          where: { archivedAt: null },
           include: {
             employee: { select: { employeeCode: true, firstName: true, lastName: true } },
           },
@@ -1027,7 +1029,7 @@ export const exportTable = async (req: Request, res: Response): Promise<void> =>
 
       // ─── ANNOUNCEMENTS ────────────────────────────────────────────────────────
       case 'announcements': {
-        const announcements = await prisma.announcement.findMany();
+        const announcements = await prisma.announcement.findMany({ where: { archivedAt: null } });
 
         const headers = [
           'Announcement Title', 'Announcement Body', 'Audience', 'Start Date',

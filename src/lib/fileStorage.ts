@@ -16,6 +16,7 @@
 import fs from "fs";
 import path from "path";
 import { config } from "../config";
+import { compressImageFile } from "./imageCompress";
 
 // Root directory where uploaded files live. In Docker this is a mounted volume
 // (UPLOADS_DIR=/usr/src/app/uploads); locally it defaults to <cwd>/uploads.
@@ -36,6 +37,11 @@ export function toSubPath(remoteOrSubPath: string): string {
 // storage. `remoteOrSubPath` may be a legacy "/public_html/<folder>/<file>" or a
 // plain "<folder>/<file>" — both resolve to UPLOADS_DIR/<folder>/<file>.
 // Returns the stored sub-path.
+//
+// Images (jpeg/png/webp) are compressed to fit IMAGE_MAX_BYTES on the way in;
+// PDFs, office docs and anything else are copied byte-for-byte. This is the one
+// choke point every upload route goes through, so compression lives here rather
+// than in each controller. See src/lib/imageCompress.ts.
 export async function saveLocal(
   localTempPath: string,
   remoteOrSubPath: string
@@ -43,7 +49,8 @@ export async function saveLocal(
   const sub = toSubPath(remoteOrSubPath);
   const dest = path.join(UPLOADS_DIR, sub);
   await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-  await fs.promises.copyFile(localTempPath, dest);
+  const bytes = await compressImageFile(localTempPath);
+  await fs.promises.writeFile(dest, bytes);
   return sub;
 }
 

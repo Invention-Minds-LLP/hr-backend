@@ -336,7 +336,9 @@ export const getAllAppraisalsWithManagerReview = async (req: Request, res: Respo
     }
 
     const appraisals = await prisma.appraisalForm.findMany({
-      where: whereClause,
+      // Archived appraisals stay out of the working list. They are kept, not
+      // deleted — HR restores them from the Archive screen.
+      where: { ...whereClause, archivedAt: null },
       include: {
         employee: {
           select: {
@@ -519,6 +521,7 @@ export const sendAppraisalCountReminders = async (cycles?: string[]) => {
   // 1) Get pending forms with managerId + cycle
   const forms = await prisma.appraisalForm.findMany({
     where: {
+      archivedAt: null,
       managerId: { not: null },
       ...(cycles ? { cycle: { in: cycles } } : {}),
       status: { in: ["Draft", "InReview", "PendingManager"] } // adjust to your statuses

@@ -17,7 +17,12 @@
     "verify:template": "ts-node src/scripts/verify-salary-template.ts",
     "verify:phase3": "ts-node src/scripts/verify-phase3.ts",
     "company:backfill": "ts-node src/scripts/company-backfill.ts",
-    "fix:lop": "ts-node src/scripts/fix-lop-leave-type.ts"
+    "fix:lop": "ts-node src/scripts/fix-lop-leave-type.ts",
+    "fix:compoff-usedon": "ts-node src/scripts/fix-compoff-usedon.ts",
+    "audit:compoff-rh": "ts-node src/scripts/audit-compoff-optional-holiday.ts",
+    "seed:survey-cycle": "ts-node src/scripts/seed-survey-cycle.ts",
+    "verify:survey-cycle": "ts-node src/scripts/verify-survey-cycle.ts",
+    "test:survey-assignment": "ts-node src/scripts/test-survey-assignment.ts"
   },
   "keywords": [],
   "author": "",
@@ -46,6 +51,7 @@
     "nodemailer": "^7.0.10",
     "pdfkit": "^0.17.1",
     "qrcode": "^1.5.4",
+    "sharp": "^0.35.3",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

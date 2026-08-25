@@ -1388,7 +1388,8 @@ export const getDeptRisk = async (_req: Request, res: Response) => {
 
     // 3. Latest appraisal scores per employee
     const appraisals = await prisma.appraisalForm.findMany({
-      where: { overallScore: { not: null } },
+      // Archived appraisals are history, not current performance figures.
+      where: { overallScore: { not: null }, archivedAt: null },
       orderBy: { createdAt: "desc" },
       select: {
         employeeId: true,
@@ -1529,7 +1530,8 @@ export const getDeptSnapshot = async (_req: Request, res: Response) => {
 
     // Latest appraisal scores
     const appraisals = await prisma.appraisalForm.findMany({
-      where: { overallScore: { not: null } },
+      // Archived appraisals are history, not current performance figures.
+      where: { overallScore: { not: null }, archivedAt: null },
       orderBy: { createdAt: "desc" },
       select: { employeeId: true, overallScore: true },
     });
@@ -1999,7 +2001,8 @@ export const getPerformanceDistribution = async (_req: Request, res: Response) =
   try {
     // Latest appraisal per employee
     const appraisals = await prisma.appraisalForm.findMany({
-      where: { overallScore: { not: null } },
+      // Archived appraisals are history, not current performance figures.
+      where: { overallScore: { not: null }, archivedAt: null },
       orderBy: { createdAt: "desc" },
       select: {
         employeeId: true,
@@ -2202,7 +2205,7 @@ export const getKpiDetail = async (req: Request, res: Response) => {
     if (type === "positions") {
       const now = new Date();
       const jobs = await prisma.job.findMany({
-        where: { status: "OPEN" },
+        where: { status: "OPEN", archivedAt: null },
         include: { department: { select: { name: true } } },
         orderBy: { createdAt: "asc" },
       });
@@ -2841,7 +2844,7 @@ export const getRecruitmentOps = async (_req: Request, res: Response) => {
       prisma.offer.count({ where: { proposedJoinAt: { gte: todayStart, lte: todayEnd }, joinOutcome: "JOINED" } }),
       // #6 — open vacancies with application counts
       prisma.job.findMany({
-        where: { status: "OPEN" },
+        where: { status: "OPEN", archivedAt: null },
         select: {
           title: true, headcount: true, status: true,
           department: { select: { name: true } },
@@ -3042,7 +3045,8 @@ export const getAppraisalScores = async (_req: Request, res: Response) => {
     });
 
     const forms = await prisma.appraisalForm.findMany({
-      where: { overallScore: { not: null } },
+      // Archived appraisals are history, not current performance figures.
+      where: { overallScore: { not: null }, archivedAt: null },
       orderBy: { createdAt: "desc" },
       select: { employeeId: true, overallScore: true, cycle: true, createdAt: true, finalDecision: true },
     });
@@ -3482,6 +3486,7 @@ export const getAppraisalEligibility = async (req: Request, res: Response) => {
     });
 
     const forms = await prisma.appraisalForm.findMany({
+      where: { archivedAt: null },
       orderBy: { createdAt: "desc" },
       select: { employeeId: true, createdAt: true },
     });

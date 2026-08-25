@@ -116,6 +116,11 @@ export const config = {
   // volume path, e.g. /usr/src/app/uploads.
   uploadsDir: optional("UPLOADS_DIR"),
 
+  // Hard size ceiling for a stored image, in bytes. Uploaded jpeg/png/webp are
+  // re-encoded down to fit (see src/lib/imageCompress.ts); PDFs and office docs
+  // are untouched. Raise this if scanned documents come out too soft to read.
+  imageMaxBytes: int("IMAGE_MAX_BYTES", 50 * 1024),
+
   // ── CORS ──────────────────────────────────────────────────────────────────
   // Allowed browser origins. Default is the previous hardcoded list (dev +
   // both clients' production domains) so behaviour is unchanged. Per client,

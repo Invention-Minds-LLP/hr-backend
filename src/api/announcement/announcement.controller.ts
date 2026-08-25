@@ -229,6 +229,8 @@ export async function listLiveForEmployee(req: Request, res: Response) {
     // fetch live announcements
     const live = await prisma.announcement.findMany({
       where: {
+        // Archived announcements are kept but never shown, whatever their dates.
+        archivedAt: null,
         startsAt: { lte: now },
         OR: [{ endsAt: null }, { endsAt: { gte: now } }],
       },
@@ -292,6 +294,8 @@ export async function listLiveAnnouncementsWithStats(_req: Request, res: Respons
 
     const live = await prisma.announcement.findMany({
       where: {
+        // Archived announcements are kept but never shown, whatever their dates.
+        archivedAt: null,
         startsAt: { lte: now },
         OR: [{ endsAt: null }, { endsAt: { gte: now } }],
       },
@@ -349,6 +353,8 @@ export async function listAllLiveForEmployee(req: Request, res: Response) {
     // 1️⃣ Fetch all live announcements (still valid)
     const liveAnnouncements = await prisma.announcement.findMany({
       where: {
+        // Archived announcements are kept but never shown, whatever their dates.
+        archivedAt: null,
         startsAt: { lte: now },
         OR: [{ endsAt: null }, { endsAt: { gte: now } }],
       },

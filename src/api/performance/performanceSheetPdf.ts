@@ -81,7 +81,8 @@ async function loadSheet(opts: SheetOptions) {
   const cycleFilter = opts.scope === "cycle" && opts.cycle ? { cycle: opts.cycle } : {};
 
   const summaries = await prisma.performanceSummary.findMany({
-    where: { employeeId: opts.employeeId, ...cycleFilter },
+    // Retired periods are not part of the live sheet.
+    where: { employeeId: opts.employeeId, archivedAt: null, ...cycleFilter },
     include: { template: { include: { questions: { orderBy: { orderNo: "asc" } } } } },
     orderBy: [{ cycle: "asc" }, { createdAt: "asc" }],
   });

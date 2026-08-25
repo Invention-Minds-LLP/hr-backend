@@ -4,6 +4,7 @@ import { revokeEmployeeAccess } from "../../lib/employeeAccess";
 import { withEmployeeScope, guardInScope, isViewerGlobal, resolveScope } from "../../lib/dataScope";
 import type { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { buildEmployeeDiff, auditCtxFromReq } from "../../lib/employeeAudit";
+import { archiveRecord } from "../../lib/archivable";
 import type { Prisma } from "@prisma/client";
 const prisma = new PrismaClient();
 import formidable from "formidable";
@@ -570,7 +571,10 @@ export const getEmployees = async (req: AuthenticatedRequest, res: Response) => 
     const pageSize = Math.min(Number(req.query.pageSize ?? 10), 50); // max = 50
     const skip = (page - 1) * pageSize;
 
-    const where: any = {};
+    // Archived employees leave the register. They are not deleted — HR sees and
+    // restores them from the Archive screen. `?includeArchived=true` pulls them
+    // back into this list for anyone who needs to look.
+    const where: any = req.query.includeArchived === "true" ? {} : { archivedAt: null };
     const filter = req.query.filter as string;
     const search = req.query.search as string;
 
@@ -1168,30 +1172,54 @@ export const updateEmployee = async (req: AuthenticatedRequest, res: Response) =
   }
 };
 
-// DELETE employee
+/**
+ * DELETE /employee/:id — archives rather than deletes.
+ *
+ * This used to call prisma.employee.delete(), which destroyed the person and
+ * everything hanging off them: attendance, leave history, payslips, appraisals.
+ * It also failed outright for anyone with real data, because the FKs refuse.
+ *
+ * It now retires the record instead — the row stays, drops out of the working
+ * lists, and HR can restore it from the Archive screen. Access is still revoked
+ * (employmentStatus DEACTIVATED + the directory entry), so the outcome HR wanted
+ * from "delete" is unchanged; only the destruction is gone. Restoring does NOT
+ * re-grant access on its own — employmentStatus is set back from the employee
+ * form, deliberately, so bringing a record back is not an access decision.
+ */
 export const deleteEmployee = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
 
     if (!(await guardInScope(req, res, Number(id)))) return;
 
-    // Capture phone first so we can deactivate the directory entry after delete
+    // Captured first so the directory entry can be deactivated afterwards.
     const employee = await prisma.employee.findUnique({
       where: { id: Number(id) },
-      select: { phone: true },
+      select: { phone: true, archivedAt: true },
+    });
+    if (!employee) return res.status(404).json({ error: "Employee not found" });
+
+    const actor = Number((req as any).user?.empId) || null;
+    const result = await archiveRecord("EMPLOYEE", Number(id), actor, req.body?.reason);
+    if (!result.ok) {
+      return res.status(result.status ?? 400).json({ error: result.error });
+    }
+
+    await prisma.employee.update({
+      where: { id: Number(id) },
+      data: { employmentStatus: "DEACTIVATED" },
     });
 
-    await prisma.employee.delete({
-      where: { id: Number(id) }
-    });
-
-    if (employee?.phone) {
+    if (employee.phone) {
       deactivateEmployeeInDirectory(employee.phone).catch(() => { /* non-blocking */ });
     }
 
-    res.json({ message: "Employee deleted successfully" });
+    res.json({
+      message: "Employee archived. The record is kept and can be restored from the Archive screen.",
+      archived: true,
+    });
   } catch (error) {
-    res.status(500).json({ error: "Failed to delete employee" });
+    res.status(500).json({ error: "Failed to archive employee" });
   }
 };
 function sanitizeFileName(fileName: string): string {
