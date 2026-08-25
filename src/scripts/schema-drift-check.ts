@@ -138,6 +138,36 @@ async function main() {
   }
   for (const o of orphans) console.log(`  ${o.table}`);
 
+  // ── 4b. Physical index names ─────────────────────────────────────────────
+  // This is what decides whether a push touches a foreign key at all. MySQL
+  // auto-creates an index for every FK and names it after the constraint
+  // (`X_employeeId_fkey`). A bare `@@index([employeeId])` in schema.prisma
+  // instead asks for `X_employeeId_idx`, so Prisma plans a rename — and
+  // renaming an index an FK sits on means dropping and re-adding that FK,
+  // which is where these pushes keep dying. Models that pin the name with
+  // `map: "X_employeeId_fkey"` are left alone.
+  console.log('\n── Index names on the suspect tables ────────────────────────');
+  for (const t of FK_SUSPECTS.concat(['CompOffRequest'])) {
+    const idx = await prisma.$queryRawUnsafe<
+      Array<{ name: string; cols: string; nonUniq: number }>
+    >(
+      `SELECT INDEX_NAME AS name,
+              GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS cols,
+              NON_UNIQUE AS nonUniq
+         FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+        GROUP BY INDEX_NAME, NON_UNIQUE
+        ORDER BY INDEX_NAME`,
+      t,
+    );
+    console.log(`  ${t}`);
+    for (const i of idx) {
+      console.log(
+        `      ${i.name.padEnd(52)} (${i.cols})${Number(i.nonUniq) ? '' : '  UNIQUE'}`,
+      );
+    }
+  }
+
   // ── 5. Will the pending unique constraints actually apply? ───────────────
   // `db push` warns that these "will fail if there are existing duplicate
   // values" and then asks a yes/no question that only silences the warning —
