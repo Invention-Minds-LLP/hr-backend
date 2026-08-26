@@ -5,12 +5,11 @@ import { authenticateToken } from '../../middleware/authMiddleware';
 
 const router = Router();
 
-// Allowed attachment types for announcements.
+// Allowed attachment types for announcements. Word documents (.doc/.docx) are
+// deliberately not on this list — circulate them as PDF.
 const ALLOWED_MIME = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp',
   'application/pdf',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.ms-excel',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ]);
