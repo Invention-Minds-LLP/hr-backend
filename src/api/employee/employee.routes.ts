@@ -38,7 +38,7 @@ import {
   getEmployeeAuditLog,
   queryAuditLog,
 } from "./employee.controller";
-import { authenticateToken } from "../../middleware/authMiddleware";
+import { authenticateToken, requirePermission } from "../../middleware/authMiddleware";
 import { bulkUploadLeaveBalancesExcel } from "../leave/leave.controller";
 
 const router = Router();
@@ -79,9 +79,13 @@ router.get("/:id/probation/history", authenticateToken, getProbationHistory);
 router.get("/:id/audit-log", authenticateToken, getEmployeeAuditLog);
 // Org-wide audit query (e.g. all salary changes last month).
 router.get("/audit/query", authenticateToken, queryAuditLog);
-router.post("/:id/probation/extend", authenticateToken, extendProbation);
-router.post("/:id/probation/confirm", authenticateToken, confirmProbation);
-router.post("/:id/probation/terminate", authenticateToken, terminateProbation);
+// Confirming, extending or terminating probation changes employment type and
+// can revoke access, so these carry the same key as the final decision in the
+// probation module. They were previously open to any authenticated user.
+const canDecideProbation = requirePermission("admin.probation.manage");
+router.post("/:id/probation/extend", authenticateToken, canDecideProbation, extendProbation);
+router.post("/:id/probation/confirm", authenticateToken, canDecideProbation, confirmProbation);
+router.post("/:id/probation/terminate", authenticateToken, canDecideProbation, terminateProbation);
 
 
 

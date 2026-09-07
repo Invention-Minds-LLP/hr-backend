@@ -6,6 +6,8 @@ import { createNotification } from '../notifications/notifications.controller';
 import * as ExcelJS from 'exceljs';
 import { create } from 'qrcode';
 import { withEmployeeScope } from '../../lib/dataScope';
+import { applyProbationOutcome } from '../../lib/probation';
+import { auditCtxFromReq } from '../../lib/employeeAudit';
 import type { AuthenticatedRequest } from '../../middleware/authMiddleware';
 
 const prisma = new PrismaClient();
@@ -3439,27 +3441,42 @@ export const requestProbationFeedback = async (req: Request, res: Response) => {
 };
 
 
+/**
+ * Quick extension from the management dashboard's "probation ending" card.
+ *
+ * This used to move `probationEndDate` on its own, which left the
+ * ProbationRecord ledger, the employee's probationStatus and the audit trail
+ * all disagreeing with the new date. It now delegates to the same writer the
+ * probation module and the employee endpoints use, so there is exactly one
+ * implementation of what "extend probation" means.
+ */
 export const extendProbation = async (req: Request, res: Response) => {
     try {
-        const { employeeId, newEndDate } = req.body;
+        const { employeeId, newEndDate, remarks } = req.body;
+        if (!employeeId) return res.status(400).json({ error: "employeeId is required" });
+        if (!newEndDate) return res.status(400).json({ error: "newEndDate is required" });
 
-        const updated = await prisma.employee.update({
-            where: { id: Number(employeeId) },
-            data: { probationEndDate: new Date(newEndDate) },
+        const decidedBy = (req as any).user?.empId ?? null;
+
+        await applyProbationOutcome({
+            employeeId: Number(employeeId),
+            outcome: 'EXTEND',
+            decidedBy,
+            remarks: remarks ?? null,
+            newEndDate: new Date(newEndDate),
+            audit: { ...auditCtxFromReq(req), reason: 'Probation extended from dashboard' },
         });
 
-        await prisma.notification.create({
-            data: {
-                employeeId: updated.id,
-                message: `Your probation has been extended until ${newEndDate}.`,
-                channel: "EMAIL",
-            },
-        });
+        await createNotification(
+            Number(employeeId),
+            `Your probation has been extended until ${fmtDate(new Date(newEndDate))}.`,
+            '📋 Probation',
+        ).catch(() => undefined);
 
         return res.json({ success: true });
-    } catch (err) {
+    } catch (err: any) {
         console.error("Extend Probation Error:", err);
-        return res.status(500).json({ error: "Failed to extend probation" });
+        return res.status(500).json({ error: err?.message ?? "Failed to extend probation" });
     }
 };
 

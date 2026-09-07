@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
+import { normalizeAttendanceStatus } from "../../lib/attendanceStatus";
 import {
   countWorkingDays, getTouchedMonths, insertLedgerTx, getLastLedgerBalanceTx,
   getCalendarYear, computeTotalUsed,
@@ -104,9 +105,13 @@ export const correctPunch = async (req: Request, res: Response) => {
         data: {
           checkIn: newIn,
           checkOut: newOut,
-          // If was ABSENT and now has a check-in, promote to PRESENT
+          // If was ABSENT and now has a check-in, promote to PRESENT. The HR
+          // approve screen writes 'Absent', so match on the normalised value or
+          // a corrected punch leaves the day sitting as absent.
           status:
-            existing.status === "ABSENT" && newIn ? "PRESENT" : existing.status,
+            normalizeAttendanceStatus(existing.status) === "ABSENT" && newIn
+              ? "PRESENT"
+              : existing.status,
           isPunchCorrected: true,
         },
       });

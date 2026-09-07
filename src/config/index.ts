@@ -121,6 +121,16 @@ export const config = {
   // are untouched. Raise this if scanned documents come out too soft to read.
   imageMaxBytes: int("IMAGE_MAX_BYTES", 50 * 1024),
 
+  // Run uploaded PDFs through Ghostscript (installed in the Docker image). The
+  // result is kept only when it is smaller, so text PDFs are left alone and
+  // only scans actually shrink. Set false to disable without a redeploy; with
+  // Ghostscript absent this is a no-op either way.
+  pdfCompress: bool("PDF_COMPRESS", true),
+
+  // Ghostscript quality preset: screen | ebook | printer | prepress. "ebook"
+  // keeps scanned text sharp at roughly 160 KB per page.
+  pdfPreset: optional("PDF_PRESET", "ebook"),
+
   // ── CORS ──────────────────────────────────────────────────────────────────
   // Allowed browser origins. Default is the previous hardcoded list (dev +
   // both clients' production domains) so behaviour is unchanged. Per client,

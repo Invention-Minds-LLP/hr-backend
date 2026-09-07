@@ -182,6 +182,8 @@ model Employee {
   pipEmailLogs               PIPEmailLog[]
   pipResponses               PIPEmployeeResponse[]
   probationRecords           ProbationRecord[]
+  probationEvaluations       ProbationEvaluation[]       @relation("ProbationEvaluationEmployee")
+  probationEvaluationsToFill ProbationEvaluation[]       @relation("ProbationEvaluationManager")
   interviewPanels            InterviewPanelMember[]
   referredApplications       Application[]               @relation("ReferredApplications")
   // Manpower-requisition relations — see ManpowerRequisition for direction details.
@@ -860,8 +862,8 @@ model AppraisalForm {
   /// Set to retire an appraisal without deleting it. `status` only tracks where
   /// the form is in its workflow, so it has no way to say "keep this but stop
   /// showing it". Null means active. See ArchiveLog and lib/archivable.ts.
-  archivedAt                     DateTime?
-  archivedBy                     Int?
+  archivedAt DateTime?
+  archivedBy Int?
 
   employee         Employee                @relation(fields: [employeeId], references: [id])
   hrReview         HRAppraisal?
@@ -959,7 +961,7 @@ model SelfAppraisalQuestion {
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
 
-  answers SelfAppraisalAnswer[]
+  answers            SelfAppraisalAnswer[]
   /// Same question master serves the Dept Performance Indicator's own
   /// self-appraisal, so both flows ask an employee the same things.
   performanceAnswers PerformanceSelfAppraisalAnswer[]
@@ -2190,14 +2192,14 @@ model PerformanceSelfAppraisal {
   employeeId     Int
   cycle          String
   period         EvaluationPeriod
-  achievements   String?   @db.Text
-  goalsObjective String?   @db.Text
-  challenges     String?   @db.Text
-  trainingNeeds  String?   @db.Text
+  achievements   String?          @db.Text
+  goalsObjective String?          @db.Text
+  challenges     String?          @db.Text
+  trainingNeeds  String?          @db.Text
   /// Null while still a draft.
   submittedAt    DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @default(now()) @updatedAt
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @default(now()) @updatedAt
 
   employee Employee                         @relation(fields: [employeeId], references: [id])
   answers  PerformanceSelfAppraisalAnswer[]
@@ -3010,23 +3012,23 @@ model Sabbatical {
 }
 
 model CompOffCredit {
-  id            Int       @id @default(autoincrement())
-  employeeId    Int
-  workDate      DateTime
-  expiryDate    DateTime
-  used          Boolean   @default(false)
-  usedOn        DateTime?
-  leaveId       Int?
-  isManualGrant Boolean   @default(false)
-  grantedBy     Int?
-  grantReason   String?
+  id                  Int       @id @default(autoincrement())
+  employeeId          Int
+  workDate            DateTime
+  expiryDate          DateTime
+  used                Boolean   @default(false)
+  usedOn              DateTime?
+  leaveId             Int?
+  isManualGrant       Boolean   @default(false)
+  grantedBy           Int?
+  grantReason         String?
   /// The CompOffRequest this credit was issued from. Null for HR's direct
   /// grants and for legacy credits auto-created before the approval flow.
-  requestId     Int?
+  requestId           Int?
   /// Day-offset reminders already sent for this credit (e.g. "7,1"), so the
   /// daily expiry cron cannot notify the same employee twice for the same day.
-  expiryRemindersSent String? @default("")
-  createdAt     DateTime  @default(now())
+  expiryRemindersSent String?   @default("")
+  createdAt           DateTime  @default(now())
 
   employee Employee @relation(fields: [employeeId], references: [id])
 
@@ -3039,36 +3041,36 @@ model CompOffCredit {
 /// reporting manager AND HR have both approved — auto-crediting is what made
 /// the entitlement arguable in the first place.
 model CompOffRequest {
-  id               Int       @id @default(autoincrement())
-  employeeId       Int
-  workDate         DateTime
+  id            Int      @id @default(autoincrement())
+  employeeId    Int
+  workDate      DateTime
   /// AUTO (detected from attendance) | HR (raised on the employee's behalf)
-  source           String    @default("AUTO")
+  source        String   @default("AUTO")
   /// Why the day qualified: a holiday, or the employee's week-off.
-  qualifier        String?
+  qualifier     String?
   /// What was actually worked vs the shift it was measured against. Kept so an
   /// approver can see the basis of the claim instead of trusting the flag.
-  workedMinutes    Int?
-  shiftMinutes     Int?
-  reason           String?   @db.Text
+  workedMinutes Int?
+  shiftMinutes  Int?
+  reason        String?  @db.Text
 
   /// PENDING_MANAGER | PENDING_HR | APPROVED | REJECTED | WITHDRAWN
-  status           String    @default("PENDING_MANAGER")
+  status String @default("PENDING_MANAGER")
 
   managerId        Int?
   managerStatus    String    @default("PENDING")
   managerDecidedAt DateTime?
   managerNote      String?   @db.Text
 
-  hrId             Int?
-  hrStatus         String    @default("PENDING")
-  hrDecidedAt      DateTime?
-  hrNote           String?   @db.Text
+  hrId        Int?
+  hrStatus    String    @default("PENDING")
+  hrDecidedAt DateTime?
+  hrNote      String?   @db.Text
 
   /// The credit issued at HR approval. Null until then.
-  creditId         Int?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  creditId  Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   employee Employee @relation(fields: [employeeId], references: [id])
 
@@ -3403,7 +3405,104 @@ model ProbationRecord {
   createdAt  DateTime        @default(now())
   updatedAt  DateTime        @default(now()) @updatedAt
 
+  evaluations ProbationEvaluation[]
+
   @@index([employeeId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Probation evaluation — the reporting manager's assessment form and HR's
+//  decision on it. One row per ROUND: round 1 is the evaluation at the end of
+//  the original probation, round 2 the one after an extension, and so on.
+//
+//  ProbationRecord stays the lifecycle ledger (which window, what outcome).
+//  This model is the paperwork attached to the decision, so it never duplicates
+//  what the record already holds — it links to it via probationRecordId.
+//
+//  managerId is NULLABLE on purpose. Employee.reportingManager is a bare Int
+//  with no relation and is not populated for everyone; an evaluation with no
+//  manager is still created and surfaces in HR's "no reporting manager" bucket
+//  rather than the employee silently never being evaluated.
+// ─────────────────────────────────────────────────────────────────────────────
+model ProbationEvaluation {
+  id                Int                       @id @default(autoincrement())
+  employeeId        Int
+  probationRecordId Int?
+  round             Int                       @default(1)
+  status            ProbationEvaluationStatus @default(PENDING_MANAGER)
+
+  /// Probation completion date that triggered this round.
+  dueDate        DateTime
+  /// Set when the manager submits — the "Evaluation Date" printed on the form.
+  evaluationDate DateTime?
+
+  // ── Manager section ──────────────────────────────────────────────────────
+  managerId             Int?
+  /// { QUANTITY_OF_WORK: "E" | "M" | "B", ... } keyed by PROBATION_CATEGORIES.
+  /// Json rather than eight columns: the category list is a fixed form layout,
+  /// not eight independently queryable facts.
+  ratings               Json?
+  strongPoints          String?                  @db.Text
+  improvementPoints     String?                  @db.Text
+  managerRecommendation ProbationRecommendation?
+  managerComments       String?                  @db.Text
+  submittedAt           DateTime?
+
+  // ── HR section ───────────────────────────────────────────────────────────
+  hrDecision     ProbationHrDecision?
+  hrComments     String?              @db.Text
+  hrDecidedBy    Int?
+  hrDecidedAt    DateTime?
+  /// Set only when the decision is EXTEND — evaluationDate + 3 months. The cron
+  /// opens the next round on this date.
+  nextReviewDate DateTime?
+
+  /// Transcribed from the signed form if the employee writes anything; there is
+  /// no employee-facing step in the workflow.
+  employeeComments String? @db.Text
+
+  /// CSV of reminder offsets already sent, same idempotency trick as
+  /// CompOffCredit.expiryRemindersSent — a re-run can never double-notify.
+  remindersSent String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  employee        Employee         @relation("ProbationEvaluationEmployee", fields: [employeeId], references: [id])
+  manager         Employee?        @relation("ProbationEvaluationManager", fields: [managerId], references: [id])
+  probationRecord ProbationRecord? @relation(fields: [probationRecordId], references: [id])
+
+  /// Round is deterministic per employee, so this is what stops a re-running
+  /// cron from opening the same evaluation twice.
+  @@unique([employeeId, round])
+  @@index([status])
+  @@index([managerId])
+  @@index([dueDate])
+}
+
+enum ProbationEvaluationStatus {
+  PENDING_MANAGER
+  PENDING_HR
+  COMPLETED
+  CANCELLED
+}
+
+enum ProbationRecommendation {
+  CONFIRM
+  EXTEND
+  TERMINATE
+  DEPARTMENT_TRANSFER
+}
+
+// HR's four outcomes. "Reject confirmation" / "reject extension" from the spec
+// are not separate values: rejection IS an HR decision that differs from the
+// manager's recommendation, which the UI states explicitly and the PDF prints.
+// Modelling them separately would allow a decided evaluation with no outcome.
+enum ProbationHrDecision {
+  CONFIRM
+  EXTEND
+  TERMINATE
+  DEPARTMENT_TRANSFER
 }
 
 enum EmploymentStatus {

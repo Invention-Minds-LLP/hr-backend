@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { addDays, startOfDay, endOfDay, startOfMonth, endOfMonth, subMonths, startOfWeek, endOfWeek, format } from "date-fns";
 import { config } from "../../config";
+import { normalizeAttendanceStatus } from "../../lib/attendanceStatus";
 
 function startOfDayIST(d = new Date()): Date {
   const ist = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
@@ -1689,7 +1690,9 @@ export const getDeptAttendanceToday = async (_req: Request, res: Response) => {
       row.headcount++;
 
       const rec = attnByEmp.get(e.id);
-      const st = rec?.status;
+      // Mobile GPS and biometric write 'Present'; force-present writes 'PRESENT'.
+      // Matching raw counted the first half as Absent — see lib/attendanceStatus.
+      const st = normalizeAttendanceStatus(rec?.status);
       let category: string;
       if (st === "PRESENT") { row.present++; category = "Present"; }
       else if (st === "LEAVE") { row.leave++; category = "Leave"; }
@@ -1862,7 +1865,7 @@ export const getDeptAttendanceWeekly = async (req: Request, res: Response) => {
 
       for (const meta of dayMeta) {
         const rec = attnByEmpDay.get(`${e.id}|${meta.dayStr}`);
-        const st = rec?.status;
+        const st = normalizeAttendanceStatus(rec?.status);
         let category: string;
         if (st === "PRESENT") { row.present++; empRow.presentDays++; category = "Present"; }
         else if (st === "LEAVE") { row.leave++; category = "Leave"; }

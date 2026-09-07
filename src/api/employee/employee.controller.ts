@@ -4,6 +4,7 @@ import { revokeEmployeeAccess } from "../../lib/employeeAccess";
 import { withEmployeeScope, guardInScope, isViewerGlobal, resolveScope } from "../../lib/dataScope";
 import type { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { buildEmployeeDiff, auditCtxFromReq } from "../../lib/employeeAudit";
+import { applyProbationOutcome } from "../../lib/probation";
 import { archiveRecord } from "../../lib/archivable";
 import type { Prisma } from "@prisma/client";
 const prisma = new PrismaClient();
@@ -4182,6 +4183,12 @@ export const bulkUploadLeaveBalance = async (req: Request, res: Response) => {
 };
 
 // ── Probation Actions ──────────────────────────────────────────────────────
+//
+// These are the direct-action endpoints HR uses from the employee screen, for
+// probation decisions taken outside the evaluation workflow. They are thin
+// wrappers over `applyProbationOutcome()` — the ProbationRecord ledger, the
+// employee snapshot and the audit row are written there, once, so these can
+// never drift from the /api/probation module or the dashboard's quick actions.
 
 export const extendProbation = async (req: Request, res: Response) => {
   try {
@@ -4191,49 +4198,32 @@ export const extendProbation = async (req: Request, res: Response) => {
 
     if (!newEndDate) return res.status(400).json({ error: 'newEndDate is required' });
 
-    const result = await prisma.$transaction(async (tx) => {
-      const emp = await tx.employee.findUnique({ where: { id: employeeId } });
-      if (!emp) throw new Error('Employee not found');
-      if (!emp.probationStartDate || !emp.probationEndDate) {
-        throw new Error('Employee has no active probation to extend');
-      }
+    const emp = await prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { probationStartDate: true, probationEndDate: true },
+    });
+    if (!emp) return res.status(404).json({ error: 'Employee not found' });
+    if (!emp.probationStartDate || !emp.probationEndDate) {
+      return res.status(400).json({ error: 'Employee has no active probation to extend' });
+    }
 
-      // Close the current in-progress record as EXTENDED
-      await tx.probationRecord.updateMany({
-        where: { employeeId, status: 'IN_PROGRESS' },
-        data: {
-          status: 'EXTENDED',
-          decidedBy,
-          decidedOn: new Date(),
-          remarks: remarks ?? null,
-        },
-      });
-
-      // Create a new IN_PROGRESS record for the extension
-      const newRecord = await tx.probationRecord.create({
-        data: {
-          employeeId,
-          startDate: emp.probationEndDate,
-          endDate: new Date(newEndDate),
-          status: 'IN_PROGRESS',
-          remarks: remarks ?? null,
-        },
-      });
-
-      // Update employee snapshot
-      const updated = await tx.employee.update({
-        where: { id: employeeId },
-        data: {
-          probationEndDate: new Date(newEndDate),
-          probationStatus: 'IN_PROGRESS',
-          probationRemarks: remarks ?? null,
-        },
-      });
-
-      return { employee: updated, record: newRecord };
+    const result = await applyProbationOutcome({
+      employeeId,
+      outcome: 'EXTEND',
+      decidedBy,
+      remarks: remarks ?? null,
+      newEndDate: new Date(newEndDate),
+      audit: { ...auditCtxFromReq(req), reason: 'Probation extended' },
     });
 
-    res.json(result);
+    const [employee, record] = await Promise.all([
+      prisma.employee.findUnique({ where: { id: employeeId } }),
+      result.openRecordId
+        ? prisma.probationRecord.findUnique({ where: { id: result.openRecordId } })
+        : Promise.resolve(null),
+    ]);
+
+    res.json({ employee, record });
   } catch (err: any) {
     console.error(err);
     res.status(400).json({ error: err.message });
@@ -4246,35 +4236,17 @@ export const confirmProbation = async (req: Request, res: Response) => {
     const { confirmedOn, remarks } = req.body;
     const decidedBy = (req as any).user?.empId ?? null;
 
-    const when = confirmedOn ? new Date(confirmedOn) : new Date();
-
-    const result = await prisma.$transaction(async (tx) => {
-      // Close the current IN_PROGRESS record as CONFIRMED
-      await tx.probationRecord.updateMany({
-        where: { employeeId, status: 'IN_PROGRESS' },
-        data: {
-          status: 'CONFIRMED',
-          decidedBy,
-          decidedOn: when,
-          remarks: remarks ?? null,
-        },
-      });
-
-      const updated = await tx.employee.update({
-        where: { id: employeeId },
-        data: {
-          probationStatus: 'CONFIRMED',
-          probationConfirmedOn: when,
-          probationConfirmedBy: decidedBy,
-          probationRemarks: remarks ?? null,
-          employmentType: 'PERMANENT',
-        },
-      });
-
-      return updated;
+    await applyProbationOutcome({
+      employeeId,
+      outcome: 'CONFIRM',
+      decidedBy,
+      remarks: remarks ?? null,
+      // HR may back-date a confirmation to the date it was actually signed off.
+      decidedOn: confirmedOn ? new Date(confirmedOn) : null,
+      audit: { ...auditCtxFromReq(req), reason: 'Probation confirmed' },
     });
 
-    res.json(result);
+    res.json(await prisma.employee.findUnique({ where: { id: employeeId } }));
   } catch (err: any) {
     console.error(err);
     res.status(400).json({ error: err.message });
@@ -4287,35 +4259,20 @@ export const terminateProbation = async (req: Request, res: Response) => {
     const { remarks } = req.body;
     const decidedBy = (req as any).user?.empId ?? null;
 
-    const result = await prisma.$transaction(async (tx) => {
-      await tx.probationRecord.updateMany({
-        where: { employeeId, status: 'IN_PROGRESS' },
-        data: {
-          status: 'TERMINATED',
-          decidedBy,
-          decidedOn: new Date(),
-          remarks: remarks ?? null,
-        },
-      });
-
-      const updated = await tx.employee.update({
-        where: { id: employeeId },
-        data: {
-          probationStatus: 'TERMINATED',
-          probationRemarks: remarks ?? null,
-          employmentStatus: 'TERMINATED',
-        },
-      });
-
-      return updated;
+    await applyProbationOutcome({
+      employeeId,
+      outcome: 'TERMINATE',
+      decidedBy,
+      remarks: remarks ?? null,
+      audit: { ...auditCtxFromReq(req), reason: 'Probation terminated' },
     });
 
-    // Probation termination → kill the employee's access.
+    // Outside the transaction — revoking access must not roll back the decision.
     try {
       await revokeEmployeeAccess(employeeId, 'Probation terminated');
     } catch (e) { console.error('[probation-terminate] revokeEmployeeAccess failed:', e); }
 
-    res.json(result);
+    res.json(await prisma.employee.findUnique({ where: { id: employeeId } }));
   } catch (err: any) {
     console.error(err);
     res.status(400).json({ error: err.message });

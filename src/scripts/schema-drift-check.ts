@@ -41,6 +41,9 @@ const EXPECTED_TABLES = ['ArchiveLog'];
 /** Tables known to carry both @@index([employeeId]) and a relation on it. */
 const FK_SUSPECTS = ['LateLoginLog', 'ShiftApproval', 'PerformanceResponse', 'EmployeeSurvey'];
 
+/** Just the first line of a driver error — the rest is a stack of SQL context. */
+const firstLine = (e: any): string => String(e?.message ?? e).split('\n')[0];
+
 async function main() {
   const [{ db }] = await prisma.$queryRawUnsafe<Array<{ db: string }>>(
     'SELECT DATABASE() AS db',
@@ -160,7 +163,7 @@ async function main() {
         ORDER BY INDEX_NAME`,
       t,
     );
-    console.log(`  ${t}`);
+    console.log(`  ${t}${idx.length ? '' : '   (table not present in this database)'}`);
     for (const i of idx) {
       console.log(
         `      ${i.name.padEnd(52)} (${i.cols})${Number(i.nonUniq) ? '' : '  UNIQUE'}`,
@@ -183,9 +186,17 @@ async function main() {
      HAVING COUNT(*) > 1
       ORDER BY n DESC
       LIMIT 20`,
-  ).catch(() => []);
+  ).catch((e: any) => {
+    // A column the push is about to ADD does not exist yet, so there is nothing
+    // to check. Say that plainly — swallowing it and printing "clean" is how a
+    // "couldn't check" turns into a false all-clear.
+    console.log(`  PerformanceResponse    NOT CHECKED — ${firstLine(e)}`);
+    return null;
+  });
 
-  if (!perfDupes.length) {
+  if (perfDupes === null) {
+    // reported above
+  } else if (!perfDupes.length) {
     console.log('  PerformanceResponse    clean — the unique constraint will apply');
   } else {
     console.log(`  PerformanceResponse    ${perfDupes.length} duplicate group(s) — the push WILL fail here:`);
@@ -209,9 +220,14 @@ async function main() {
      HAVING COUNT(*) > 1
       ORDER BY n DESC
       LIMIT 20`,
-  ).catch(() => []);
+  ).catch((e: any) => {
+    console.log(`  EmployeeSurvey         NOT CHECKED — ${firstLine(e)}`);
+    return null;
+  });
 
-  if (!surveyDupes.length) {
+  if (surveyDupes === null) {
+    // reported above
+  } else if (!surveyDupes.length) {
     console.log('  EmployeeSurvey         clean — the unique constraint will apply');
   } else {
     console.log(`  EmployeeSurvey         ${surveyDupes.length} duplicate group(s) — the push WILL fail here:`);

@@ -1,4 +1,5 @@
 import { prisma } from '../lib/prisma';
+import { normalizeAttendanceStatus } from '../lib/attendanceStatus';
 import { createNotification } from '../api/notifications/notifications.controller';
 
 
@@ -169,8 +170,10 @@ export async function generateCompOffIfEligible(attendance: any) {
 
   console.log(`Checking comp off eligibility for Employee ${employeeId} on ${date.toDateString()} with status ${attendance.status}`);
 
-  // Only for PRESENT days
-  if (attendance.status !== "Present") return;
+  // Only for PRESENT days. Matching "Present" raw skipped every day written by
+  // the force-present and HR-correction paths, which store 'PRESENT' — those
+  // are exactly the holiday/week-off days a comp-off is owed for.
+  if (normalizeAttendanceStatus(attendance.status) !== "PRESENT") return;
 
   const holiday = await isHoliday(date);
   const weeklyOff = await isWeeklyOff(employeeId, date);

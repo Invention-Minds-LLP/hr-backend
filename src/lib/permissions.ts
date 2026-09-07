@@ -49,6 +49,11 @@ export const PERMISSION_CATALOG = [
   { name: 'admin.appraisal.view', label: 'Appraisal', module: 'Administration · Performance' },
   { name: 'admin.training.view', label: 'Training', module: 'Administration · Performance' },
   { name: 'admin.pip.view', label: 'PIP', module: 'Administration · Performance' },
+  // Two keys, same split as comp-off: reporting managers need the screen to
+  // fill in the evaluation form, but the final confirm/extend/terminate call is
+  // the HR Manager's. Granting .view alone shows only your own assignments.
+  { name: 'admin.probation.view', label: 'Probation Confirmation', module: 'Administration · Performance' },
+  { name: 'admin.probation.manage', label: 'Probation Final Decision', module: 'Administration · Performance' },
 
   // Administration › Compliance
   { name: 'admin.resignation.view', label: 'Resignation', module: 'Administration · Compliance' },
@@ -216,6 +221,12 @@ export function computePermissions(ctx: PermissionContext): PermissionKey[] {
     // granted OUTSIDE the section gate.
     'admin.training.view': isNurseEducator || (adminSection && canManageTraining),
     'admin.pip.view': adminSection && !isRestricted && !isIncharge && !isReportingManager,
+    // Same audience as comp-off approvals — whoever holds reports fills the
+    // form in — widened to the HR department so HR executives can see the
+    // register. HR Manager alone takes the decision.
+    'admin.probation.view':
+      adminSection && (isReportingManager || isHRManager || isIncharge || deptId === 1),
+    'admin.probation.manage': adminSection && isHRManager,
 
     // Administration › Compliance
     'admin.resignation.view': adminSection && !isIncharge,

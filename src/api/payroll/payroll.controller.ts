@@ -8,6 +8,7 @@ import { resolveStatutoryRates } from './calc/resolveStatutory';
 import { computeStatutory } from './calc/statutory';
 import { resolveMonthlyTds } from './calc/resolveTds';
 import { previewLoanAndIncentive, settleForPayslip } from './calc/loanIncentive';
+import { normalizeAttendanceStatus } from '../../lib/attendanceStatus';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -53,9 +54,13 @@ async function buildPayslip(
     where: { employeeId, date: { gte: startDate, lte: endDate } },
   });
 
+  // Status is free text and the live data holds both 'Present' and 'PRESENT'
+  // for the same meaning — see lib/attendanceStatus. Comparing raw counted only
+  // the upper-case half, so a month of mobile GPS punches ('Present') scored
+  // zero present days and came out as a full month of LOP.
   let presentDays = 0;
   for (const a of attendances) {
-    const s = a.status as string;
+    const s = normalizeAttendanceStatus(a.status);
     if (s === 'PRESENT')               presentDays += 1;
     else if (s === 'HALF_DAY')         presentDays += 0.5;
     else if (s === 'WEEK_OFF')         presentDays += 1;  // paid

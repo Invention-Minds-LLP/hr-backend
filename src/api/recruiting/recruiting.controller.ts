@@ -4153,6 +4153,23 @@ export const updateBgvCheck = asyncHandler(async (req: Request, res: Response) =
   res.json(updated);
 });
 
+// Word documents are not accepted as BGV uploads — evidence and reports are
+// kept as PDF or images. Both the reported mime type and the extension are
+// checked: browsers send application/msword for a .docx renamed to .doc, so
+// blocking one form without the other is trivially bypassed.
+const WORD_MIME = /^application\/(msword|vnd\.openxmlformats-officedocument\.wordprocessingml\.|vnd\.ms-word)/i;
+const WORD_EXT = /\.(docx?|docm|dotx?|dotm)$/i;
+
+/** Error message when `file` is a Word document, else null. */
+function wordDocRejection(file: FormidableFile): string | null {
+  const mime = file.mimetype || '';
+  const name = file.originalFilename || '';
+  if (WORD_MIME.test(mime) || WORD_EXT.test(name)) {
+    return 'Word documents are not accepted. Upload a PDF or an image instead.';
+  }
+  return null;
+}
+
 /**
  * POST /bgv/:bgvId/checks/:checkId/evidence  (multipart, field: file)
  * Uploads a proof file for one BGV check and stores it as the check's
@@ -4174,6 +4191,11 @@ export const uploadBgvCheckEvidence = asyncHandler(async (req: Request, res: Res
       const fileField = files.file as FormidableFile | FormidableFile[] | undefined;
       const file = Array.isArray(fileField) ? fileField[0] : fileField;
       if (!file) return res.status(400).json({ error: 'file is required' });
+      const rejected = wordDocRejection(file);
+      if (rejected) {
+        try { fs.unlinkSync(file.filepath); } catch { /* temp cleanup best-effort */ }
+        return res.status(400).json({ error: rejected });
+      }
 
       const safe = (file.originalFilename || 'evidence').replace(/[^\w.\-]+/g, '_');
       const remotePath = `/public_html/bgv/${Date.now()}_${safe}`;
@@ -4213,6 +4235,11 @@ export const uploadBgvReport = asyncHandler(async (req: Request, res: Response) 
       const fileField = files.file as FormidableFile | FormidableFile[] | undefined;
       const file = Array.isArray(fileField) ? fileField[0] : fileField;
       if (!file) return res.status(400).json({ error: 'file is required' });
+      const rejected = wordDocRejection(file);
+      if (rejected) {
+        try { fs.unlinkSync(file.filepath); } catch { /* temp cleanup best-effort */ }
+        return res.status(400).json({ error: rejected });
+      }
 
       const safe = (file.originalFilename || 'bgv-report').replace(/[^\w.\-]+/g, '_');
       const remotePath = `/public_html/bgv/${Date.now()}_${safe}`;
@@ -4326,6 +4353,11 @@ export const addBgvDocument = asyncHandler(async (req: Request, res: Response) =
       const fileField = files.file as FormidableFile | FormidableFile[] | undefined;
       const file = Array.isArray(fileField) ? fileField[0] : fileField;
       if (file) {
+        const rejected = wordDocRejection(file);
+        if (rejected) {
+          try { fs.unlinkSync(file.filepath); } catch { /* temp cleanup best-effort */ }
+          return res.status(400).json({ error: rejected });
+        }
         const safe = (file.originalFilename || 'document').replace(/[^\w.\-]+/g, '_');
         const remotePath = `/public_html/bgv/${Date.now()}_${safe}`;
         await saveLocal(file.filepath, remotePath);

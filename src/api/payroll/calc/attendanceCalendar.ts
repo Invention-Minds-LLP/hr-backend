@@ -22,6 +22,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from '../../../lib/prisma';
+import { normalizeAttendanceStatus } from '../../../lib/attendanceStatus';
 
 /** Minutes of slack before a late arrival or early departure is flagged. */
 export const LATE_GRACE_MINUTES = 10;
@@ -323,17 +324,14 @@ export async function buildEmployeeCalendar(
         : null;
 
     // ── Pay treatment ───────────────────────────────────────────────────────
-    // Attendance.status is a free-text column and the live data contains BOTH
-    // "Present" and "PRESENT" for the same meaning. Comparing raw put mixed-case
-    // days into NOT_APPLICABLE, i.e. silently unpaid. Normalise before every
-    // comparison; `status` below is always upper-case.
+    // `status` below is always upper-snake — see lib/attendanceStatus for why
+    // the raw column cannot be compared directly.
     // An approved request means the day was properly applied for; a pending one
     // is applied but undecided, so it stays unpaid until someone acts.
     const leaveApplied = !!leave && String(leave.status).toUpperCase() === 'APPROVED';
     const leavePending = !!leave && String(leave.status).toUpperCase() === 'PENDING';
 
-    const rawStatus: string | null = att?.status ?? null;
-    const status = rawStatus ? String(rawStatus).toUpperCase().replace(/[\s-]+/g, '_') : null;
+    const status = normalizeAttendanceStatus(att?.status);
     const leaveIsLop = !!leave && (leave.lopUnits ?? 0) > 0;
 
     let payTreatment: CalendarDay['payTreatment'] = 'NOT_APPLICABLE';
