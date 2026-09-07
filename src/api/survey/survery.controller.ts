@@ -12,7 +12,10 @@ import { excludedEmployees } from "../../schedulers/survey-cycle.scheduler";
 export async function getSurveyQuestions(req: Request, res: Response) {
   try {
     const questions = await prisma.surveyQuestion.findMany({
-      orderBy: { orderNo: "asc" },
+      // orderNo restarts at 1 inside every section, so sorting by it alone
+      // interleaves the sections (A1, B1, C1, ... A2, B2, ...). Section first
+      // keeps the form's A-L panels in order.
+      orderBy: [{ section: "asc" }, { orderNo: "asc" }],
     });
     return res.json(questions);
   } catch (e: any) {
@@ -210,6 +213,7 @@ export async function getAllSurveys(_req: Request, res: Response) {
             employeeCode: true,
             gender: true,
             photoUrl: true,
+            designation: { select: { id: true, name: true } },
             Department: {   // ✅ use the relation name from schema
               select: { name: true }
             }
@@ -257,6 +261,7 @@ export async function getDraftSurveys(req: Request, res: Response) {
             firstName: true,
             lastName: true,
             employeeCode: true,
+            designation: { select: { id: true, name: true } },
             Department: {
               select: { name: true },
             },
