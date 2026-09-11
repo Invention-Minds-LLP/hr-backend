@@ -2591,7 +2591,7 @@ export const getApprovedWeekOffs = async (req: Request, res: Response) => {
       d.setHours(0, 0, 0, 0);
 
       if (d >= monthStart && d <= monthEnd) {
-        dates.add(d.toISOString().slice(0, 10));
+        dates.add(formatLocalDate(d));
       }
     });
 
@@ -2609,7 +2609,7 @@ export const getApprovedWeekOffs = async (req: Request, res: Response) => {
     d.setDate(d.getDate() + 1)
   ) {
     if (d.getDay() === 0) {
-      sundays.push(d.toISOString().slice(0, 10));
+      sundays.push(formatLocalDate(d));
     }
   }
 
