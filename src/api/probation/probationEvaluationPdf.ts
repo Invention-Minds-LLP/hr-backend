@@ -21,6 +21,8 @@ import {
   ProbationRating,
 } from '../../lib/probation';
 import { applyLetterhead, hasLetterhead, LETTERHEAD_SAFE_MARGINS } from '../../lib/pdfLetterhead';
+import { resolve as resolvePath } from "node:path";
+import { existsSync } from "node:fs";
 
 const FONT = 'Helvetica';
 const FONT_BOLD = 'Helvetica-Bold';
@@ -93,11 +95,20 @@ const name = (e?: { firstName?: string | null; lastName?: string | null } | null
 export function buildProbationEvaluationPdf(input: ProbationPdfInput): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
-      const useLetterhead = hasLetterhead();
-      const margins = useLetterhead ? LETTERHEAD_SAFE_MARGINS : PLAIN_MARGINS;
+      // const useLetterhead = hasLetterhead();
+      // const margins = useLetterhead ? { ...LETTERHEAD_SAFE_MARGINS, top:170, bottom: 85} : PLAIN_MARGINS;
+const baseMargins = hasLetterhead()
+  ? { ...LETTERHEAD_SAFE_MARGINS }
+  : { ...PLAIN_MARGINS };
+      
+        const margins = {
+          ...baseMargins,
+          top: Math.max(baseMargins.top, 120),
+          bottom: Math.max(baseMargins.bottom, 75),
+        };
 
       const doc = new PDFDocument({ size: 'A4', margins });
-      if (useLetterhead) applyLetterhead(doc);
+      // if (useLetterhead) applyLetterhead(doc);
 
       const chunks: Buffer[] = [];
       doc.on('data', (c) => chunks.push(c));
@@ -110,6 +121,30 @@ export function buildProbationEvaluationPdf(input: ProbationPdfInput): Promise<B
       const bottom = doc.page.height - margins.bottom;
 
       let y = margins.top;
+
+
+      const letterHeadPath = resolvePath(
+        process.cwd(),
+        "assets",
+        "JMRH-letterhead.png"
+      );
+
+      // Draw letterhead
+      const drawLetterhead = (): void => {
+        doc.save();
+
+        doc.image(letterHeadPath, 0, 0, {
+          width: doc.page.width,
+          height: doc.page.height
+        });
+
+        doc.restore();
+      };
+
+      drawLetterhead();
+
+      doc.on("pageAdded", drawLetterhead);
+
 
       /** Start a new page and reset the cursor the letterhead hook moved. */
       const newPage = () => {
