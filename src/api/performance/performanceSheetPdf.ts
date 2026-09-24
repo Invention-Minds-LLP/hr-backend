@@ -32,6 +32,7 @@ import {
 } from "../../lib/performance-scoring";
 import { applyLetterhead, hasLetterhead, LETTERHEAD_SAFE_MARGINS } from "../../lib/pdfLetterhead";
 import { labelForCyclePeriod, isFirstYearCycle, cycleEndDate } from "../../lib/appraisal-cycle";
+import { resolve } from "path";
 
 /** Order probation periods run in; anything else sorts after them. */
 const PERIOD_ORDER = ["MONTH_1", "MONTH_3", "MONTH_6", "YEAR_1", "YEAR_2"];
@@ -97,12 +98,12 @@ async function loadSheet(opts: SheetOptions) {
 
   const responses = template
     ? await prisma.performanceResponse.findMany({
-        where: {
-          employeeId: opts.employeeId,
-          ...cycleFilter,
-          questionId: { in: template.questions.map((q) => q.id) },
-        },
-      })
+      where: {
+        employeeId: opts.employeeId,
+        ...cycleFilter,
+        questionId: { in: template.questions.map((q) => q.id) },
+      },
+    })
     : [];
 
   const finalReview = await prisma.performanceFinalReview.findFirst({
@@ -182,16 +183,56 @@ export async function buildPerformanceSheetPdf(
   const viewerRole = opts.viewer ? opts.viewer.role : null;
   const viewerIsHR = opts.viewer ? opts.viewer.isHR : true;
 
-  const margins = hasLetterhead()
+  // const margins = hasLetterhead()
+  //   ? { ...LETTERHEAD_SAFE_MARGINS }
+  //   : { top: PAGE_MARGIN, bottom: PAGE_MARGIN, left: PAGE_MARGIN, right: PAGE_MARGIN };
+
+  const baseMargins = hasLetterhead()
     ? { ...LETTERHEAD_SAFE_MARGINS }
-    : { top: PAGE_MARGIN, bottom: PAGE_MARGIN, left: PAGE_MARGIN, right: PAGE_MARGIN };
+    : {
+      top: PAGE_MARGIN,
+      bottom: PAGE_MARGIN,
+      left: PAGE_MARGIN,
+      right: PAGE_MARGIN,
+    };
+
+  const margins = {
+    ...baseMargins,
+    top: Math.max(baseMargins.top, 120),
+    bottom: Math.max(baseMargins.bottom, 75),
+  };
 
   const doc = new PDFDocument({ size: "A4", margins, layout: "portrait" });
   const chunks: Buffer[] = [];
   doc.on("data", (c) => chunks.push(c as Buffer));
   const done = new Promise<Buffer>((resolve) => doc.on("end", () => resolve(Buffer.concat(chunks))));
 
-  applyLetterhead(doc);
+  // applyLetterhead(doc);
+
+  
+const letterheadPath = resolve(
+  process.cwd(),
+  "assets",
+  "JMRH-letterhead.png"
+);
+
+  // Draw the letterhead as a page background
+  const drawLetterhead = () => {
+    doc.save();
+
+    doc.image(letterheadPath, 0, 0, {
+      width: doc.page.width,
+      height: doc.page.height,
+    });
+
+    doc.restore();
+  };
+
+// Apply to every newly created page
+doc.on("pageAdded", drawLetterhead);
+
+// Apply to the first page
+drawLetterhead();
 
   const left = margins.left;
   const bottom = doc.page.height - margins.bottom;
