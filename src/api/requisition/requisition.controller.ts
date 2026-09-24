@@ -10,6 +10,15 @@ import { createNotification } from "../notifications/notifications.controller";
 // the frontend uses to decide whether to render that panel.
 const HR_DEPT_ID = 1;
 
+// Clients have historically sent locale-formatted stamps ("23/9/2026, 11:04:12 am")
+// for the approval date fields; `new Date()` turns those into an Invalid Date and
+// Prisma then rejects the whole create. Treat anything unparseable as "no date".
+const toDate = (value: unknown): Date | null => {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value as string);
+  return isNaN(date.getTime()) ? null : date;
+};
+
 export const createRequisition = async (req: Request, res: Response) => {
   try {
     console.log("Request Body:", req.body); // Debugging line
@@ -138,28 +147,28 @@ export const createRequisition = async (req: Request, res: Response) => {
         eduDiplomaDetail,
         eduSSCDetail,
 
-        raisedBy, raisedBySign, raisedByDate: raisedByDate ? new Date(raisedByDate) : null, raisedByComments,
+        raisedBy, raisedBySign, raisedByDate: toDate(raisedByDate), raisedByComments,
         // Strong FK to the raising employee — see schema comment.
         raisedByEmployeeId:    raiser?.id ?? null,
         // HOD/COO/HR fields — sent values win, otherwise auto-filled when
         // the raiser is senior enough to skip those steps.
         approvedByHoD:         autoApproval.approvedByHoD         ?? approvedByHoD,
         hodSign:               autoApproval.hodSign               ?? hodSign,
-        approvedByHoDDate:     autoApproval.approvedByHoDDate     ?? (approvedByHoDDate ? new Date(approvedByHoDDate) : null),
+        approvedByHoDDate:     autoApproval.approvedByHoDDate     ?? toDate(approvedByHoDDate),
         approvedByHoDComments: autoApproval.approvedByHoDComments ?? approvedByHoDComments,
         approvedByHoDEmpId:    autoApproval.approvedByHoDEmpId    ?? null,
         approvedBySMO:         autoApproval.approvedBySMO         ?? approvedBySMO,
         smoSign:               autoApproval.smoSign               ?? smoSign,
-        approvedBySMODate:     autoApproval.approvedBySMODate     ?? (approvedBySMODate ? new Date(approvedBySMODate) : null),
+        approvedBySMODate:     autoApproval.approvedBySMODate     ?? toDate(approvedBySMODate),
         approvedBySMOComments: autoApproval.approvedBySMOComments ?? approvedBySMOComments,
         approvedBySMOEmpId:    autoApproval.approvedBySMOEmpId    ?? null,
-        receivedByHR, hrSign, receivedByHRDate: receivedByHRDate ? new Date(receivedByHRDate) : null, receivedByHRComments,
+        receivedByHR, hrSign, receivedByHRDate: toDate(receivedByHRDate), receivedByHRComments,
 
         hrReferenceNo,
         salaryRange,
         source,
         actionTaken,
-        closedOn: closedOn ? new Date(closedOn) : null,
+        closedOn: toDate(closedOn),
 
         // Initial status reflects the auto-approvals above
         status: initialStatus,
