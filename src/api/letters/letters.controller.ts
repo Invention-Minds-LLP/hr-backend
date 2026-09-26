@@ -18,6 +18,8 @@ import {
   LETTER_TOKENS, buildTokenMap, renderTokens, findUnknownTokens,
 } from '../../lib/letterTokens';
 import { amountInWords } from '../payroll/payslipPdf';
+import path from 'path';
+import fs from 'fs';
 
 const CATEGORIES = [
   'OFFER', 'CONFIRMATION', 'EXPERIENCE', 'RELIEVING', 'APPRECIATION',
@@ -91,8 +93,8 @@ export const upsertTemplate = async (req: AuthenticatedRequest, res: Response) =
     const template = id
       ? await (prisma as any).letterTemplate.update({ where: { id }, data })
       : await (prisma as any).letterTemplate.create({
-          data: { ...data, createdBy: currentEmployeeId(req) },
-        });
+        data: { ...data, createdBy: currentEmployeeId(req) },
+      });
 
     res.status(id ? 200 : 201).json(template);
   } catch (err: any) {
@@ -154,9 +156,9 @@ async function loadTokenSources(employeeId: number) {
     (prisma as any).salaryStructure.findUnique({ where: { employeeId } }),
     (employee as any).reportingManager
       ? prisma.employee.findUnique({
-          where: { id: (employee as any).reportingManager },
-          select: { firstName: true, lastName: true },
-        })
+        where: { id: (employee as any).reportingManager },
+        select: { firstName: true, lastName: true },
+      })
       : Promise.resolve(null),
   ]);
 
@@ -245,16 +247,24 @@ export const previewLetter = async (req: AuthenticatedRequest, res: Response) =>
 async function buildLetterPdf(
   rendered: any, includeSignature: boolean, password?: string | null,
 ): Promise<Buffer> {
+  const letterheadPath = path.join(
+    process.cwd(),
+    'assets',
+    'JMRH-letterhead.png'
+  );
+  
+
   return renderHtmlToPdf(rendered.bodyHtml, {
+    letterheadImage: letterheadPath,
     headerHtml: rendered.headerHtml,
     footerHtml: rendered.footerHtml,
     signature: includeSignature
       ? {
-          name: rendered.company?.signatoryName,
-          designation: rendered.company?.signatoryDesignation,
-          company: rendered.company?.legalName || rendered.company?.name,
-          place: rendered.company?.signatoryPlace || rendered.company?.city,
-        }
+        name: rendered.company?.signatoryName,
+        designation: rendered.company?.signatoryDesignation,
+        company: rendered.company?.legalName || rendered.company?.name,
+        place: rendered.company?.signatoryPlace || rendered.company?.city,
+      }
       : null,
     password: password || null,
     pageFooterNote: 'This is a computer-generated letter.',
@@ -319,6 +329,11 @@ export const issueLetter = async (req: AuthenticatedRequest, res: Response) => {
                 `<p>Dear ${rendered.employee.firstName},</p>` +
                 `<p>Please find your ${template.name} attached.</p>` +
                 `<p>Regards,<br>${rendered.company?.name || 'HR Team'}</p>`,
+              attachments: [{
+                filename: `${template.name.replace(/\s+/g, '_')}.pdf`,
+                content: pdf,
+                contentType: 'application/pdf',
+              },],
             });
             await (prisma as any).letterIssued.update({
               where: { id: record.id },
@@ -352,17 +367,27 @@ export const downloadIssuedLetter = async (req: AuthenticatedRequest, res: Respo
     });
     if (!record) return res.status(404).json({ message: 'Letter not found' });
 
+    const letterheadPath = path.join(
+      process.cwd(),
+      'assets',
+      'JMRH-letterhead.png'
+    );
+
+    const letterheadExists =
+  fs.existsSync(letterheadPath);
+
     // Re-render the STORED html, never the template — the letter is a snapshot.
     const pdf = await renderHtmlToPdf(record.renderedHtml, {
+      letterheadImage: letterheadPath,
       headerHtml: record.template?.headerHtml || null,
       footerHtml: record.template?.footerHtml || null,
       signature: record.template?.includeSignature !== false
         ? {
-            name: record.company?.signatoryName,
-            designation: record.company?.signatoryDesignation,
-            company: record.company?.legalName || record.company?.name,
-            place: record.company?.signatoryPlace || record.company?.city,
-          }
+          name: record.company?.signatoryName,
+          designation: record.company?.signatoryDesignation,
+          company: record.company?.legalName || record.company?.name,
+          place: record.company?.signatoryPlace || record.company?.city,
+        }
         : null,
       pageFooterNote: 'This is a computer-generated letter.',
     });

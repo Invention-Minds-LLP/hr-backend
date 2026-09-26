@@ -24,6 +24,11 @@ export async function sendMail(opts: {
   subject: string;
   text?: string;
   html?: string;
+    attachments?: {
+    filename: string;
+    content: Buffer;
+    contentType?: string;
+  }[];
 }) {
   return mailer.sendMail({
     from: config.smtp.from,
@@ -31,5 +36,6 @@ export async function sendMail(opts: {
     subject: opts.subject,
     text: opts.text,
     html: opts.html,
+    attachments: opts.attachments,
   });
 }
