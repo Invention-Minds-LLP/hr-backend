@@ -11,6 +11,7 @@ import { otpService } from "../../services/otp.service";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { sendOtpSms } from "../sms/sms.controller";
+import { sendEmailOtp } from "../../utils/sendEmailOtp";
 import {
   REFRESH_COOKIE,
   clearAuthCookies,
@@ -313,6 +314,21 @@ export const setCandidatePassword = async (req: Request, res: Response) => {
     return res.status(500).json({ error: "Failed to set password" });
   }
 };
+/*
+ * Candidate portal login is two-step: password, then an emailed OTP.
+ *
+ * Mirrors the employee loginInit / verifyOtp pair above, but over email —
+ * Candidate.email is unique and always present, while Candidate.phone is
+ * optional, so email is the only channel that works for every candidate.
+ *
+ * The OTP lives in the shared in-memory otpService (2-minute TTL, bcrypt-hashed,
+ * single-use), keyed under a `candidate:` prefix so a candidate's code can never
+ * collide with an employee code in the same store. A process restart drops
+ * pending codes; the user simply requests a new one.
+ */
+const candidateOtpKey = (email: string) => `candidate:${email.toLowerCase()}`;
+
+/** Step 1 — POST /users/candidate/login { email, password } -> emails an OTP. */
 export const loginCandidate = async (req: Request, res: Response) => {
   const ipAddress = getClientIp(req);
   const userAgent = req.headers["user-agent"] || undefined;
@@ -333,11 +349,67 @@ export const loginCandidate = async (req: Request, res: Response) => {
     }
 
     const ok = await bcrypt.compare(password, candidate.passwordHash);
-    await prisma.candidateLoginHistory.create({
-      data: { candidateId: candidate.id, ipAddress, userAgent, success: !!ok }
-    }).catch(() => { });
+    if (!ok) {
+      // Only failures are recorded here now. A correct password is no longer a
+      // completed login, so `success: true` is written at the OTP step instead —
+      // that way the history still means "this person got in".
+      await prisma.candidateLoginHistory.create({
+        data: { candidateId: candidate.id, ipAddress, userAgent, success: false }
+      }).catch(() => { });
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
-    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    await otpService.generate(candidateOtpKey(candidate.email), otp);
+
+    try {
+      await sendEmailOtp({
+        to: candidate.email,
+        otp,
+        employeeName: candidate.name,
+        purpose: "Candidate Portal Login",
+      });
+    } catch (mailErr) {
+      // No token is issued without a delivered code, so a mail failure has to be
+      // a hard error — otherwise the candidate is stuck on a code they can't see.
+      console.error("[loginCandidate] OTP email failed:", mailErr);
+      return res.status(502).json({ error: "Could not send the verification code. Please try again." });
+    }
+
+    return res.json({
+      otpRequired: true,
+      email: candidate.email,
+      expiresInSeconds: 120,
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Login failed" });
+  }
+};
+
+/** Step 2 — POST /users/candidate/login/verify-otp { email, otp } -> session. */
+export const verifyCandidateOtp = async (req: Request, res: Response) => {
+  const ipAddress = getClientIp(req);
+  const userAgent = req.headers["user-agent"] || undefined;
+
+  try {
+    const { email, otp } = req.body as { email: string; otp: string };
+    if (!email || !otp) return res.status(400).json({ error: "email and otp are required" });
+
+    const candidate = await prisma.candidate.findUnique({
+      where: { email: email.toLowerCase() }
+    });
+    if (!candidate) return res.status(404).json({ error: "Candidate not found" });
+
+    // Single-use: otpService deletes the code on a successful verify, so a
+    // replayed code can't mint a second session.
+    const valid = await otpService.verify(candidateOtpKey(candidate.email), otp);
+    if (!valid) {
+      await prisma.candidateLoginHistory.create({
+        data: { candidateId: candidate.id, ipAddress, userAgent, success: false }
+      }).catch(() => { });
+      return res.status(401).json({ error: "Invalid or expired code" });
+    }
 
     // JWT for candidates (role: 'candidate')
     const token = jwt.sign(
@@ -345,6 +417,10 @@ export const loginCandidate = async (req: Request, res: Response) => {
       config.jwtSecret,
       { expiresIn: "12h" }
     );
+
+    await prisma.candidateLoginHistory.create({
+      data: { candidateId: candidate.id, ipAddress, userAgent, success: true }
+    }).catch(() => { });
 
     await prisma.candidate.update({
       where: { id: candidate.id },
@@ -359,7 +435,7 @@ export const loginCandidate = async (req: Request, res: Response) => {
     });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: "Login failed" });
+    return res.status(500).json({ error: "Verification failed" });
   }
 };
 

@@ -8,6 +8,7 @@ import {
   initiateBgv, getBgv, updateBgvCheck, uploadBgvCheckEvidence, resolveBgvDiscrepancy, completeBgv, uploadBgvReport,
   addBgvDocument, listBgvDocuments, deleteBgvDocument,
   updateReferralBonus,
+  RECRUITER_ROLES, RECRUITER_DEPTS,
 } from './recruiting.controller';
 import { authenticateToken, requireRoleOrDept } from '../../middleware/authMiddleware';
 
@@ -29,9 +30,8 @@ export const recruitingRouter = Router();
  *
  * `POST /applications` is intentionally unauthenticated — public job-application form.
  */
-const RECRUITER_ROLES: (string | number)[] =
-  ['HR_MANAGER', 'ADMIN', 'RECRUITER', 'MANAGEMENT', 1, 4];
-const RECRUITER_DEPTS: number[] = [1];          // HR department
+// RECRUITER_ROLES / RECRUITER_DEPTS live in the controller so the route guard
+// and the in-handler checks (offer sign / decline / view) can't drift apart.
 const recruiter = [authenticateToken, requireRoleOrDept(RECRUITER_ROLES, RECRUITER_DEPTS)];
 
 // Jobs (recruiter only for create/update; list is public so candidates can browse)
@@ -61,13 +61,21 @@ recruitingRouter.patch('/interviews/:id/feedback', authenticateToken, rc.recordI
 recruitingRouter.post('/applications/:id/offer', ...recruiter, rc.createOffer);
 recruitingRouter.post('/offers/:id/send',     ...recruiter, rc.sendOffer);
 // Offer letter PDF preview / download. `?download=1` forces an attachment.
+// Authenticated only at the route; the handler authorises per-offer via
+// candidateMayActOnOffer (owning candidate, or recruiter-capable staff) —
+// a role guard here couldn't, since the answer depends on which offer it is.
 // Candidates can also fetch their own letter via the same endpoint
 // (authenticated, but not role-gated — same pattern as /offers/:id/view).
 recruitingRouter.get('/offers/:id/pdf',       authenticateToken, rc.downloadOfferLetterPdf);
 recruitingRouter.post('/offers/:id/preview',  ...recruiter, rc.previewOfferLetterPdf); // render PDF from unsaved values
-recruitingRouter.post('/offers/:id/view',     authenticateToken, rc.markOfferViewed); // candidate
-recruitingRouter.post('/offers/:id/sign',     authenticateToken, rc.markOfferSigned); // candidate
-recruitingRouter.post('/offers/:id/decline',  authenticateToken, rc.declineOffer);    // candidate
+// Candidate actions. Route-level auth is `authenticateToken` because the
+// legitimate caller is EITHER the owning candidate OR recruiter-capable staff
+// recording the outcome — a role guard can't express that. The handlers each
+// call candidateMayActOnOffer, which 403s anyone else. Before that check was
+// tightened, any logged-in employee could sign or decline any candidate's offer.
+recruitingRouter.post('/offers/:id/view',     authenticateToken, rc.markOfferViewed);
+recruitingRouter.post('/offers/:id/sign',     authenticateToken, rc.markOfferSigned);
+recruitingRouter.post('/offers/:id/decline',  authenticateToken, rc.declineOffer);
 recruitingRouter.post('/offers/:id/withdraw', ...recruiter, rc.withdrawOffer);
 recruitingRouter.post('/offers/:id/expire',   ...recruiter, rc.expireOffer);
 recruitingRouter.post('/offers/:id/revise',   ...recruiter, rc.reviseOffer);   // re-open declined/expired offer

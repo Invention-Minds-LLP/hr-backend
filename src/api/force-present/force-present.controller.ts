@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { Prisma } from "@prisma/client";
+import { compOffExpiryFor } from "../../services/comOff.service";
 
 type Tx = Prisma.TransactionClient;
 
@@ -261,10 +262,11 @@ export const markForcePresent = async (req: Request, res: Response) => {
           attendanceId = created.id;
         }
 
-        // Optionally grant a new CompOff credit (3-month expiry)
+        // Optionally grant a new CompOff credit. The comment here claimed three
+        // months while the code gave two, and neither matched the 30 days an
+        // earned credit gets — one helper now decides for every path.
         if (createCompOff) {
-          const expiryDate = new Date(targetDate);
-          expiryDate.setMonth(expiryDate.getMonth() + 2);
+          const expiryDate = compOffExpiryFor(targetDate);
           await tx.compOffCredit.create({
             data: {
               employeeId: Number(employeeId),

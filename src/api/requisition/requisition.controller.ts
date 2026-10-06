@@ -5,6 +5,7 @@ import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import type { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { createNotification } from "../notifications/notifications.controller";
+import { headedDepartmentIds, headsOfDepartment } from "../../lib/departmentHeads";
 
 // HR department id. The HR Use Only closure block is theirs alone — same gate
 // the frontend uses to decide whether to render that panel.
@@ -197,16 +198,10 @@ export const createRequisition = async (req: Request, res: Response) => {
           select: { id: true },
         });
       } else {
-        // Default — Incharge or any other role: ping the department's HOD.
-        const deptHod = await prisma.employee.findFirst({
-          where: {
-            departmentId: departmentId,
-            roleId: 3,
-            employmentStatus: 'ACTIVE',
-          },
-          select: { id: true },
-        });
-        if (deptHod) nextLevelEmployees = [deptHod];
+        // Default — Incharge or any other role: ping whoever heads that
+        // department, including heads who sit elsewhere.
+        const headIds = await headsOfDepartment(Number(departmentId));
+        nextLevelEmployees = headIds.map((id) => ({ id }));
       }
 
       // De-dup — never notify the raiser themselves.
@@ -562,17 +557,12 @@ export const listRequisitions = async (req: Request, res: Response) => {
       };
     }
 
-    // Role 3 → HOD / Reporting Manager → department requisitions
+    // Role 3 → HOD / Reporting Manager → requisitions of every department they
+    // head, not just the one they sit in.
     if (roleId === 3) {
-      const manager = await prisma.employee.findUnique({
-        where: { id: empId },
-        select: { departmentId: true }
-      });
-
-      if (manager?.departmentId) {
-        whereCondition = {
-          departmentId: manager.departmentId
-        };
+      const deptIds = await headedDepartmentIds(empId);
+      if (deptIds.length) {
+        whereCondition = { departmentId: { in: deptIds } };
       }
     }
 
