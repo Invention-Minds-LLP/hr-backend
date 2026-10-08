@@ -318,6 +318,11 @@ export const createEmployee = async (req: AuthenticatedRequest, res: Response) =
           Department: { connect: { id: departmentId } },
           Branch: { connect: { id: branchId } },
           role: { connect: { id: roleId } },
+          // Departments this person heads (a reporting manager often covers
+          // several). Drives clearance and requisition visibility.
+          ...(Array.isArray(data.headedDepartmentIds) && data.headedDepartmentIds.length
+            ? { headedDepartments: { connect: data.headedDepartmentIds.map((d: any) => ({ id: Number(d) })) } }
+            : {}),
           // designation: { connect: { id: designationId } },
           designation: designationId
             ? { connect: { id: Number(designationId) } }
@@ -754,6 +759,9 @@ export const getEmployeeById = async (req: AuthenticatedRequest, res: Response) 
         Address: true,
         EmployeeShiftSetting: true,
         Department: true,
+        // Needs a client generated after the relation was added; see
+        // lib/departmentHeads.ts for the same tolerance elsewhere.
+        headedDepartments: { select: { id: true, name: true } } as any,
         designation: true,
         sabbaticals: true,
         shifts: {
@@ -920,6 +928,12 @@ export const updateEmployee = async (req: AuthenticatedRequest, res: Response) =
         Department: { connect: { id: departmentId } },
         Branch: { connect: { id: branchId } },
         role: { connect: { id: roleId } },
+        // `set` so clearing the list in the UI actually clears it. Omitted
+        // entirely when the field isn't sent, so other screens that patch an
+        // employee don't wipe it.
+        ...(Array.isArray(data.headedDepartmentIds)
+          ? { headedDepartments: { set: data.headedDepartmentIds.map((d: any) => ({ id: Number(d) })) } }
+          : {}),
         designation: { connect: { id: designationId } },
         incharge: inchargeId
           ? { connect: { id: Number(inchargeId) } }
@@ -1747,6 +1761,16 @@ export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
 
           /* ---------- UPDATE EXISTING DOCUMENT ---------- */
           if (meta.id) {
+            // A renewed document (new expiry date) must start its reminder cycle
+            // fresh — otherwise the expiry cron reads the old offsets as already
+            // sent and stays silent all the way to the new expiry.
+            const existing = await prisma.document.findUnique({
+              where: { id: Number(meta.id) },
+              select: { expiryDate: true },
+            });
+            const expiryChanged =
+              (existing?.expiryDate?.getTime() ?? null) !== (expiryDate?.getTime() ?? null);
+
             const updated = await prisma.document.update({
               where: { id: Number(meta.id) },
               data: {
@@ -1756,6 +1780,7 @@ export const uploadEmployeeDocuments = async (req: Request, res: Response) => {
                 type: meta.type,
                 issueDate,
                 expiryDate,
+                ...(expiryChanged ? { expiryRemindersSent: null } : {}),
                 ...(newFileUrl ? { fileUrl: newFileUrl } : {})
               }
             });

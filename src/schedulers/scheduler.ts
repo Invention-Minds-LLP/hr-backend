@@ -16,6 +16,7 @@ import { runMonthlyLateThresholdCheck } from "../api/attendance/late-threshold.c
 import { initAttendanceReminderCrons } from "./attendance-reminders.scheduler";
 import { initCompOffExpiryReminderCron } from "./comp-off-expiry.scheduler";
 import { initProbationEvaluationCron } from "./probation-evaluation.scheduler";
+import { initDocumentExpiryReminderCron } from "./document-expiry.scheduler";
 import { flushSecurityAlerts } from "../lib/securityAlert";
 import { config } from "../config";
 import { prisma } from "../lib/prisma";
@@ -41,6 +42,7 @@ export async function startSchedulers() {
   initAttendanceReminderCrons();
   initCompOffExpiryReminderCron();
   initProbationEvaluationCron();
+  initDocumentExpiryReminderCron();
 
   // Every 5 min — flush the security alert buffer. Sends ONE aggregated email
   // per IP/rule group of flagged API requests (anonymous hits on sensitive

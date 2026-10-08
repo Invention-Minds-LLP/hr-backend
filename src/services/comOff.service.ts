@@ -19,7 +19,7 @@ function getWeekOfMonth(date: Date): number {
 // Only a MANDATORY holiday earns a comp-off. An optional holiday (RH) is a
 // normal working day that the employee may choose to take off — working it is
 // what everyone else is doing, so it compensates nothing.
-async function isHoliday(date: Date) {
+export async function isHoliday(date: Date) {
   const holiday = await prisma.holiday.findFirst({
     where: {
       date: stripTime(date),
@@ -109,6 +109,80 @@ export async function isWeeklyOff(employeeId: number, date: Date) {
 export const COMP_OFF_VALIDITY_DAYS = 30;
 
 /**
+ * When a credit for `workDate` lapses. Every path that issues a comp-off credit
+ * must use this — the approval flow, HR's direct grant, the comp-off register
+ * and the week-off override all used to set their own, and three of them
+ * defaulted to three months, so an HR-granted credit outlived an earned one by
+ * 3x for the same day's work.
+ *
+ * Counted from the day worked, not the day approved, so a slow approval cannot
+ * silently stretch the entitlement.
+ */
+export function compOffExpiryFor(workDate: Date): Date {
+  const e = stripTime(workDate);
+  e.setDate(e.getDate() + COMP_OFF_VALIDITY_DAYS);
+  return e;
+}
+
+/**
+ * How many comp-offs an employee may earn in a calendar month.
+ *
+ * HR's direct grant (hr-corrections → manualCompOffGrant) is deliberately
+ * exempt: it is the emergency route, it already demands a reason and stamps
+ * isManualGrant/grantedBy, so an exception is visible as an exception.
+ */
+export const MAX_COMP_OFF_PER_MONTH = 2;
+
+/**
+ * What the employee has already spent of the month's entitlement, counted on
+ * the month of the day WORKED rather than the day approved — a claim approved
+ * late belongs to the month it was earned in, not the month HR got to it.
+ *
+ * Counts claims still in flight alongside credits already issued. Counting only
+ * credits would let someone stack five pending claims and have them all land at
+ * once. Rejected and withdrawn claims release their slot.
+ */
+export async function compOffMonthUsage(employeeId: number, date: Date) {
+  const d = stripTime(date);
+  const monthStart = new Date(d.getFullYear(), d.getMonth(), 1);
+  const monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+
+  const [requests, credits] = await Promise.all([
+    prisma.compOffRequest.findMany({
+      where: {
+        employeeId,
+        workDate: { gte: monthStart, lte: monthEnd },
+        status: { notIn: ["REJECTED", "WITHDRAWN"] },
+      },
+      select: { id: true, workDate: true, status: true, source: true },
+      orderBy: { workDate: "asc" },
+    }),
+    prisma.compOffCredit.findMany({
+      where: { employeeId, workDate: { gte: monthStart, lte: monthEnd } },
+      select: { id: true, workDate: true, isManualGrant: true, requestId: true },
+      orderBy: { workDate: "asc" },
+    }),
+  ]);
+
+  // A credit issued from a request is the same entitlement as the request that
+  // produced it — counting both would charge the employee twice for one day.
+  const requestDays = new Set(requests.map(r => stripTime(r.workDate).getTime()));
+  const standaloneCredits = credits.filter(c => !requestDays.has(stripTime(c.workDate).getTime()));
+
+  const used = requests.length + standaloneCredits.length;
+
+  return {
+    monthStart,
+    monthEnd,
+    used,
+    remaining: Math.max(0, MAX_COMP_OFF_PER_MONTH - used),
+    max: MAX_COMP_OFF_PER_MONTH,
+    requests,
+    standaloneCredits,
+  };
+}
+
+/**
  * Scheduled minutes for the employee's shift on `date`: the per-date
  * ShiftAssignment first, then their FIXED shift — the same resolution order as
  * attendance-reminders.scheduler.ts:resolveShiftEnd. A holiday or week-off
@@ -148,7 +222,7 @@ export async function getShiftMinutes(employeeId: number, date: Date): Promise<n
 }
 
 /** Minutes between the punches. Null when the day is still open. */
-function workedMinutesOf(attendance: any): number | null {
+export function workedMinutesOf(attendance: any): number | null {
   if (!attendance?.checkIn || !attendance?.checkOut) return null;
   const mins = Math.round(
     (new Date(attendance.checkOut).getTime() - new Date(attendance.checkIn).getTime()) / 60000,
@@ -214,6 +288,24 @@ export async function generateCompOffIfEligible(attendance: any) {
     where: { id: employeeId },
     select: { firstName: true, lastName: true, reportingManager: true },
   });
+
+  // Monthly entitlement. Told to the employee rather than dropped in silence —
+  // otherwise they work a Sunday, nothing appears, and nobody can say why.
+  const usage = await compOffMonthUsage(employeeId, date);
+  if (usage.remaining <= 0) {
+    console.log(
+      `Comp off skipped for ${employeeId} on ${date.toDateString()}: ` +
+      `${usage.used} of ${usage.max} already used this month`,
+    );
+    await createNotification(
+      employeeId,
+      `You worked ${date.toLocaleDateString("en-IN")}, but you have already earned ` +
+      `${usage.used} of ${usage.max} comp-offs this month, so no further claim was raised. ` +
+      `If this was an emergency, ask HR to grant it directly.`,
+      "Comp-off limit reached",
+    ).catch(() => undefined);
+    return;
+  }
 
   const request = await prisma.compOffRequest.create({
     data: {

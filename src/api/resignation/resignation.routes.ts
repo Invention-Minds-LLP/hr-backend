@@ -25,7 +25,11 @@ import {
   hrRejectWithdraw,
   listResignationsWithClearances,
   setApplicableDepartments,
-  bulkUpdateClearanceItems
+  bulkUpdateClearanceItems,
+  generateRelievingLetter,
+  generateExperienceLetter,
+  myClearanceDepartments,
+  suggestedClearanceDepartments
 } from './resignation.controller'
 import { authenticateToken } from '../../middleware/authMiddleware';
 import { listPendingClearances } from '../dashboard/dashboard.controller';
@@ -37,6 +41,7 @@ router.post('/',authenticateToken, createResignation);
 router.get("/exit-interview",authenticateToken, listExitInterviews);                 
 router.get('/',authenticateToken, listResignations);
 router.get('/with-clearances', authenticateToken, listResignationsWithClearances);
+router.get('/my-clearance-departments', authenticateToken, myClearanceDepartments);
 router.get('/:id', authenticateToken,getResignationById);
 
 // Actions
@@ -58,6 +63,7 @@ router.put('/:id/hr-hold',authenticateToken, hrHold);
 router.post('/:id/handover-tasks',authenticateToken, addHandoverTasks);
 router.patch('/:id/handover-tasks/:taskId',authenticateToken, updateTask);
 router.post('/:id/clearance',authenticateToken, upsertClearance);
+router.get('/:id/suggested-departments', authenticateToken, suggestedClearanceDepartments);
 router.post('/:id/applicable-departments', authenticateToken, setApplicableDepartments)
 router.post('/:id/exit-interview',authenticateToken, scheduleExitInterview);
 router.post("/exit-interview",authenticateToken, createExitInterview);   // submit responses
@@ -69,6 +75,8 @@ router.post('/:id/final-settlement',authenticateToken, setFinalSettlement);
 
 router.post('/:id/complete',authenticateToken, markCompleted);
 router.post('/:id/clearance-certificate',authenticateToken, generateClearanceCertificate);
+router.post('/:id/relieving-letter',authenticateToken, generateRelievingLetter);
+router.post('/:id/experience-letter',authenticateToken, generateExperienceLetter);
 
 router.patch(
   "/:id/clearances/items",

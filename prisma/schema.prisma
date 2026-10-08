@@ -199,6 +199,11 @@ model Employee {
   // Committee memberships (ICC for POSH, Grievance Redressal Committee, etc.)
   committeeMemberships CommitteeMember[]
 
+  /// Departments this person heads. A reporting manager / HOD often covers more
+  /// than one, and departmentId above holds only where they sit. Clearance and
+  /// requisition visibility read this list plus their own department.
+  headedDepartments Department[] @relation("DepartmentHeads")
+
   // Legal entity + income-tax relations
   company                   Company?                   @relation(fields: [companyId], references: [id])
   taxProfiles               EmployeeTaxProfile[]
@@ -292,12 +297,29 @@ model Document {
   updatedAt  DateTime  @default(now()) @updatedAt
   employee   Employee  @relation(fields: [employeeId], references: [id])
 
+  // Comma-separated day-offsets already nudged by the expiry-reminder cron
+  // (same idempotency trick as CompOffCredit.expiryRemindersSent). Cleared when
+  // expiryDate changes so a renewed document starts its reminder cycle fresh.
+  expiryRemindersSent String?
+
   @@index([employeeId], map: "Document_employeeId_fkey")
+  @@index([expiryDate])
 }
 
 model Department {
   id                      Int                       @id @default(autoincrement())
   name                    String                    @unique
+  /// Employees who head this department. An HOD can head several, and
+  /// clearance + requisition visibility follows this, not Employee.departmentId.
+  heads                   Employee[]                @relation("DepartmentHeads")
+
+  /// When somebody FROM this department leaves, these departments have to clear
+  /// them. Set per department so a nurse's exit and an accountant's exit don't
+  /// have to go through the same desks. Empty = fall back to the departments
+  /// flagged isDefaultClearance.
+  clearanceDepartments    Department[]              @relation("DepartmentClearanceMap")
+  /// The reverse: departments whose leavers this department has to clear.
+  clearanceRequiredBy     Department[]              @relation("DepartmentClearanceMap")
   createdAt               DateTime                  @default(now())
   updatedAt               DateTime                  @default(now()) @updatedAt
   isDefaultClearance      Boolean?                  @default(false)
@@ -1605,6 +1627,11 @@ model Offer {
   declinedAt     DateTime?
   declineReason  String?
   proposedJoinAt DateTime?
+  // Deadline for the candidate to accept. Distinct from proposedJoinAt (the
+  // joining date) — using the join date as the acceptance deadline made offers
+  // with a far-off start stay live for months, and ones with no join date never
+  // expire at all. Defaulted on send; expireStaleOffers keys off this.
+  validUntil     DateTime?
   joinOutcome    JoinOutcome?
   noShowReason   String?
   // Offer-letter contents (used to render the PDF + persisted for audit)
@@ -1625,6 +1652,7 @@ model Offer {
   @@index([status])
   @@index([proposedJoinAt])
   @@index([signedAt])
+  @@index([validUntil])
 }
 
 // ─── Recruitment: Reference checks ──────────────────────────────────
@@ -1932,6 +1960,14 @@ model OvertimeApproval {
   taskAckBy         Int?
   taskAckAt         DateTime?
   taskAckNote       String?   @db.Text
+
+  // ── HR sign-off (stage two) ──────────────────────────────────────────────
+  // On an employee-raised request `managerStatus` is the manager's decision and
+  // `status` is HR's, the same split the automatic flow already uses. These two
+  // record WHO closed the HR stage and when — `approvedAt` only tells you about
+  // approvals, so a rejection would otherwise leave no trace of its author.
+  hrDecidedBy       Int?
+  hrDecidedAt       DateTime?
   createdAt         DateTime  @default(now())
   approvedAt        DateTime?
   scheduledEnd      DateTime?
@@ -3054,13 +3090,22 @@ model CompOffRequest {
   shiftMinutes  Int?
   reason        String?  @db.Text
 
-  /// PENDING_MANAGER | PENDING_HR | APPROVED | REJECTED | WITHDRAWN
+  /// PENDING_MANAGER | PENDING_CONFIRMATION | PENDING_HR | APPROVED | REJECTED | WITHDRAWN
   status String @default("PENDING_MANAGER")
 
   managerId        Int?
   managerStatus    String    @default("PENDING")
   managerDecidedAt DateTime?
   managerNote      String?   @db.Text
+
+  /// Stage two: the manager approves the claim, then confirms the day was
+  /// actually worked and on what basis. Approval and confirmation are separate
+  /// on purpose — an approved claim nobody ever confirmed is the pattern an
+  /// audit looks for. A day that turns out not to have been worked is rejected
+  /// here, so `status` carries the outcome and no boolean is needed.
+  confirmedBy Int?
+  confirmedAt DateTime?
+  confirmNote String?   @db.Text
 
   hrId        Int?
   hrStatus    String    @default("PENDING")
@@ -3835,6 +3880,10 @@ model SalaryStructure {
   mobileInternet   Float    @default(0)
   mealFuel         Float    @default(0)
   pfApplicable     Boolean  @default(true)
+  /// EPS membership. Only employees whose wages did not exceed the statutory
+  /// ceiling on joining (or on the date a new ceiling took effect) are EPS
+  /// members; for anyone else the employer's whole 12% goes to EPF (A/c 1).
+  epsApplicable    Boolean  @default(true)
   esiApplicable    Boolean  @default(true)
   ptApplicable     Boolean  @default(true)
   tdsMonthly       Float    @default(0)
@@ -4614,6 +4663,15 @@ model Company {
   /// payslip.
   payrollCutoffDay Int @default(25)
 
+  /// How payroll counts the working days a monthly salary is divided by:
+  ///   CALENDAR_DAYS                  — days in the month; week-offs & holidays paid
+  ///   FIXED_DAYS                     — fixedWorkingDays every month; week-offs & holidays paid
+  ///   EXCLUDE_WEEK_OFFS              — days in month − the employee's week-offs; holidays paid
+  ///   EXCLUDE_WEEK_OFFS_AND_HOLIDAYS — days in month − week-offs − holidays
+  workingDaysBasis String @default("CALENDAR_DAYS")
+  /// Divisor for FIXED_DAYS (e.g. 26, 30, 31). Ignored for every other basis.
+  fixedWorkingDays Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
@@ -4653,7 +4711,14 @@ model StatutoryConfig {
   // true  -> PF wage is capped at pfWageCeiling (statutory minimum contribution)
   // false -> PF is computed on full basic (current HRMINDS behaviour)
   pfCapAtCeiling    Boolean @default(false)
+  // Only read when pfCapAtCeiling is false: employee PF stays on full basic but
+  // the employer share is restricted to pfWageCeiling (a common arrangement).
+  pfEmployerCapAtCeiling Boolean @default(false)
   pfAdminChargeRate Float   @default(0.5) // employer, % of PF wage
+  /// Monthly minimum admin charge for the establishment: the first applies when
+  /// at least one member contributed in the month, the second when none did.
+  pfAdminMinCharge         Float @default(500)
+  pfAdminMinChargeInactive Float @default(75)
   edliRate          Float   @default(0.5) // employer, % of PF wage
   // Split of the employer 12%: 8.33% to pension (EPS) capped at the ceiling,
   // remainder to PF. Needed for the ECR file, not for net pay.

@@ -31,6 +31,7 @@ export const PERMISSION_CATALOG = [
   { name: 'dashboard.hr.view', label: 'HR Dashboard', module: 'Dashboards' },
   { name: 'dashboard.management.view', label: 'Management Overview', module: 'Dashboards' },
   { name: 'dashboard.hrAnalytics.view', label: 'HR Analytics', module: 'Dashboards' },
+  { name: 'dashboard.manager.view', label: 'Manager / HOD Dashboard', module: 'Dashboards' },
   { name: 'admin.moduleUtilization.view', label: 'Module Utilization', module: 'Dashboards' },
 
   // Menu sections (the headings themselves)
@@ -65,6 +66,7 @@ export const PERMISSION_CATALOG = [
   { name: 'admin.incentiveRequests.view', label: 'Incentive Requests', module: 'Administration · HR Ops' },
   { name: 'admin.shifts.view', label: 'Shifts', module: 'Administration · HR Ops' },
   { name: 'admin.otApprovals.view', label: 'OT Approvals', module: 'Administration · HR Ops' },
+  { name: 'admin.geoTracking.view', label: 'Location Tracking', module: 'Administration · HR Ops' },
   // Stage one of the comp-off flow belongs to reporting managers, so it cannot
   // reuse admin.compOff.view — that key is the HR register, HR-Manager-only.
   { name: 'admin.compOffApprovals.view', label: 'Comp Off Approvals', module: 'Administration · HR Ops' },
@@ -198,6 +200,13 @@ export function computePermissions(ctx: PermissionContext): PermissionKey[] {
     'dashboard.hr.view': !isRestricted && !isReportingManager && !isIncharge,
     'dashboard.management.view': isManagement,
     'dashboard.hrAnalytics.view': isHRManager,
+    // The two relationship-holding tiers. Both were previously denied
+    // dashboard.hr.view (see the rule above) and landed on /individual, so this
+    // is the first dashboard either of them gets. Granted by role here as a
+    // seed only — a manager with no reports still sees the screen, it just
+    // renders its empty state, and the Role Permissions matrix can widen or
+    // narrow it without a redeploy.
+    'dashboard.manager.view': isReportingManager || isIncharge,
 
     // Sections
     'admin.section.view': adminSection,
@@ -239,6 +248,10 @@ export function computePermissions(ctx: PermissionContext): PermissionKey[] {
     'admin.incentiveRequests.view': adminSection && !isRestricted && !isIncharge,
     'admin.shifts.view': adminSection && roleId !== 4,
     'admin.otApprovals.view': adminSection && (isReportingManager || isHRManager),
+    // The map of a mobile user's field sessions. Ported verbatim from the
+    // navbar `*ngIf` this screen was parked behind — whoever holds reports, HR,
+    // and management.
+    'admin.geoTracking.view': adminSection && (isReportingManager || isHRManager || isManagement),
     // Same shape as OT approvals, plus in-charges: they hold reports too, and
     // stage one of a comp-off is the reporting manager's to decide.
     'admin.compOffApprovals.view': adminSection && (isReportingManager || isHRManager || isIncharge),

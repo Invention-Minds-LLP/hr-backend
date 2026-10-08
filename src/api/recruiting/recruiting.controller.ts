@@ -105,19 +105,63 @@ function categoryForDocType(docType: string): string {
   return DOC_TYPE_CATEGORY[String(docType ?? '').toUpperCase().trim()] || 'CERTIFICATE';
 }
 
+/*
+ * Recruiter-capable predicate — the single source of truth for "may this
+ * employee act on recruitment data". recruiting.routes.ts imports these for its
+ * `requireRoleOrDept` guard, and the offer handlers below use the same rule for
+ * the checks they have to make in-handler (where the answer depends on which
+ * offer is being touched, so a route-level guard can't decide it).
+ */
+export const RECRUITER_ROLES: (string | number)[] =
+  ['HR_MANAGER', 'ADMIN', 'RECRUITER', 'MANAGEMENT', 1, 4];
+export const RECRUITER_DEPTS: number[] = [1]; // HR department
+
+export function isRecruiterCapable(user: any): boolean {
+  if (!user) return false;
+  const roleName = String(user.role ?? user.roleName ?? '').toUpperCase();
+  const roleId = Number(user.roleId);
+  const deptId = Number(user.deptId ?? user.departmentId ?? 0);
+  const allowedNames = RECRUITER_ROLES.filter(r => typeof r === 'string').map(r => String(r).toUpperCase());
+  const allowedIds = RECRUITER_ROLES.filter(r => typeof r === 'number');
+  return (
+    allowedNames.includes(roleName) ||
+    allowedIds.includes(roleId) ||
+    (Number.isFinite(deptId) && RECRUITER_DEPTS.includes(deptId))
+  );
+}
+
 /**
- * When the caller is a candidate (token carries `candidateId`), ensure the offer
- * belongs to them — otherwise 403. Employees / HR (no candidateId on the token)
- * are unrestricted. Returns true if the request may proceed; false after it has
- * already sent the 403 response.
+ * Gate a candidate-facing offer action (view / sign / decline).
+ *
+ * Two kinds of caller are legitimate:
+ *   • the candidate the offer belongs to — token carries `candidateId`;
+ *   • a recruiter / HR employee recording the outcome on their behalf.
+ *
+ * Anyone else is refused. This previously waved through EVERY employee token,
+ * because the only check was "if the token has a candidateId, it must match" —
+ * and staff tokens carry `empId`, never `candidateId`, so the condition was
+ * skipped entirely and any logged-in employee could sign or decline any offer.
+ *
+ * Returns true if the request may proceed; false after it has already responded.
  */
 function candidateMayActOnOffer(req: Request, res: Response, offerCandidateId: number): boolean {
-  const candidateId = Number((req as any).user?.candidateId);
-  if (Number.isFinite(candidateId) && candidateId > 0 && candidateId !== Number(offerCandidateId)) {
-    bad(res, 'This offer does not belong to you', 403);
-    return false;
+  const user = (req as any).user;
+  const candidateId = Number(user?.candidateId);
+
+  // Candidate-portal token — must own the offer.
+  if (Number.isFinite(candidateId) && candidateId > 0) {
+    if (candidateId !== Number(offerCandidateId)) {
+      bad(res, 'This offer does not belong to you', 403);
+      return false;
+    }
+    return true;
   }
-  return true;
+
+  // Employee token — only recruiter-capable staff may act for a candidate.
+  if (isRecruiterCapable(user)) return true;
+
+  bad(res, 'Forbidden: only the candidate or HR may act on this offer', 403);
+  return false;
 }
 
 /**
@@ -193,6 +237,119 @@ const asyncHandler =
 function bad(res: Response, msg: string, code = 400) {
   return res.status(code).json({ error: msg });
 }
+
+/**
+ * The acting employee's id, for the "who did this" columns.
+ *
+ * Employee tokens carry `empId` — there is no `id` claim (payload is
+ * { userId, role, empId, deptId, employeeCode, username, roleId }). Reading
+ * `user.id` therefore wrote null into every audit row and every *By column in
+ * this module. `userId` is deliberately NOT used as a fallback: it is a User id,
+ * and these columns are all Employee ids.
+ */
+function actorEmpId(req: Request): number | null {
+  const empId = Number((req as any).user?.empId);
+  return Number.isFinite(empId) && empId > 0 ? empId : null;
+}
+
+/**
+ * Who is performing an offer action, for the audit trail.
+ * Candidate-portal tokens have no Employee behind them, so `empId` is null and
+ * the label records that the candidate acted for themselves.
+ */
+function offerActor(req: Request): { empId: number | null; label: string } {
+  const user = (req as any).user;
+  const candidateId = Number(user?.candidateId);
+  if (Number.isFinite(candidateId) && candidateId > 0) {
+    return { empId: null, label: 'by the candidate' };
+  }
+  const empId = Number(user?.empId);
+  const who = user?.employeeCode || user?.username || (empId > 0 ? `#${empId}` : 'unknown');
+  return {
+    empId: Number.isFinite(empId) && empId > 0 ? empId : null,
+    label: `recorded by ${who}`,
+  };
+}
+
+/** Active HR-department employees — the recruitment module's notification audience. */
+async function hrRecipientIds(): Promise<number[]> {
+  const hr = await prisma.employee.findMany({
+    where: { departmentId: RECRUITING_DEFAULTS.hrDepartmentId, employmentStatus: 'ACTIVE' },
+    select: { id: true },
+  });
+  return hr.map((h) => h.id);
+}
+
+/**
+ * Tell HR the candidate responded. Nothing did this before — a recruiter learned
+ * an offer had been accepted or declined only by reloading the dashboard.
+ * Never throws: the transition has already committed by the time this runs, and
+ * a notification failure must not turn a successful acceptance into a 500.
+ */
+async function notifyHrOfOfferOutcome(
+  applicationId: number,
+  outcome: 'ACCEPTED' | 'DECLINED',
+  actorLabel: string,
+  reason?: string | null,
+): Promise<void> {
+  try {
+    const app = await prisma.application.findUnique({
+      where: { id: applicationId },
+      select: { candidate: { select: { name: true } }, job: { select: { title: true } } },
+    });
+    if (!app) return;
+
+    const accepted = outcome === 'ACCEPTED';
+    const msg =
+      `${accepted ? '✅' : '❌'} ${app.candidate.name} has ${accepted ? 'accepted' : 'declined'} ` +
+      `the offer for ${app.job.title} (${actorLabel}).` +
+      (!accepted && reason ? ` Reason: ${reason}` : '');
+
+    for (const hrId of await hrRecipientIds()) {
+      await createNotification(hrId, msg, accepted ? '✅ Offer accepted' : '❌ Offer declined')
+        .catch(() => undefined);
+    }
+  } catch (e) {
+    console.error('[notifyHrOfOfferOutcome] failed', e);
+  }
+}
+
+/**
+ * Release an Application whose offer just died (withdrawn / expired) so it stops
+ * being counted as "awaiting candidate response". Moves OFFERED back to
+ * INTERVIEWED — where reviseOffer also puts it — so HR can amend and resend.
+ * Applications already past OFFERED (accepted / hired) are left untouched; the
+ * audit entry is written either way.
+ */
+async function syncApplicationToDeadOffer(
+  tx: any,
+  offer: { applicationId: number; application?: { status: ApplicationStatus } | null },
+  action: string,
+  note: string,
+  performedBy: number | null,
+): Promise<void> {
+  const current = offer.application?.status ?? null;
+  const releasing = current === ApplicationStatus.OFFERED;
+
+  if (releasing) {
+    await tx.application.update({
+      where: { id: offer.applicationId },
+      data: { status: ApplicationStatus.INTERVIEWED },
+    });
+  }
+  await logApplicationAction(tx, offer.applicationId, action, {
+    fromStatus: current,
+    toStatus: releasing ? ApplicationStatus.INTERVIEWED : current,
+    note,
+    performedBy,
+  });
+}
+
+/**
+ * Default acceptance window, in days from send, when HR doesn't set one.
+ * Only a default — `validUntil` on the send payload overrides it per offer.
+ */
+const OFFER_VALIDITY_DAYS = 7;
 
 const ALLOWED_FOR_OFFER = new Set<ApplicationStatus>([
   ApplicationStatus.INTERVIEWED,
@@ -2468,17 +2625,22 @@ export class RecruitingController {
 
   /**
    * POST /offers/:id/send
-   * Body: { proposedJoinAt?, ctc?, joinLocation?, workMode?, customNotes?, cc?, bcc? }
+   * Body: { proposedJoinAt?, validUntil?, ctc?, joinLocation?, workMode?, customNotes?, cc?, bcc? }
    *
    * Persists offer-letter fields, transitions Offer → SENT and Application → OFFERED,
    * generates the offer-letter PDF, and emails it to the candidate (with optional
    * CC / BCC). Email failures are caught — the state transition still commits so
    * HR can re-send via GET /offers/:id/pdf or by calling this endpoint again.
+   *
+   * `validUntil` is the acceptance deadline and always ends up set — it defaults
+   * to OFFER_VALIDITY_DAYS from now when the caller doesn't supply one, so no
+   * offer can sit open indefinitely.
    */
   sendOffer = asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
     const {
       proposedJoinAt,
+      validUntil,
       ctc,
       joinLocation,
       workMode,
@@ -2551,6 +2713,17 @@ export class RecruitingController {
       ? new Date(proposedJoinAt)
       : offer.proposedJoinAt;
 
+    // Acceptance deadline. Explicit value wins; otherwise keep what's already on
+    // the offer; otherwise default. Never left null on a SENT offer — an offer
+    // with no deadline was previously unexpirable, and one whose deadline was
+    // read off proposedJoinAt stayed open for as long as the start date was far.
+    const finalValidUntil = validUntil
+      ? new Date(validUntil)
+      : (offer.validUntil ?? new Date(Date.now() + OFFER_VALIDITY_DAYS * 86400000));
+    if (validUntil && Number.isNaN(finalValidUntil.getTime())) {
+      return bad(res, 'validUntil is not a valid date');
+    }
+
     // Persist offer-letter inputs + flip status inside one transaction
     const updated = await prisma.$transaction(async (tx) => {
       const of = await tx.offer.update({
@@ -2559,6 +2732,7 @@ export class RecruitingController {
           status: OfferStatus.SENT,
           sentAt: new Date(),
           proposedJoinAt: finalProposedJoinAt,
+          validUntil: finalValidUntil,
           ctc:          ctcNum,
           joinLocation: joinLocation ?? offer.joinLocation,
           workMode:     workMode     ?? offer.workMode,
@@ -2574,13 +2748,13 @@ export class RecruitingController {
       await logApplicationAction(tx, offer.applicationId, 'OFFER_SENT', {
         toStatus: ApplicationStatus.OFFERED,
         note: `Offer #${id} sent to ${offer.application.candidate.email}`,
-        performedBy: (req as any).user?.id ?? null,
+        performedBy: actorEmpId(req),
       });
       // Audit any BGV-gate override so the decision is traceable forever.
       if ((!bgv || bgv.status !== 'CLEAR') && bgvOverride) {
         await logApplicationAction(tx, offer.applicationId, 'BGV_GATE_OVERRIDDEN', {
           note: `Offer sent despite BGV=${bgv ? bgv.status : 'NOT_INITIATED'}. Reason: ${bgvOverrideReason}`,
-          performedBy: (req as any).user?.id ?? null,
+          performedBy: actorEmpId(req),
         });
       }
       return of;
@@ -2672,6 +2846,8 @@ export class RecruitingController {
       && app.referrerEmployeeId
       && app.referralBonusStatus === 'NOT_APPLICABLE';
 
+    const actor = offerActor(req);
+
     const updated = await prisma.$transaction(async (tx) => {
       const of = await tx.offer.update({ where: { id }, data: { status: OfferStatus.SIGNED, signedAt: new Date() } });
       await tx.application.update({
@@ -2683,8 +2859,18 @@ export class RecruitingController {
           ...(advanceReferralBonus ? { referralBonusStatus: 'PENDING_JOIN' } : {}),
         },
       });
+      // The single most consequential decision in the pipeline — it used to
+      // leave no trace of who recorded it.
+      await logApplicationAction(tx, offer.applicationId, 'OFFER_ACCEPTED', {
+        fromStatus: offer.application.status,
+        toStatus: ApplicationStatus.OFFER_ACCEPTED,
+        note: `Offer #${id} accepted (${actor.label})`,
+        performedBy: actor.empId,
+      });
       return of;
     });
+
+    await notifyHrOfOfferOutcome(offer.applicationId, 'ACCEPTED', actor.label);
 
     res.json(updated);
   });
@@ -2698,32 +2884,59 @@ export class RecruitingController {
     if (!candidateMayActOnOffer(req, res, offer.application.candidateId)) return;
     if (!offerNext[offer.status].includes(OfferStatus.DECLINED)) return bad(res, `Cannot move offer from ${offer.status} → DECLINED`);
 
+    const actor = offerActor(req);
+
     const updated = await prisma.$transaction(async (tx) => {
       const of = await tx.offer.update({ where: { id }, data: { status: OfferStatus.DECLINED, declinedAt: new Date(), declineReason: reason ?? null } });
       await tx.application.update({ where: { id: offer.applicationId }, data: { status: ApplicationStatus.OFFER_DECLINED } });
+      await logApplicationAction(tx, offer.applicationId, 'OFFER_DECLINED', {
+        fromStatus: offer.application.status,
+        toStatus: ApplicationStatus.OFFER_DECLINED,
+        note: `Offer #${id} declined (${actor.label})${reason ? `: ${reason}` : ''}`,
+        performedBy: actor.empId,
+      });
       return of;
     });
 
+    await notifyHrOfOfferOutcome(offer.applicationId, 'DECLINED', actor.label, reason);
+
     res.json(updated);
   });
 
-  /** POST /offers/:id/withdraw -> WITHDRAWN (doesn't change application unless you want to) */
+  /**
+   * POST /offers/:id/withdraw -> WITHDRAWN
+   * Also moves the Application out of OFFERED. Leaving it behind (as this used
+   * to) stranded applications in OFFERED behind a dead offer, so every "awaiting
+   * candidate response" count overstated the real pipeline.
+   */
   withdrawOffer = asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    const offer = await prisma.offer.findUnique({ where: { id } });
+    const offer = await prisma.offer.findUnique({ where: { id }, include: { application: true } });
     if (!offer) return bad(res, 'Offer not found', 404);
     if (!offerNext[offer.status].includes(OfferStatus.WITHDRAWN)) return bad(res, `Cannot move offer from ${offer.status} → WITHDRAWN`);
-    const updated = await prisma.offer.update({ where: { id }, data: { status: OfferStatus.WITHDRAWN } });
+
+    const actor = offerActor(req);
+    const updated = await prisma.$transaction(async (tx) => {
+      const of = await tx.offer.update({ where: { id }, data: { status: OfferStatus.WITHDRAWN } });
+      await syncApplicationToDeadOffer(tx, offer, 'OFFER_WITHDRAWN', `Offer #${id} withdrawn (${actor.label})`, actor.empId);
+      return of;
+    });
     res.json(updated);
   });
 
-  /** POST /offers/:id/expire -> EXPIRED */
+  /** POST /offers/:id/expire -> EXPIRED (also releases the Application) */
   expireOffer = asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    const offer = await prisma.offer.findUnique({ where: { id } });
+    const offer = await prisma.offer.findUnique({ where: { id }, include: { application: true } });
     if (!offer) return bad(res, 'Offer not found', 404);
     if (!offerNext[offer.status].includes(OfferStatus.EXPIRED)) return bad(res, `Cannot move offer from ${offer.status} → EXPIRED`);
-    const updated = await prisma.offer.update({ where: { id }, data: { status: OfferStatus.EXPIRED } });
+
+    const actor = offerActor(req);
+    const updated = await prisma.$transaction(async (tx) => {
+      const of = await tx.offer.update({ where: { id }, data: { status: OfferStatus.EXPIRED } });
+      await syncApplicationToDeadOffer(tx, offer, 'OFFER_EXPIRED', `Offer #${id} expired (${actor.label})`, actor.empId);
+      return of;
+    });
     res.json(updated);
   });
 
@@ -2774,7 +2987,7 @@ export class RecruitingController {
         fromStatus: offer.application.status,
         toStatus: ApplicationStatus.INTERVIEWED,
         note: `Offer #${id} reopened for revision (was ${offer.status})`,
-        performedBy: (req as any).user?.empId ?? (req as any).user?.id ?? null,
+        performedBy: actorEmpId(req),
       });
       return of;
     });
@@ -2802,6 +3015,10 @@ export class RecruitingController {
       },
     });
     if (!offer) return bad(res, 'Offer not found', 404);
+    // The letter carries the candidate's name, email and CTC. Without this the
+    // route was authenticated but not authorised — any logged-in user could
+    // fetch any other candidate's offer by guessing the id.
+    if (!candidateMayActOnOffer(req, res, offer.application.candidateId)) return;
 
     const pdfBuffer = await generateOfferLetterPdf({
       candidateName:  offer.application.candidate.name,
@@ -3422,11 +3639,10 @@ export class RecruitingController {
   getCandidateOffers = asyncHandler(async (req, res) => {
     const candidateId = Number(req.params.candidateId);
     if (!Number.isFinite(candidateId)) return bad(res, 'candidateId is required');
-    // A candidate may only read their own offers.
-    const tokenCandidateId = Number((req as any).user?.candidateId);
-    if (Number.isFinite(tokenCandidateId) && tokenCandidateId > 0 && tokenCandidateId !== candidateId) {
-      return bad(res, 'Forbidden', 403);
-    }
+    // A candidate may only read their own offers; among employees, only
+    // recruiter-capable staff may read anyone's. (Previously every employee
+    // token skipped this check entirely — same hole as the sign/decline one.)
+    if (!candidateMayActOnOffer(req, res, candidateId)) return;
 
     const apps = await prisma.application.findMany({
       where: { candidateId },
@@ -3833,21 +4049,51 @@ export const upsertFeedback = asyncHandler(async (req, res) => {
  *   import { expireStaleOffers } from "./api/recruiting/recruiting.controller";
  *   cron.schedule("0 2 * * *", () => expireStaleOffers().catch(console.error));
  */
-export async function expireStaleOffers(): Promise<{ expired: number }> {
+export async function expireStaleOffers(): Promise<{ expired: number; released: number }> {
   const now = new Date();
-  // Eligible: SENT or VIEWED (not yet signed/declined/withdrawn) AND
-  // proposed-join date has already passed.
-  const result = await prisma.offer.updateMany({
+
+  // Eligible: SENT or VIEWED (not yet signed/declined/withdrawn) AND the
+  // acceptance deadline has passed. This used to key off `proposedJoinAt`, the
+  // JOINING date — so an offer with a distant start stayed acceptable for
+  // months, and one with no start date never expired at all. `validUntil` is
+  // always set on send, so neither hole remains.
+  const due = await prisma.offer.findMany({
     where: {
       status: { in: [OfferStatus.SENT, OfferStatus.VIEWED] },
-      proposedJoinAt: { not: null, lt: now },
+      validUntil: { not: null, lt: now },
     },
-    data: { status: OfferStatus.EXPIRED },
+    select: { id: true, applicationId: true, application: { select: { status: true } } },
   });
-  if (result.count > 0) {
-    console.log(`[expireStaleOffers] expired ${result.count} stale offer(s)`);
+  if (!due.length) return { expired: 0, released: 0 };
+
+  let expired = 0;
+  let released = 0;
+
+  for (const offer of due) {
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.offer.update({ where: { id: offer.id }, data: { status: OfferStatus.EXPIRED } });
+        // Release the application too, so it stops being counted as "awaiting
+        // candidate response" behind an offer that is no longer live.
+        await syncApplicationToDeadOffer(
+          tx,
+          offer,
+          'OFFER_EXPIRED',
+          `Offer #${offer.id} expired automatically (acceptance deadline passed)`,
+          null, // system action — no acting employee
+        );
+      });
+      expired++;
+      if (offer.application?.status === ApplicationStatus.OFFERED) released++;
+    } catch (e) {
+      console.error(`[expireStaleOffers] offer #${offer.id} failed`, e);
+    }
   }
-  return { expired: result.count };
+
+  if (expired > 0) {
+    console.log(`[expireStaleOffers] expired ${expired} stale offer(s), released ${released} application(s)`);
+  }
+  return { expired, released };
 }
 
 /**
@@ -4052,7 +4298,7 @@ export const recordReferenceCheck = asyncHandler(async (req: Request, res: Respo
       checkStatus: status,
       feedback: feedback ?? ref.feedback,
       rating:   ratingNum ?? ref.rating,
-      checkedBy: (req as any).user?.id ?? null,
+      checkedBy: actorEmpId(req),
       checkedAt: status === 'PENDING' ? null : new Date(),
     },
   });
@@ -4098,7 +4344,7 @@ export const initiateBgv = asyncHandler(async (req: Request, res: Response) => {
         status:      'IN_PROGRESS',
         vendor:      vendor      ?? 'Internal HR',
         vendorRef:   vendorRef   ?? null,
-        initiatedBy: (req as any).user?.id ?? null,
+        initiatedBy: actorEmpId(req),
         initiatedAt: new Date(),
         checks: { create: types.map((type) => ({ type })) },
       },
@@ -4106,7 +4352,7 @@ export const initiateBgv = asyncHandler(async (req: Request, res: Response) => {
     });
     await logApplicationAction(tx, applicationId, 'BGV_INITIATED', {
       note: `BGV started with ${types.length} check(s) [${types.join(', ')}]`,
-      performedBy: (req as any).user?.id ?? null,
+      performedBy: actorEmpId(req),
     });
     return row;
   });
@@ -4280,7 +4526,7 @@ export const resolveBgvDiscrepancy = asyncHandler(async (req: Request, res: Resp
     data: {
       status: 'DISCREPANCY_RESOLVED',
       resolutionNote,
-      resolvedBy: (req as any).user?.id ?? null,
+      resolvedBy: actorEmpId(req),
       resolvedAt: new Date(),
     },
   });
@@ -4322,7 +4568,7 @@ export const completeBgv = asyncHandler(async (req: Request, res: Response) => {
     });
     await logApplicationAction(tx, bgv.applicationId, `BGV_${overall}`, {
       note: overallNote ?? `BGV finalised as ${overall}`,
-      performedBy: (req as any).user?.id ?? null,
+      performedBy: actorEmpId(req),
     });
     return row;
   });
@@ -4370,7 +4616,7 @@ export const addBgvDocument = asyncHandler(async (req: Request, res: Response) =
       if (!fileName) fileName = docType;
 
       const doc = await (prisma as any).bgvDocument.create({
-        data: { bgvId, docType, fileName, fileUrl, uploadedBy: (req as any).user?.id ?? null },
+        data: { bgvId, docType, fileName, fileUrl, uploadedBy: actorEmpId(req) },
       });
       res.status(201).json(doc);
     } catch (e) {

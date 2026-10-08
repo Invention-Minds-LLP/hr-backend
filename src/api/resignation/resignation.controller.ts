@@ -20,6 +20,13 @@ import { sendHealthCheckReminders } from '../employee/employee.controller';
 import { createNotification } from '../notifications/notifications.controller';
 import { revokeEmployeeAccess } from '../../lib/employeeAccess';
 import { Prisma } from '@prisma/client';
+import { headedDepartmentIds, isDepartmentHead, headsOfDepartment, HR_ROLE_ID } from '../../lib/departmentHeads';
+import {
+  computeClearanceDecision as computeClearanceDecisionRule,
+  exitDocumentEligibility,
+  lastWorkingDayFor,
+  resolveClearanceDepartments,
+} from './offboardingRules';
 
 type ClearanceItemRow = {
   label: string;
@@ -54,24 +61,54 @@ export type ClearanceCertInput = {
 
 type ClearanceItemStatus = "PENDING" | "CLEARED" | "DUE" | "NA";
 
-function computeClearanceDecision(items: { status: ClearanceItemStatus }[]): $Enums.ApprovalDecision {
-  // If any DUE -> REJECTED
-  if (items.some(i => i.status === "DUE")) return "REJECTED";
-
-  // If all are CLEARED or NA -> APPROVED
-  if (items.length > 0 && items.every(i => i.status === "CLEARED" || i.status === "NA")) return "APPROVED";
-
-  // Else pending
-  return "PENDING";
-}
+/** The decision rules live in offboardingRules.ts so they can be checked
+ *  directly — see npm run verify:offboarding. */
+const computeClearanceDecision = (items: { status: ClearanceItemStatus }[]): $Enums.ApprovalDecision =>
+  computeClearanceDecisionRule(items) as $Enums.ApprovalDecision;
 
 /** Utils */
 const addDays = (d: Date, days: number) => new Date(d.getTime() + days * 86400000);
 
+// ─── Who is calling, and may they? ───────────────────────────────────────────
+// Every route here used to be guarded by nothing but "is logged in", so any
+// employee could approve their own resignation, clear their own departments or
+// issue their own clearance certificate. These checks close that.
+
+interface Actor { id: number; roleId: number; departmentId: number | null; isHR: boolean }
+
+async function getActor(req: AuthenticatedRequest): Promise<Actor | null> {
+  const empId = Number(req.user?.empId ?? 0);
+  if (!empId) return null;
+  const emp = await prisma.employee.findUnique({
+    where: { id: empId },
+    select: { id: true, roleId: true, departmentId: true },
+  });
+  if (!emp) return null;
+  return { id: emp.id, roleId: emp.roleId, departmentId: emp.departmentId, isHR: emp.roleId === HR_ROLE_ID };
+}
+
+const forbidden = (res: Response, what: string) =>
+  res.status(403).json({ error: `Only ${what} can do this.` });
+
+/** HR-only actions: the decisions and the paperwork that follows them. */
+async function requireHRActor(req: AuthenticatedRequest, res: Response): Promise<Actor | null> {
+  const actor = await getActor(req);
+  if (!actor) { res.status(401).json({ error: 'Unauthorized' }); return null; }
+  if (!actor.isHR) { forbidden(res, 'HR'); return null; }
+  return actor;
+}
+
 /** Create resignation (Employee) */
-export async function createResignation(req: Request, res: Response) {
+export async function createResignation(req: AuthenticatedRequest, res: Response) {
   try {
     const { employeeId, reason, additionalNotes, noticePeriodDays } = req.body;
+
+    // An employee resigns for themselves; HR may file one on their behalf.
+    const actor = await getActor(req);
+    if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+    if (!actor.isHR && actor.id !== Number(employeeId)) {
+      return forbidden(res, 'the employee themselves, or HR');
+    }
 
     // capture manager at the time of submission
     const emp = await prisma.employee.findUnique({
@@ -299,11 +336,33 @@ export async function withdrawResignation(req: Request, res: Response) {
   }
 }
 
+/** The manager step belongs to the manager recorded on the request, or to HR. */
+async function requireManagerOfResignation(
+  req: AuthenticatedRequest, res: Response, resignationId: number,
+): Promise<Actor | null> {
+  const actor = await getActor(req);
+  if (!actor) { res.status(401).json({ error: 'Unauthorized' }); return null; }
+  const row = await prisma.resignationRequest.findUnique({
+    where: { id: resignationId },
+    select: { managerId: true },
+  });
+  if (!row) { res.status(404).json({ error: 'Not found' }); return null; }
+  if (!actor.isHR && row.managerId !== actor.id) {
+    forbidden(res, "the employee's reporting manager, or HR");
+    return null;
+  }
+  return actor;
+}
+
 /** Manager approve/reject */
-export async function managerApprove(req: Request, res: Response) {
+export async function managerApprove(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { note, overrideLastWorkingDay } = req.body; // optional LWD adjust
+
+    const guard = await requireManagerOfResignation(req, res, id);
+    if (!guard) return;
+
     const data: any = {
       managerDecision: 'APPROVED',
       managerDecidedAt: new Date(),
@@ -344,10 +403,14 @@ export async function managerApprove(req: Request, res: Response) {
   }
 }
 
-export async function managerReject(req: Request, res: Response) {
+export async function managerReject(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { note } = req.body;
+
+    const guard = await requireManagerOfResignation(req, res, id);
+    if (!guard) return;
+
     const upd = await prisma.resignationRequest.update({
       where: { id },
       data: {
@@ -387,10 +450,25 @@ export async function managerReject(req: Request, res: Response) {
 }
 
 /** HR approve/reject */
-export async function hrApprove(req: Request, res: Response) {
+export async function hrApprove(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { note, actualLastWorkingDay } = req.body;
+
+    if (!(await requireHRActor(req, res))) return;
+
+    // The last working day drives both payroll and the access cut-off. Left
+    // blank it used to stay null, and the nightly job — which matches on
+    // `actualLastWorkingDay < today` — then never fired: the employee kept
+    // NOTICE_PERIOD status and a working login indefinitely. Default it.
+    const existing = await prisma.resignationRequest.findUnique({
+      where: { id },
+      select: { proposedLastWorkingDay: true, actualLastWorkingDay: true },
+    });
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+    const resolvedLWD = actualLastWorkingDay
+      ? new Date(actualLastWorkingDay)
+      : existing.actualLastWorkingDay ?? existing.proposedLastWorkingDay;
 
     // Step 1: Approve the resignation and include employee info
     const upd = await prisma.resignationRequest.update({
@@ -399,7 +477,7 @@ export async function hrApprove(req: Request, res: Response) {
         hrDecision: 'APPROVED',
         hrDecidedAt: new Date(),
         hrNote: note,
-        actualLastWorkingDay: actualLastWorkingDay ? new Date(actualLastWorkingDay) : undefined,
+        actualLastWorkingDay: resolvedLWD,
         status: 'APPROVED',
       },
       include: {
@@ -451,15 +529,13 @@ export async function hrApprove(req: Request, res: Response) {
     } catch (err) {
       console.error("HR approval notification failed:", err);
     }
-    const defaultDepts = await prisma.department.findMany({
-      where: { isDefaultClearance: true },
-      select: { id: true },
-    });
-
-    const defaultDeptIds = defaultDepts.map(d => d.id);
-
-    // create HOD + default departments
-    await initOffboardingClearances(upd.id, defaultDeptIds);
+    // Which desks have to clear this person: the departments configured against
+    // their own department (Settings › Masters › Departments), falling back to
+    // the org-wide default list when that department has no mapping yet.
+    await initOffboardingClearances(
+      upd.id,
+      await clearanceDepartmentsForEmployee(upd.employee?.departmentId ?? null),
+    );
 
     // ✅ IMPORTANT: at HR approval, create HOD clearance only (department manager)
     // Department clearances will be created after HR selects departments in post-HR screen
@@ -473,10 +549,11 @@ export async function hrApprove(req: Request, res: Response) {
 }
 
 
-export async function hrReject(req: Request, res: Response) {
+export async function hrReject(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { note } = req.body;
+    if (!(await requireHRActor(req, res))) return;
     const upd = await prisma.resignationRequest.update({
       where: { id },
       data: {
@@ -498,13 +575,20 @@ export async function hrReject(req: Request, res: Response) {
   }
 }
 
-export async function hrCancel(req: Request, res: Response) {
+export async function hrCancel(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
+    if (!(await requireHRActor(req, res))) return;
+
     const upd = await prisma.resignationRequest.update({
       where: { id },
       data: { status: 'CANCELLED' }
     });
+
+    // Cancelling used to change the status and nothing else, leaving the person
+    // on NOTICE_PERIOD with their replacement job still open.
+    await restoreEmployeeAfterExitCalledOff(upd.employeeId, 'resignation cancelled');
+
     try {
       await createNotification(upd.employeeId, `Your resignation has been cancelled by HR.`);
     } catch (err) {
@@ -517,10 +601,38 @@ export async function hrCancel(req: Request, res: Response) {
   }
 }
 
+/**
+ * Undo what HR approval set in motion, for a resignation that is no longer
+ * happening: put the employee back to ACTIVE and close the replacement job
+ * that was opened for them.
+ */
+async function restoreEmployeeAfterExitCalledOff(employeeId: number, why: string) {
+  try {
+    const emp = await prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { employmentStatus: true },
+    });
+    if (emp?.employmentStatus === 'NOTICE_PERIOD') {
+      await prisma.employee.update({
+        where: { id: employeeId },
+        data: { employmentStatus: 'ACTIVE' },
+      });
+    }
+
+    await prisma.job.updateMany({
+      where: { backfillForEmployeeId: employeeId, status: { in: ['OPEN', 'ON_HOLD'] } },
+      data: { status: 'CLOSED' },
+    });
+  } catch (e) {
+    console.error(`[resignation] restore after ${why} failed for employee ${employeeId}:`, e);
+  }
+}
+
 /** Handover tasks */
-export async function addHandoverTasks(req: Request, res: Response) {
+export async function addHandoverTasks(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
+    if (!(await requireHRActor(req, res))) return;
     const { tasks } = req.body as { tasks: Array<{ title: string; description?: string; assigneeId?: number; dueDate?: string }> };
     const created = await prisma.$transaction(tasks.map(t =>
       prisma.resignationHandoverTask.create({
@@ -540,11 +652,25 @@ export async function addHandoverTasks(req: Request, res: Response) {
   }
 }
 
-export async function updateTask(req: Request, res: Response) {
+export async function updateTask(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const taskId = Number(req.params.taskId);
     const { status } = req.body as { status: $Enums.TaskStatus };
+
+    // HR runs the handover; the person a task is assigned to may tick off
+    // their own.
+    const actor = await getActor(req);
+    if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+    const task = await prisma.resignationHandoverTask.findUnique({
+      where: { id: taskId },
+      select: { assigneeId: true, resignationId: true },
+    });
+    if (!task || task.resignationId !== id) return res.status(404).json({ error: 'Task not found' });
+    if (!actor.isHR && task.assigneeId !== actor.id) {
+      return forbidden(res, 'HR or the person the task is assigned to');
+    }
+
     const upd = await prisma.resignationHandoverTask.update({
       where: { id: taskId },
       data: {
@@ -589,7 +715,7 @@ export async function updateTask(req: Request, res: Response) {
 //     res.status(500).json({ error: 'Clearance update failed' });
 //   }
 // }
-export async function upsertClearance(req: Request, res: Response) {
+export async function upsertClearance(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { departmentId, decision, note, verifierId } = req.body as {
@@ -598,6 +724,13 @@ export async function upsertClearance(req: Request, res: Response) {
       note?: string;
       verifierId?: number;
     };
+
+    // A clearance belongs to its department: HR, or a head of that department.
+    const actor = await getActor(req);
+    if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+    if (!actor.isHR && !(await isDepartmentHead(actor.id, Number(departmentId)))) {
+      return forbidden(res, 'HR or a head of that department');
+    }
 
     // get department name
     const dept = await prisma.department.findUnique({
@@ -641,10 +774,11 @@ export async function upsertClearance(req: Request, res: Response) {
 
 
 /** Exit interview scheduling */
-export async function scheduleExitInterview(req: Request, res: Response) {
+export async function scheduleExitInterview(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { scheduledAt, interviewerId, notes } = req.body;
+    if (!(await requireHRActor(req, res))) return;
     const resignation = await prisma.resignationRequest.findUnique({
       where: { id: id },
       select: { employeeId: true },
@@ -670,12 +804,17 @@ export async function scheduleExitInterview(req: Request, res: Response) {
       }
     });
     // 🔔 Notify employee about exit interview
-    // try {
-    //   const message = `Your exit interview has been scheduled. Please check details.`;
-    //   await createNotification(resignation.employeeId, message);
-    // } catch (err) {
-    //   console.error("Exit interview notification failed:", err);
-    // }
+    try {
+      const when = row.scheduledAt
+        ? ` for ${format(new Date(row.scheduledAt), 'dd MMM yyyy, h:mm a')}`
+        : '';
+      await createNotification(
+        resignation.employeeId,
+        `Your exit interview has been scheduled${when}.`,
+      );
+    } catch (err) {
+      console.error("Exit interview notification failed:", err);
+    }
 
     res.json(row);
   } catch (e) {
@@ -805,16 +944,47 @@ export async function listExitInterviews(_req: Request, res: Response) {
 
 
 /** Final settlement status */
-export async function setFinalSettlement(req: Request, res: Response) {
+export async function setFinalSettlement(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { status, note } = req.body as { status: $Enums.SettlementStatus; note?: string };
+    if (!(await requireHRActor(req, res))) return;
+
     const row = await prisma.finalSettlement.upsert({
       where: { resignationId: id },
       create: { resignationId: id, status, note },
       update: { status, note }
     });
-    res.json(row);
+
+    // Settlement is typed in by hand and nothing ties it to payroll. Marking it
+    // PAID with no published payslip covering the last working month is usually
+    // a mistake, so say so — without blocking, since the final payment is often
+    // made outside a run.
+    let warning: string | null = null;
+    if (status === 'PAID') {
+      const r = await prisma.resignationRequest.findUnique({
+        where: { id },
+        select: { employeeId: true, actualLastWorkingDay: true, proposedLastWorkingDay: true },
+      });
+      const lwd = r?.actualLastWorkingDay ?? r?.proposedLastWorkingDay ?? null;
+      if (r && lwd) {
+        const slip = await (prisma as any).payslip.findFirst({
+          where: {
+            employeeId: r.employeeId,
+            month: lwd.getMonth() + 1,
+            year: lwd.getFullYear(),
+            payrollRun: { status: 'PUBLISHED' },
+          },
+          select: { id: true },
+        });
+        if (!slip) {
+          warning = `No published payslip for ${format(lwd, 'MMMM yyyy')}, the month of the last working day. `
+            + `Check the final payroll was run before treating this as settled.`;
+        }
+      }
+    }
+
+    res.json(warning ? { ...row, warning } : row);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Final settlement update failed' });
@@ -822,21 +992,23 @@ export async function setFinalSettlement(req: Request, res: Response) {
 }
 
 /** Mark completed (HR) */
-export async function markCompleted(req: Request, res: Response) {
+export async function markCompleted(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
+    if (!(await requireHRActor(req, res))) return;
+
     const upd = await prisma.resignationRequest.update({
       where: { id },
       data: { status: 'COMPLETED' }
     });
-    // try {
-    //   await createNotification(
-    //     upd.employeeId,
-    //     "Your exit process has been completed. We wish you all the best."
-    //   );
-    // } catch (err) {
-    //   console.error("Completion notification failed:", err);
-    // }
+    try {
+      await createNotification(
+        upd.employeeId,
+        "Your exit process has been completed. We wish you all the best.",
+      );
+    } catch (err) {
+      console.error("Completion notification failed:", err);
+    }
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -844,10 +1016,11 @@ export async function markCompleted(req: Request, res: Response) {
   }
 }
 // PUT /resignations/:id/hr-hold  { note? }
-export async function hrHold(req: Request, res: Response) {
+export async function hrHold(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { note } = req.body as { note?: string };
+    if (!(await requireHRActor(req, res))) return;
 
     const upd = await prisma.resignationRequest.update({
       where: { id },
@@ -858,14 +1031,14 @@ export async function hrHold(req: Request, res: Response) {
         // hrDecidedAt: null  // optional: clear decidedAt if it was set
       }
     });
-    // try {
-    //   await createNotification(
-    //     upd.employeeId,
-    //     "Your resignation has been placed on hold by HR. Please contact HR for details."
-    //   );
-    // } catch (err) {
-    //   console.error("HR hold notification failed:", err);
-    // }
+    try {
+      await createNotification(
+        upd.employeeId,
+        "Your resignation has been placed on hold by HR. Please contact HR for details.",
+      );
+    } catch (err) {
+      console.error("HR hold notification failed:", err);
+    }
     res.json(upd);
   } catch (e) {
     console.error(e);
@@ -873,13 +1046,20 @@ export async function hrHold(req: Request, res: Response) {
   }
 }
 // POST /resignations/:id/request-withdraw
-export async function requestWithdraw(req: Request, res: Response) {
+export async function requestWithdraw(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { reason } = req.body;
 
     const row = await prisma.resignationRequest.findUnique({ where: { id } });
     if (!row) return res.status(404).json({ error: "Not found" });
+
+    // Only the person resigning can ask to take it back (or HR, on their behalf).
+    const actor = await getActor(req);
+    if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+    if (!actor.isHR && actor.id !== row.employeeId) {
+      return forbidden(res, 'the employee themselves, or HR');
+    }
 
     // Cannot request if already approved/rejected/withdrawn
     if (["APPROVED", "REJECTED", "WITHDRAWN"].includes(row.status)) {
@@ -906,16 +1086,16 @@ export async function requestWithdraw(req: Request, res: Response) {
       }
     });
     // 🔔 Notify HR about withdraw request
-    // try {
-    //   const hrIds = await getHRIds();
-    //   const message = `Withdraw request submitted for resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
+    try {
+      const hrIds = await getHRIds();
+      const message = `Withdraw request submitted for resignation of employee ${upd.employee.firstName} ${upd.employee.lastName} (${upd.employee.employeeCode}).`;
 
-    //   for (const hrId of hrIds) {
-    //     await createNotification(hrId, message);
-    //   }
-    // } catch (err) {
-    //   console.error("Withdraw notification failed:", err);
-    // }
+      for (const hrId of hrIds) {
+        await createNotification(hrId, message);
+      }
+    } catch (err) {
+      console.error("Withdraw notification failed:", err);
+    }
 
     res.json(upd);
   } catch (e) {
@@ -924,10 +1104,11 @@ export async function requestWithdraw(req: Request, res: Response) {
   }
 }
 // POST /resignations/:id/hr-withdraw-approve
-export async function hrApproveWithdraw(req: Request, res: Response) {
+export async function hrApproveWithdraw(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { note, approvedBy } = req.body;
+    if (!(await requireHRActor(req, res))) return;
 
     const row = await prisma.resignationRequest.findUnique({ where: { id } });
     if (!row) return res.status(404).json({ error: "Not found" });
@@ -945,13 +1126,16 @@ export async function hrApproveWithdraw(req: Request, res: Response) {
         withdrawStatusChangedBy: approvedBy,
       },
     });
+
+    // The exit is off: put them back where they were.
+    await restoreEmployeeAfterExitCalledOff(row.employeeId, 'withdrawal approved');
+
     // 🔔 Notify employee withdraw approved
-    // try {
-    //   const message = `Your resignation withdrawal has been approved.`;
-    //   await createNotification(row.employeeId, message);
-    // } catch (err) {
-    //   console.error("Employee withdraw notification failed:", err);
-    // }
+    try {
+      await createNotification(row.employeeId, `Your resignation withdrawal has been approved.`);
+    } catch (err) {
+      console.error("Employee withdraw notification failed:", err);
+    }
 
     res.json(upd);
   } catch (e) {
@@ -960,10 +1144,11 @@ export async function hrApproveWithdraw(req: Request, res: Response) {
   }
 }
 // POST /resignations/:id/hr-withdraw-reject
-export async function hrRejectWithdraw(req: Request, res: Response) {
+export async function hrRejectWithdraw(req: AuthenticatedRequest, res: Response) {
   try {
     const id = Number(req.params.id);
     const { note, rejectedBy } = req.body;
+    if (!(await requireHRActor(req, res))) return;
 
     const row = await prisma.resignationRequest.findUnique({ where: { id } });
     if (!row) return res.status(404).json({ error: "Not found" });
@@ -980,13 +1165,15 @@ export async function hrRejectWithdraw(req: Request, res: Response) {
         status: "SUBMITTED", // go back to normal resignation workflow
       },
     });
-    // 🔔 Notify employee withdraw approved
-    // try {
-    //   const message = `Your resignation withdrawal has been rejected.`;
-    //   await createNotification(row.employeeId, message);
-    // } catch (err) {
-    //   console.error("Employee withdraw notification failed:", err);
-    // }
+    // 🔔 Notify employee the withdrawal was refused
+    try {
+      await createNotification(
+        row.employeeId,
+        `Your resignation withdrawal has been rejected. The resignation stands.`,
+      );
+    } catch (err) {
+      console.error("Employee withdraw notification failed:", err);
+    }
 
     res.json(upd);
   } catch (e) {
@@ -1004,8 +1191,10 @@ const COMPANY_TAGLINE = config.branding.companyTagline;   // optional
 const PUBLIC_BASE_URL = config.publicBaseUrl || 'https://hrproindia.in';
 const FTP_PUBLIC_DIR = config.ftp.publicDir || '/public_html/certificate'; // remote dir
 
-export const generateClearanceCertificate = async (req: Request, res: Response) => {
+export const generateClearanceCertificate = async (req: AuthenticatedRequest, res: Response) => {
   const id = Number(req.params.id);
+
+  if (!(await requireHRActor(req, res))) return;
 
   // 1) Load resignation with related data
   const r = await prisma.resignationRequest.findUnique({
@@ -1035,25 +1224,17 @@ export const generateClearanceCertificate = async (req: Request, res: Response) 
   if (!r) return res.status(404).json({ message: 'Resignation not found' });
 
 
-  // 2) Eligibility checks
-  // const allClearancesApproved = r.clearances.length > 0 && r.clearances.every(c => c.decision === 'APPROVED');
-  const requiredClearances = r.clearances;
-  // const allClearancesApproved =
-  //   requiredClearances.length > 0 &&
-  //   requiredClearances.every(c => c.decision === 'APPROVED');
-  const allClearancesApproved =
-    r.clearances.length > 0 &&
-    r.clearances.every(c => c.decision === "APPROVED");
-
-
-  const allTasksDone = r.handoverTasks.every(t => t.status === 'DONE');
-  const settlementPaid = r.finalSettlement?.status === 'PAID';
-  const statusOk = ['APPROVED', 'COMPLETED'].includes(r.status);
-
-  if (!statusOk || !allClearancesApproved || !allTasksDone || !settlementPaid) {
+  // 2) Eligibility — all clearances approved, handover done, money settled.
+  const eligibility = exitDocumentEligibility({
+    status: r.status,
+    clearances: r.clearances,
+    handoverTasks: r.handoverTasks,
+    settlementStatus: r.finalSettlement?.status ?? null,
+  });
+  if (!eligibility.eligible) {
     return res.status(400).json({
       message: 'Not eligible for clearance',
-      details: { statusOk, allClearancesApproved, allTasksDone, settlementPaid },
+      details: eligibility.details,
     });
   }
 
@@ -1132,6 +1313,172 @@ export const generateClearanceCertificate = async (req: Request, res: Response) 
 
   return res.json({ url: publicUrl, code });
 };
+// ─── Relieving & experience letters ──────────────────────────────────────────
+// ResignationDocument has carried relievingLetterUrl and experienceLetterUrl
+// since the module was built, and nothing ever wrote them: HR was issuing both
+// by hand. Same eligibility as the clearance certificate — the exit is settled
+// and cleared — and the same storage path.
+
+type LetterKind = 'RELIEVING' | 'EXPERIENCE';
+
+/** POST /resignations/:id/relieving-letter */
+export const generateRelievingLetter = (req: AuthenticatedRequest, res: Response) =>
+  generateExitLetter(req, res, 'RELIEVING');
+
+/** POST /resignations/:id/experience-letter */
+export const generateExperienceLetter = (req: AuthenticatedRequest, res: Response) =>
+  generateExitLetter(req, res, 'EXPERIENCE');
+
+async function generateExitLetter(req: AuthenticatedRequest, res: Response, kind: LetterKind) {
+  const id = Number(req.params.id);
+  if (!(await requireHRActor(req, res))) return;
+
+  const r = await prisma.resignationRequest.findUnique({
+    where: { id },
+    include: {
+      employee: { include: { Department: true, Branch: true, designation: true } },
+      clearances: true,
+      handoverTasks: true,
+      finalSettlement: true,
+    },
+  });
+  if (!r) return res.status(404).json({ message: 'Resignation not found' });
+
+  const eligibility = exitDocumentEligibility({
+    status: r.status,
+    clearances: r.clearances,
+    handoverTasks: r.handoverTasks,
+    settlementStatus: r.finalSettlement?.status ?? null,
+  });
+  if (!eligibility.eligible) {
+    return res.status(400).json({
+      message: `Not eligible for a ${kind === 'RELIEVING' ? 'relieving' : 'an experience'} letter`,
+      details: eligibility.details,
+    });
+  }
+
+  const lastWorkingDay = lastWorkingDayFor(r);
+  const prefix = kind === 'RELIEVING' ? 'REL' : 'EXP';
+  const code = `${prefix}-${r.employee.employeeCode}-${format(new Date(), 'yyyyMMdd-HHmm')}`;
+
+  const { filePath, fileName } = await generateExitLetterPdf({
+    kind,
+    code,
+    issuedAt: new Date(),
+    employeeName: `${r.employee.firstName} ${r.employee.lastName}`.trim(),
+    employeeCode: r.employee.employeeCode,
+    designation: r.employee.designation?.name ?? null,
+    departmentName: r.employee.Department?.name ?? null,
+    branchName: r.employee.Branch?.name ?? null,
+    dateOfJoining: r.employee.dateOfJoining,
+    lastWorkingDay,
+    companyName: COMPANY_NAME,
+    companyTagline: COMPANY_TAGLINE,
+  });
+
+  const remotePath = `${FTP_PUBLIC_DIR}/${fileName}`;
+  await uploadToFTP(filePath, remotePath);
+  const publicUrl = buildPublicUrl(remotePath);
+
+  await prisma.resignationDocument.upsert({
+    where: { resignationId: r.id },
+    create: {
+      resignationId: r.id,
+      ...(kind === 'RELIEVING' ? { relievingLetterUrl: publicUrl } : { experienceLetterUrl: publicUrl }),
+    },
+    update: kind === 'RELIEVING' ? { relievingLetterUrl: publicUrl } : { experienceLetterUrl: publicUrl },
+  });
+
+  try {
+    await createNotification(
+      r.employeeId,
+      kind === 'RELIEVING'
+        ? 'Your relieving letter is ready. You can download it from your exit details.'
+        : 'Your experience letter is ready. You can download it from your exit details.',
+    );
+  } catch (err) {
+    console.error('Letter notification failed:', err);
+  }
+
+  try { await fsp.unlink(filePath); } catch { }
+
+  return res.json({ url: publicUrl, code });
+}
+
+interface ExitLetterInput {
+  kind: LetterKind;
+  code: string;
+  issuedAt: Date;
+  employeeName: string;
+  employeeCode: string;
+  designation: string | null;
+  departmentName: string | null;
+  branchName: string | null;
+  dateOfJoining: Date | null;
+  lastWorkingDay: Date | null;
+  companyName: string;
+  companyTagline?: string;
+}
+
+async function generateExitLetterPdf(input: ExitLetterInput): Promise<{ filePath: string; fileName: string }> {
+  const fileName = `${input.code}.pdf`;
+  const filePath = path.join(os.tmpdir(), fileName);
+
+  const doc = new PDFDocument({ size: 'A4', margin: 56 });
+  const stream = fs.createWriteStream(filePath);
+  doc.pipe(stream);
+
+  const fmtDate = (d?: Date | null) =>
+    d ? new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }).format(d) : '—';
+
+  const title = input.kind === 'RELIEVING' ? 'RELIEVING LETTER' : 'EXPERIENCE CERTIFICATE';
+  const role = [input.designation, input.departmentName].filter(Boolean).join(', ');
+
+  doc.fontSize(16).font('Helvetica-Bold').text(input.companyName, { align: 'center' });
+  if (input.companyTagline) {
+    doc.moveDown(0.2).fontSize(9).font('Helvetica').fillColor('#555')
+      .text(input.companyTagline, { align: 'center' }).fillColor('#000');
+  }
+  doc.moveDown(1.5).fontSize(13).font('Helvetica-Bold').text(title, { align: 'center' });
+  doc.moveDown(1.5).fontSize(10).font('Helvetica')
+    .text(`Ref: ${input.code}`, { align: 'left' })
+    .text(`Date: ${fmtDate(input.issuedAt)}`, { align: 'left' });
+
+  doc.moveDown(1.5).fontSize(11).text('TO WHOMSOEVER IT MAY CONCERN');
+  doc.moveDown(1);
+
+  const body = input.kind === 'RELIEVING'
+    ? `This is to certify that ${input.employeeName} (Employee Code: ${input.employeeCode})`
+      + `${role ? `, ${role},` : ''} was employed with ${input.companyName} from `
+      + `${fmtDate(input.dateOfJoining)} to ${fmtDate(input.lastWorkingDay)}.\n\n`
+      + `${input.employeeName} has been relieved of all duties with effect from the close of business on `
+      + `${fmtDate(input.lastWorkingDay)}. All company property has been returned and all departmental `
+      + `clearances have been completed, and the full and final settlement has been made.\n\n`
+      + `We wish ${input.employeeName} every success in their future endeavours.`
+    : `This is to certify that ${input.employeeName} (Employee Code: ${input.employeeCode}) was employed with `
+      + `${input.companyName} from ${fmtDate(input.dateOfJoining)} to ${fmtDate(input.lastWorkingDay)}`
+      + `${role ? `, and at the time of leaving was working as ${role}` : ''}.\n\n`
+      + `During this period, we found ${input.employeeName} to be sincere and diligent in the discharge of `
+      + `their duties.\n\n`
+      + `We wish ${input.employeeName} every success in their future endeavours.`;
+
+  doc.fontSize(11).text(body, { align: 'left', lineGap: 4 });
+
+  doc.moveDown(3).fontSize(11).text('For ' + input.companyName);
+  doc.moveDown(3).text('Authorised Signatory');
+
+  doc.moveDown(2).fontSize(8).fillColor('#666')
+    .text('This is a system-generated document issued after completion of exit formalities.', { align: 'center' });
+
+  doc.end();
+  await new Promise<void>((resolve, reject) => {
+    stream.on('finish', () => resolve());
+    stream.on('error', reject);
+  });
+
+  return { filePath, fileName };
+}
+
 async function generateClearancePdf(input: ClearanceCertInput): Promise<{ filePath: string; fileName: string; }> {
   const fileName = `${input.code}.pdf`;
   const filePath = path.join(os.tmpdir(), fileName);
@@ -1584,14 +1931,18 @@ export async function listResignationsWithClearances(req: AuthenticatedRequest, 
       return res.status(404).json({ error: "User not found" });
 
     const emp = user.employee;
-    const isHRManager = emp.roleId === 1;
+    const isHRManager = emp.roleId === HR_ROLE_ID;
+
+    // An HOD can head several departments; scoping to emp.departmentId alone
+    // hid the clearances of every other department they are responsible for.
+    const deptIds = isHRManager ? [] : await headedDepartmentIds(emp.id);
 
     const whereCondition = isHRManager
       ? {}
       : {
         clearances: {
           some: {
-            departmentId: emp.departmentId,
+            departmentId: { in: deptIds },
           },
         },
       };
@@ -1628,6 +1979,72 @@ export async function listResignationsWithClearances(req: AuthenticatedRequest, 
 }
 
 
+/** The departments that must clear someone leaving `employeeDepartmentId`. */
+async function clearanceDepartmentsForEmployee(employeeDepartmentId: number | null): Promise<number[]> {
+  let mapped: number[] = [];
+  if (employeeDepartmentId) {
+    try {
+      const dept = await (prisma as any).department.findUnique({
+        where: { id: employeeDepartmentId },
+        select: { clearanceDepartments: { select: { id: true } } },
+      });
+      mapped = (dept?.clearanceDepartments ?? []).map((d: any) => d.id);
+    } catch {
+      mapped = []; // client predates the relation
+    }
+  }
+
+  const defaults = await prisma.department.findMany({
+    where: { isDefaultClearance: true },
+    select: { id: true },
+  });
+
+  return resolveClearanceDepartments({
+    employeeDepartmentId,
+    mappedDepartmentIds: mapped,
+    defaultDepartmentIds: defaults.map((d) => d.id),
+  });
+}
+
+/**
+ * GET /resignations/:id/suggested-departments
+ * What the leaver's department says should clear them — the post-approval
+ * screen pre-selects these, and HR can still adjust for the individual.
+ */
+export async function suggestedClearanceDepartments(req: AuthenticatedRequest, res: Response) {
+  try {
+    const id = Number(req.params.id);
+    const r = await prisma.resignationRequest.findUnique({
+      where: { id },
+      select: { employee: { select: { departmentId: true } } },
+    });
+    if (!r) return res.status(404).json({ error: 'Not found' });
+
+    const departmentIds = await clearanceDepartmentsForEmployee(r.employee?.departmentId ?? null);
+    return res.json({ departmentIds });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to resolve clearance departments' });
+  }
+}
+
+/**
+ * GET /resignations/my-clearance-departments
+ * The departments the caller may clear for: every one they head, plus their
+ * own. HR gets isHR = true and may act on all of them.
+ */
+export async function myClearanceDepartments(req: AuthenticatedRequest, res: Response) {
+  try {
+    const actor = await getActor(req);
+    if (!actor) return res.status(401).json({ error: 'Unauthorized' });
+    const departmentIds = await headedDepartmentIds(actor.id);
+    return res.json({ isHR: actor.isHR, departmentIds });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to resolve departments' });
+  }
+}
+
 async function getHRIds(): Promise<number[]> {
   const hrs = await prisma.employee.findMany({
     where: {
@@ -1647,14 +2064,21 @@ export const initNoticePeriodSchedular = () => {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
-      // 1️⃣ Find all resignation requests that are approved and whose actual LWD < today
+      // 1️⃣ Approved resignations whose last working day has passed.
+      //    The actual date is matched first; where it was never filled in, the
+      //    proposed date stands in. Matching only the actual one meant a blank
+      //    field left the employee on NOTICE_PERIOD — still able to log in —
+      //    for good.
       const dueResignations = await prisma.resignationRequest.findMany({
         where: {
           status: 'APPROVED',
-          actualLastWorkingDay: { lt: today },
           employee: {
             employmentStatus: 'NOTICE_PERIOD',
           },
+          OR: [
+            { actualLastWorkingDay: { lt: today } },
+            { actualLastWorkingDay: null, proposedLastWorkingDay: { lt: today } },
+          ],
         },
         include: {
           employee: true,
@@ -1749,12 +2173,15 @@ async function rebuildClearanceItemsFromTemplate(tx: Prisma.TransactionClient, c
       })),
     });
   } else {
-    // fallback: if no template exists, create one generic line
+    // No template for this department yet. Give it a real line someone can
+    // actually clear — the old "not configured" text had to be cleared anyway
+    // before a certificate could issue, which made it a blocker dressed up as
+    // a warning. setApplicableDepartments reports these back to HR instead.
     await tx.resignationClearanceItem.create({
       data: {
         clearanceId,
         templateItemId: null,
-        label: "Clearance checklist not configured",
+        label: "General department clearance",
         status: "PENDING",
       }
     });
@@ -1899,7 +2326,7 @@ async function rebuildClearanceItemsFromTemplate(tx: Prisma.TransactionClient, c
 // }
 
 
-export async function setApplicableDepartments(req: Request, res: Response) {
+export async function setApplicableDepartments(req: AuthenticatedRequest, res: Response) {
   const resignationId = Number(req.params.id);
   const { departmentIds } = req.body as { departmentIds: number[] };
 
@@ -1907,11 +2334,29 @@ export async function setApplicableDepartments(req: Request, res: Response) {
     return res.status(400).json({ error: "departmentIds must be array" });
   }
 
+  if (!(await requireHRActor(req, res))) return;
+
   try {
     // ✅ Create/ensure clearances + items for these departments
     await initOffboardingClearances(resignationId, departmentIds);
 
-    return res.json({ success: true });
+    // Tell HR which of these departments have no checklist configured — those
+    // get a single generic line, which is rarely what anyone wants.
+    const withTemplates = await prisma.clearanceTemplateItem.findMany({
+      where: { departmentId: { in: departmentIds } },
+      select: { departmentId: true },
+      distinct: ['departmentId'],
+    });
+    const configured = new Set(withTemplates.map((t) => t.departmentId));
+    const missing = await prisma.department.findMany({
+      where: { id: { in: departmentIds.filter((d) => !configured.has(d)) } },
+      select: { name: true },
+    });
+
+    return res.json({
+      success: true,
+      departmentsWithoutChecklist: missing.map((d) => d.name),
+    });
   } catch (e) {
     console.error("setApplicableDepartments error:", e);
     return res.status(500).json({ error: "Failed to set applicable departments" });
@@ -2238,6 +2683,33 @@ export async function bulkUpdateClearanceItems(req: AuthenticatedRequest, res: R
     if (!user?.employee) {
       res.status(404).json({ error: "User not found" });
       return;
+    }
+
+    // Only HR, a head of the clearance's department, or the named verifier may
+    // tick these off — until now anyone logged in could clear their own exit.
+    const clearances = await prisma.resignationClearance.findMany({
+      where: { items: { some: { id: { in: items.map((i) => i.id) } } } },
+      select: { id: true, departmentId: true, verifierId: true, resignationId: true },
+    });
+    if (!clearances.length) {
+      res.status(404).json({ error: "Clearance items not found" });
+      return;
+    }
+    if (clearances.some((c) => c.resignationId !== resignationId)) {
+      res.status(400).json({ error: "Items do not belong to this resignation" });
+      return;
+    }
+
+    const isHR = user.employee.roleId === HR_ROLE_ID;
+    if (!isHR) {
+      const headOf = await headedDepartmentIds(user.employee.id);
+      const allowed = clearances.every(
+        (c) => (c.departmentId != null && headOf.includes(c.departmentId)) || c.verifierId === user.employee.id,
+      );
+      if (!allowed) {
+        res.status(403).json({ error: "Only HR, a head of that department, or the named verifier can update these items." });
+        return;
+      }
     }
 
     const now = new Date();
