@@ -12,6 +12,8 @@ import { createNotification } from '../notifications/notifications.controller';
 import { generateOfferLetterPdf, OfferLetterData } from './offerLetterPdf';
 import { isPanelAckStatus } from './recruiting.constants';
 import { createMeetForInterview, googleCalendarConfigured } from '../../lib/googleMeet';
+import { isDepartmentHead, headedDepartmentIds } from '../../lib/departmentHeads';
+import { applyRoundsToJob, computeApplicationRounds } from './interviewRounds.controller';
 import { config } from '../../config';
 
 
@@ -162,6 +164,42 @@ function candidateMayActOnOffer(req: Request, res: Response, offerCandidateId: n
 
   bad(res, 'Forbidden: only the candidate or HR may act on this offer', 403);
   return false;
+}
+
+/**
+ * Who may act on one candidate's test.
+ *
+ *   canMark   — read the answers and score the written ones. HR/recruiters, the
+ *               head of the job's department (a head may cover several), and
+ *               anyone sitting on an interview panel for this application: the
+ *               people who actually know the subject.
+ *   canDecide — set PASS / FAIL. HR and recruiters only; a manager's marks feed
+ *               the decision but don't make it.
+ */
+export async function candidateTestAccess(
+  user: any,
+  applicationId: number,
+): Promise<{ canMark: boolean; canDecide: boolean }> {
+  if (isRecruiterCapable(user)) return { canMark: true, canDecide: true };
+
+  const employeeId = Number(user?.empId);
+  if (!Number.isFinite(employeeId) || employeeId <= 0) return { canMark: false, canDecide: false };
+
+  const application = await prisma.application.findUnique({
+    where: { id: applicationId },
+    select: { job: { select: { departmentId: true } } },
+  });
+
+  if (application?.job?.departmentId && (await isDepartmentHead(employeeId, application.job.departmentId))) {
+    return { canMark: true, canDecide: false };
+  }
+
+  const onPanel = await prisma.interviewPanelMember.findFirst({
+    where: { employeeId, interview: { applicationId } },
+    select: { id: true },
+  });
+
+  return { canMark: !!onPanel, canDecide: false };
 }
 
 /**
@@ -415,13 +453,25 @@ export class RecruitingController {
 
   /** POST /jobs */
   createJob = asyncHandler(async (req, res) => {
-    const { title, departmentId, location, headcount = 1, createdBy, backfillForEmployeeId } = req.body || {};
+    const { title, departmentId, location, headcount = 1, createdBy, backfillForEmployeeId, roundTemplateId } = req.body || {};
     if (!title || !departmentId || !createdBy) return bad(res, 'title, departmentId, createdBy are required');
 
     const job = await prisma.job.create({
       data: { title, departmentId: Number(departmentId), location, headcount: Number(headcount), createdBy, backfillForEmployeeId },
     });
-    res.status(201).json(job);
+
+    // Copy the round sequence onto the job: the chosen template, else the one
+    // for its department, else the default. A copy, not a link — editing the
+    // template later must not reshuffle a job already part-way through hiring.
+    // No template configured anywhere leaves roundsConfigured 0, and the job
+    // falls back to the legacy Panel -> Test -> Management order.
+    const roundsConfigured = await applyRoundsToJob(
+      job.id,
+      roundTemplateId ? Number(roundTemplateId) : null,
+      Number(departmentId),
+    );
+
+    res.status(201).json({ ...job, roundsConfigured });
   });
 
   /** GET /jobs?status=OPEN&dept=2&q=engineer&page=1&pageSize=20 */
@@ -1578,7 +1628,10 @@ export class RecruitingController {
  */
   scheduleInterview = asyncHandler(async (req, res) => {
     const applicationId = Number(req.params.id);
-    const { stage, startTime, endTime, panelUserIds, feedbackDue, grouped, sessionGroupId, mode, meetingLink } = req.body || {};
+    const {
+      stage, startTime, endTime, panelUserIds, feedbackDue, grouped, sessionGroupId, mode, meetingLink,
+      roundSeq, outOfOrderReason,
+    } = req.body || {};
 
     if (!stage || !startTime || !endTime) return bad(res, 'stage, startTime, endTime are required');
 
@@ -1621,6 +1674,21 @@ export class RecruitingController {
       }
     });
     if (!app) return bad(res, 'Application not found', 404);
+
+    // Rounds run in the configured order. Jumping ahead is allowed — HR
+    // sometimes has to — but only with a reason, so the exception ends up on
+    // the record instead of quietly becoming the norm.
+    const requestedRound = Number(roundSeq);
+    if (Number.isFinite(requestedRound)) {
+      const progress = await computeApplicationRounds(applicationId);
+      const expected = progress?.nextSeq;
+      if (expected != null && requestedRound > expected && !String(outOfOrderReason || '').trim()) {
+        return bad(
+          res,
+          `Round ${requestedRound} comes after round ${expected} in this job's sequence. Give a reason to schedule it out of order.`,
+        );
+      }
+    }
 
     // ✅ Step 1: Parse panelUserIds safely
     const panels: number[] = Array.isArray(panelUserIds)
@@ -1774,6 +1842,10 @@ export class RecruitingController {
           panelUserIds: panels.join(','),
           feedbackDue: feedbackDue ? new Date(feedbackDue) : null,
           ...(hasGroupId ? { sessionGroupId: joinGroupId } : {}),
+          // Which configured round this fulfils, and the reason when HR runs
+          // it ahead of its turn (see GET /applications/:id/rounds).
+          roundSeq: Number.isFinite(Number(roundSeq)) ? Number(roundSeq) : null,
+          outOfOrderReason: String(outOfOrderReason || '').trim() || null,
           mode: interviewMode,
           meetingLink: resolvedMeetingLink,
           panel: {
@@ -3507,6 +3579,26 @@ export class RecruitingController {
     });
     if (!app) return res.status(404).json({ error: 'Application not found' });
 
+    // Which configured round this test is, so the progress view can match it
+    // and the next round unlocks when the test is done.
+    const testRound = await prisma.jobInterviewRound.findFirst({
+      where: { jobId: app.jobId, type: 'TEST' },
+      orderBy: { seq: 'asc' },
+      select: { seq: true, name: true },
+    });
+
+    // Same rule as scheduling an interview: a round may be run ahead of its
+    // turn, but the reason goes on the record.
+    if (testRound) {
+      const progress = await computeApplicationRounds(applicationId);
+      const expected = progress?.nextSeq;
+      if (expected != null && testRound.seq > expected && !String(req.body?.outOfOrderReason || '').trim()) {
+        return res.status(400).json({
+          error: `${testRound.name} is round ${testRound.seq}, after round ${expected} in this job's sequence. Give a reason to assign it out of order.`,
+        });
+      }
+    }
+
     // Generate a secure random one-time password for first-time candidates.
     // The plain value is emailed once and never stored in plaintext.
     let plainPasswordForEmail: string | null = null;
@@ -3543,7 +3635,8 @@ export class RecruitingController {
       interview = await prisma.interview.create({
         data: {
           applicationId,
-          stage: 'Test',
+          stage: testRound?.name || 'Test',
+          roundSeq: testRound?.seq ?? null,
           startTime: start,
           endTime: end,
           candidateAssignedTestId: assigned.id,
@@ -3570,7 +3663,9 @@ export class RecruitingController {
           loginEmail: app.candidate.email,
           // Only sent on first-time assign — null on subsequent assigns
           firstTimePassword: plainPasswordForEmail,
-          portalUrl: config.candidatePortalUrl,
+          // Deep link to the test list, with a fallback for deployments that
+          // never set CANDIDATE_PORTAL_URL.
+          portalUrl: candidatePortalLink('candidate-tests'),
         });
         mailStatus = "sent";
       } catch (e: any) {
@@ -3757,7 +3852,7 @@ export class RecruitingController {
       where: { id: aid },
       include: {
         application: { include: { job: true, candidate: true } },
-        test: { include: { questions: { include: { options: true } } } },
+        test: true,
       },
     });
     if (!assigned) return res.status(404).json({ error: 'Assigned test not found' });
@@ -3776,23 +3871,41 @@ export class RecruitingController {
     }
 
     // --- score MCQs ---
+    // Questions come from the test's bank — the same set the candidate was
+    // shown by getAssignedTestDetail. The test.questions relation is keyed on
+    // Question.evaluationTestId, which nothing in the app has ever set (0 of 57
+    // rows), so scoring over it made totalWeight 0 and every submission 0%.
+    const questions = await prisma.question.findMany({
+      where: { questionBankId: assigned.test.questionBankId },
+      include: { options: true },
+    });
+
     const ansMap = new Map<number, any>();
     for (const a of answers || []) ansMap.set(Number(a.questionId), a.answer);
 
     let totalWeight = 0, earned = 0;
-    for (const q of assigned.test.questions) {
+    for (const q of questions) {
       const w = q.weight ?? 1;
       totalWeight += w;
-      if (q.type === 'MCQ') {
-        const correct = (q.correctAnswerIds || '')
-          .split(',').map(s => Number(s.trim())).filter(n => !Number.isNaN(n)).sort((a, b) => a - b);
+      if ((q.type || '').toUpperCase() === 'MCQ') {
+        // The option flags are the source of truth. correctAnswerIds is never
+        // written by the question editor, and where it is set it holds stale
+        // ids — grading against it marked correct answers wrong.
+        const correct = q.options.filter(o => o.isCorrect).map(o => o.id).sort((a, b) => a - b);
         const given = (Array.isArray(ansMap.get(q.id)) ? ansMap.get(q.id) : [ansMap.get(q.id)])
           .filter((x: any) => x != null).map((x: any) => Number(x)).sort((a: number, b: number) => a - b);
         const ok = correct.length === given.length && correct.every((v, i) => v === given[i]);
         if (ok) earned += w;
       }
+      // Descriptive answers earn nothing until the evaluator marks them
+      // (POST /candidate/tests/:assignedId/evaluate recomputes this score).
     }
     const percent = totalWeight ? Math.round((earned / totalWeight) * 100) : 0;
+
+    // A paper with nothing to mark by hand is evaluated the moment it is
+    // submitted, so it goes straight to "awaiting HR decision" instead of
+    // waiting for marks that will never come.
+    const needsManualMarking = questions.some((q) => (q.type || '').toUpperCase() !== 'MCQ');
 
     // Persist results — NO app status change here
     const updated = await prisma.candidateAssignedTest.update({
@@ -3802,7 +3915,8 @@ export class RecruitingController {
         completedAt: new Date(),
         score: percent,
         response: JSON.stringify(answers ?? []),
-        // reset/clear any prior review
+        // reset/clear any prior evaluation + review
+        evaluatedBy: null, evaluatedAt: needsManualMarking ? null : new Date(),
         reviewedAt: null, reviewedBy: null, reviewDecision: null, reviewNote: null,
       },
       include: { application: true },
@@ -3830,17 +3944,310 @@ export class RecruitingController {
 
     res.json({ ok: true, score: percent });
   });
-  /** POST /applications/:id/tests/:aid/review  { decision:'PASS'|'FAIL', note?:string } */
-  reviewCandidateTest = asyncHandler(async (req, res) => {
-    const applicationId = Number(req.params.id);
-    const aid = Number(req.params.aid);
-    const { decision, note, reviewedBy } = req.body || {};
-    if (!['PASS', 'FAIL'].includes(decision)) return res.status(400).json({ error: 'decision must be PASS or FAIL' });
+  /**
+   * GET /candidate/tests/:assignedId/overview
+   *
+   * The evaluator's view of one candidate's submission: every question with
+   * what the candidate wrote (or picked) beside the reference answer. MCQs are
+   * already graded; descriptive answers are not graded here and never compared
+   * to the reference — a written answer won't match it, so HR scores them by
+   * hand through /evaluate below.
+   *
+   * Deliberately mirrors getAssignedTestOverview (the employee equivalent) so
+   * the two review dialogs stay interchangeable.
+   */
+  getCandidateTestOverview = asyncHandler(async (req, res) => {
+    const aid = Number(req.params.assignedId);
+
+    const assigned = await prisma.candidateAssignedTest.findUnique({ where: { id: aid } });
+    if (!assigned) return res.status(404).json({ error: 'Assigned test not found' });
+
+    const access = await candidateTestAccess((req as any).user, assigned.applicationId);
+    if (!access.canMark) {
+      return res.status(403).json({
+        error: 'Only HR, the head of this job\'s department, or a panel member for this candidate can open the evaluation',
+      });
+    }
+
+    const [test, application] = await Promise.all([
+      prisma.evaluationTest.findUnique({
+        where: { id: assigned.testId },
+        select: { id: true, name: true, questionBankId: true, passingPercent: true },
+      }),
+      // Fetched separately: rows outlive a deleted application (see
+      // listCandidateAssignedTests) and a required relation would throw.
+      prisma.application.findUnique({
+        where: { id: assigned.applicationId },
+        select: { id: true, candidate: { select: { name: true, email: true } }, job: { select: { title: true } } },
+      }),
+    ]);
+    if (!test) return res.status(404).json({ error: 'Test not found' });
+
+    const questions = await prisma.question.findMany({
+      where: { questionBankId: test.questionBankId },
+      include: { options: true },
+      orderBy: { id: 'asc' },
+    });
+
+    let answers: any[] = [];
+    try {
+      const parsed = assigned.response ? JSON.parse(assigned.response) : [];
+      if (Array.isArray(parsed)) answers = parsed;
+    } catch {
+      // A malformed blob shouldn't hide the questions — show them unanswered.
+      answers = [];
+    }
+    const byQuestion = new Map<number, any>(answers.map((a) => [Number(a.questionId), a]));
+
+    let correct = 0, wrong = 0, unanswered = 0, autoGradable = 0, pendingManual = 0;
+
+    const rows = questions.map((q, idx) => {
+      const given = byQuestion.get(q.id);
+      const type = (q.type || '').toUpperCase(); // 'MCQ' | 'DESCRIPTIVE'
+      const correctIds = q.options.filter((o) => o.isCorrect).map((o) => o.id).sort((a, b) => a - b);
+
+      const selectedIds: number[] = Array.isArray(given?.answer)
+        ? given.answer.map(Number).sort((a: number, b: number) => a - b)
+        : [];
+      const writtenAnswer = !Array.isArray(given?.answer) ? (given?.answer ?? '') : '';
+
+      let isCorrect: boolean | null = null;
+      if (type === 'MCQ') {
+        autoGradable++;
+        if (!selectedIds.length) {
+          unanswered++;
+          isCorrect = false;
+        } else {
+          isCorrect = JSON.stringify(selectedIds) === JSON.stringify(correctIds);
+          isCorrect ? correct++ : wrong++;
+        }
+      } else if (given?.manualScore === null || given?.manualScore === undefined) {
+        pendingManual++;
+      }
+
+      return {
+        no: idx + 1,
+        questionId: q.id,
+        text: q.text,
+        weight: q.weight,
+        type,
+        // What the candidate gave
+        selectedOptionIds: selectedIds,
+        selectedOptionTexts: q.options.filter((o) => selectedIds.includes(o.id)).map((o) => o.text),
+        rawAnswer: writtenAnswer,
+        fileUrl: given?.fileUrl ?? null,
+        // The reference, for the evaluator to read against it
+        correctOptionIds: correctIds,
+        correctOptionTexts: q.options.filter((o) => correctIds.includes(o.id)).map((o) => o.text),
+        modelAnswer: q.modelAnswer ?? null,
+        isCorrect, // null for descriptive — scored by hand
+        manualScore: given?.manualScore ?? null,
+        remarks: given?.remarks ?? null,
+        markedBy: given?.markedBy ?? null,
+        markedAt: given?.markedAt ?? null,
+      };
+    });
+
+    // Resolve the two people the dialog names: whoever marked the written
+    // answers and whoever took the PASS/FAIL decision.
+    const staffIds = [assigned.evaluatedBy, assigned.reviewedBy].filter(
+      (id): id is number => typeof id === 'number' && id > 0,
+    );
+    const staff = staffIds.length
+      ? await prisma.employee.findMany({
+          where: { id: { in: [...new Set(staffIds)] } },
+          select: { id: true, firstName: true, lastName: true },
+        })
+      : [];
+    const nameOf = (id: number | null) => {
+      const e = staff.find((s) => s.id === id);
+      return e ? `${e.firstName} ${e.lastName}`.trim() : null;
+    };
+
+    res.json({
+      assignedId: assigned.id,
+      applicationId: assigned.applicationId,
+      candidateName: application?.candidate?.name ?? '',
+      candidateEmail: application?.candidate?.email ?? '',
+      jobTitle: application?.job?.title ?? '',
+      testId: test.id,
+      testName: test.name,
+      passingPercent: test.passingPercent,
+      status: assigned.status,
+      score: assigned.score,
+      attempts: assigned.attempts,
+      startedAt: assigned.startedAt,
+      completedAt: assigned.completedAt,
+      timeTakenSec:
+        assigned.startedAt && assigned.completedAt
+          ? Math.max(0, Math.round((assigned.completedAt.getTime() - assigned.startedAt.getTime()) / 1000))
+          : null,
+      evaluatedBy: assigned.evaluatedBy,
+      evaluatedByName: nameOf(assigned.evaluatedBy),
+      evaluatedAt: assigned.evaluatedAt,
+      reviewDecision: assigned.reviewDecision,
+      reviewNote: assigned.reviewNote,
+      reviewedAt: assigned.reviewedAt,
+      reviewedByName: nameOf(assigned.reviewedBy),
+      // What this viewer is allowed to do, so the dialog doesn't have to
+      // duplicate the role rules.
+      viewer: { canMark: access.canMark, canDecide: access.canDecide },
+      hasAnswers: answers.length > 0,
+      totals: { total: questions.length, autoGradable, correct, wrong, unanswered, pendingManual },
+      rows,
+    });
+  });
+
+  /**
+   * POST /candidate/tests/:assignedId/evaluate
+   *   { evaluations: [{ questionId, manualScore, remarks? }] }
+   *
+   * Saves the evaluator's marks for descriptive answers and recomputes the
+   * score. Submission only ever scored the MCQs while still counting every
+   * question's weight in the total, so a test with a descriptive question
+   * could never exceed its MCQ share until this ran.
+   */
+  evaluateCandidateTest = asyncHandler(async (req, res) => {
+    const aid = Number(req.params.assignedId);
+    const { evaluations } = req.body || {};
+    if (!Array.isArray(evaluations) || !evaluations.length) {
+      return res.status(400).json({ error: 'evaluations[] is required' });
+    }
+
+    const assigned = await prisma.candidateAssignedTest.findUnique({ where: { id: aid } });
+    if (!assigned) return res.status(404).json({ error: 'Assigned test not found' });
+
+    const access = await candidateTestAccess((req as any).user, assigned.applicationId);
+    if (!access.canMark) {
+      return res.status(403).json({
+        error: 'Only HR, the head of this job\'s department, or a panel member for this candidate can mark this test',
+      });
+    }
+    // The marker is whoever is logged in — never a value the client sends.
+    const markerId = Number((req as any).user?.empId) || null;
+
+    const test = await prisma.evaluationTest.findUnique({
+      where: { id: assigned.testId },
+      select: { questionBankId: true, passingPercent: true },
+    });
+    if (!test) return res.status(404).json({ error: 'Test not found' });
+
+    const questions = await prisma.question.findMany({
+      where: { questionBankId: test.questionBankId },
+      include: { options: true },
+    });
+    const questionById = new Map(questions.map((q) => [q.id, q]));
+
+    let answers: any[] = [];
+    try {
+      const parsed = assigned.response ? JSON.parse(assigned.response) : [];
+      if (Array.isArray(parsed)) answers = parsed;
+    } catch {
+      answers = [];
+    }
+
+    // Merge the marks in, creating an entry for a question the candidate left
+    // blank (an unanswered descriptive still needs a recorded zero).
+    const rejected: { questionId: number; reason: string }[] = [];
+    for (const e of evaluations) {
+      const questionId = Number(e?.questionId);
+      const q = questionById.get(questionId);
+      if (!q) {
+        rejected.push({ questionId, reason: 'not a question on this test' });
+        continue;
+      }
+      if ((q.type || '').toUpperCase() === 'MCQ') {
+        rejected.push({ questionId, reason: 'MCQ is graded automatically' });
+        continue;
+      }
+      const max = q.weight ?? 1;
+      const raw = Number(e?.manualScore);
+      if (!Number.isFinite(raw) || raw < 0 || raw > max) {
+        rejected.push({ questionId, reason: `manualScore must be between 0 and ${max}` });
+        continue;
+      }
+
+      const markedAt = new Date().toISOString();
+      const existing = answers.find((a) => Number(a.questionId) === questionId);
+      if (existing) {
+        existing.manualScore = raw;
+        existing.remarks = e?.remarks ?? null;
+        existing.markedBy = markerId;
+        existing.markedAt = markedAt;
+      } else {
+        answers.push({
+          questionId, answer: '', manualScore: raw,
+          remarks: e?.remarks ?? null, markedBy: markerId, markedAt,
+        });
+      }
+    }
+    if (rejected.length === evaluations.length) {
+      return res.status(400).json({ error: 'No usable evaluations', rejected });
+    }
+
+    // Recompute: MCQ marks earned automatically + the marks just given.
+    const byQuestion = new Map<number, any>(answers.map((a) => [Number(a.questionId), a]));
+    let totalWeight = 0, earned = 0;
+    for (const q of questions) {
+      const w = q.weight ?? 1;
+      totalWeight += w;
+      const given = byQuestion.get(q.id);
+      if ((q.type || '').toUpperCase() === 'MCQ') {
+        const correctIds = q.options.filter((o) => o.isCorrect).map((o) => o.id).sort((a, b) => a - b);
+        const selected = Array.isArray(given?.answer)
+          ? given.answer.map(Number).sort((a: number, b: number) => a - b)
+          : [];
+        if (selected.length && JSON.stringify(selected) === JSON.stringify(correctIds)) earned += w;
+      } else if (typeof given?.manualScore === 'number') {
+        earned += given.manualScore;
+      }
+    }
+    const percent = totalWeight ? Math.round((earned / totalWeight) * 100) : 0;
 
     const updated = await prisma.candidateAssignedTest.update({
       where: { id: aid },
       data: {
-        reviewedBy: reviewedBy || 0,   // or your auth user id
+        response: JSON.stringify(answers),
+        score: percent,
+        evaluatedBy: markerId,
+        evaluatedAt: new Date(),
+      },
+      select: { id: true, score: true, evaluatedAt: true },
+    });
+
+    res.json({
+      ok: true,
+      score: updated.score,
+      evaluatedAt: updated.evaluatedAt,
+      earned,
+      totalWeight,
+      // The decision stays HR's explicit call — this only reports where the
+      // recomputed score sits against the pass mark.
+      meetsPassMark: test.passingPercent === null ? null : percent >= test.passingPercent,
+      rejected,
+    });
+  });
+
+  /** POST /applications/:id/tests/:aid/review  { decision:'PASS'|'FAIL', note?:string } */
+  reviewCandidateTest = asyncHandler(async (req, res) => {
+    const applicationId = Number(req.params.id);
+    const aid = Number(req.params.aid);
+    const { decision, note } = req.body || {};
+    if (!['PASS', 'FAIL'].includes(decision)) return res.status(400).json({ error: 'decision must be PASS or FAIL' });
+
+    // Only HR decides, and the decision is attributed to whoever is logged in —
+    // `reviewedBy` used to be read from the request body and defaulted to 0, so
+    // the record never said who passed or failed the candidate.
+    const access = await candidateTestAccess((req as any).user, applicationId);
+    if (!access.canDecide) {
+      return res.status(403).json({ error: 'Only HR can set the PASS / FAIL decision on a test' });
+    }
+    const reviewerId = Number((req as any).user?.empId) || null;
+
+    const updated = await prisma.candidateAssignedTest.update({
+      where: { id: aid },
+      data: {
+        reviewedBy: reviewerId,
         reviewedAt: new Date(),
         reviewDecision: decision,
         reviewNote: note ?? null,
@@ -3881,6 +4288,149 @@ export class RecruitingController {
       take: 100,
     });
     res.json(rows);
+  });
+
+  /**
+   * GET /tests/assigned — every candidate test assignment, newest first.
+   *
+   * The Assigned Tests screen listed EMPLOYEE assignments only; a candidate's
+   * test was visible solely inside their own interview row, so nobody could
+   * see who had been assigned what. Filters: status, jobId, q (candidate name
+   * / email / test name).
+   */
+  listCandidateAssignedTests = asyncHandler(async (req, res) => {
+    const page = Math.max(1, Number(req.query.page ?? 1));
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize ?? 20)));
+    const { status, jobId, q } = req.query as Record<string, string | undefined>;
+
+    const where: any = {};
+
+    // Not recruiter-only: a department head or panel member has to reach the
+    // Evaluate button somehow, and this list is the only way in. They see the
+    // candidates they are allowed to mark — their departments' jobs, plus the
+    // ones they sit on a panel for — and nobody else's.
+    const user = (req as any).user;
+    if (!isRecruiterCapable(user)) {
+      const employeeId = Number(user?.empId);
+      if (!Number.isFinite(employeeId) || employeeId <= 0) {
+        return res.status(403).json({ error: 'Not allowed to view candidate tests' });
+      }
+      const [departmentIds, panelled] = await Promise.all([
+        headedDepartmentIds(employeeId),
+        prisma.interviewPanelMember.findMany({
+          where: { employeeId },
+          select: { interview: { select: { applicationId: true } } },
+        }),
+      ]);
+      const panelApplicationIds = panelled.map((p) => p.interview.applicationId);
+
+      if (!departmentIds.length && !panelApplicationIds.length) {
+        return res.json({ data: [], total: 0, page, pageSize, totalPages: 0 });
+      }
+      // AND, not OR: the search filter below owns `where.OR`, and the scope
+      // must survive alongside it rather than be replaced by it.
+      where.AND = [{
+        OR: [
+          ...(departmentIds.length ? [{ application: { job: { departmentId: { in: departmentIds } } } }] : []),
+          ...(panelApplicationIds.length ? [{ applicationId: { in: [...new Set(panelApplicationIds)] } }] : []),
+        ],
+      }];
+    }
+
+    if (status) where.status = status;
+    if (jobId) where.application = { jobId: Number(jobId) };
+    if (q && q.trim()) {
+      const term = q.trim();
+      where.OR = [
+        { application: { candidate: { name: { contains: term } } } },
+        { application: { candidate: { email: { contains: term } } } },
+        { test: { name: { contains: term } } },
+      ];
+    }
+
+    const [rows, total] = await Promise.all([
+      prisma.candidateAssignedTest.findMany({
+        where,
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        orderBy: [{ assignedAt: 'desc' }, { id: 'desc' }],
+      }),
+      prisma.candidateAssignedTest.count({ where }),
+    ]);
+
+    // Application and test are fetched separately rather than `include`d: both
+    // relations are required in the schema, but rows survive their application
+    // being deleted (2 such rows exist in dev), and Prisma refuses to return a
+    // required relation as null — that one bad row would 500 the whole list.
+    const [applications, tests] = await Promise.all([
+      prisma.application.findMany({
+        where: { id: { in: [...new Set(rows.map((r) => r.applicationId))] } },
+        select: {
+          id: true,
+          status: true,
+          candidate: { select: { id: true, name: true, email: true, phone: true } },
+          job: { select: { id: true, title: true, department: { select: { name: true } } } },
+        },
+      }),
+      prisma.evaluationTest.findMany({
+        where: { id: { in: [...new Set(rows.map((r) => r.testId))] } },
+        select: { id: true, name: true, duration: true, passingPercent: true },
+      }),
+    ]);
+    const appById = new Map(applications.map((a) => [a.id, a]));
+    const testById = new Map(tests.map((t) => [t.id, t]));
+
+    // Names for the two people the Result column credits.
+    const staffIds = [...new Set(rows.flatMap((r) => [r.evaluatedBy, r.reviewedBy]))]
+      .filter((id): id is number => typeof id === 'number' && id > 0);
+    const staff = staffIds.length
+      ? await prisma.employee.findMany({
+          where: { id: { in: staffIds } },
+          select: { id: true, firstName: true, lastName: true },
+        })
+      : [];
+    const nameOf = (id: number | null) => {
+      const e = staff.find((s) => s.id === id);
+      return e ? `${e.firstName} ${e.lastName}`.trim() : null;
+    };
+
+    // Flattened for the table — the screen shouldn't dig through three levels
+    // of relation to show a candidate's name.
+    const data = rows.map((r) => {
+      const app = appById.get(r.applicationId);
+      const test = testById.get(r.testId);
+      return {
+      id: r.id,
+      applicationId: r.applicationId,
+      candidateId: r.candidateId,
+      candidateName: app?.candidate?.name ?? '',
+      candidateEmail: app?.candidate?.email ?? '',
+      candidatePhone: app?.candidate?.phone ?? '',
+      jobId: app?.job?.id ?? null,
+      jobTitle: app?.job?.title ?? '',
+      department: app?.job?.department?.name ?? '',
+      applicationStatus: app?.status ?? null,
+      testId: r.testId,
+      testName: test?.name ?? '',
+      duration: test?.duration ?? null,
+      passingPercent: test?.passingPercent ?? null,
+      status: r.status,
+      attempts: r.attempts,
+      score: r.score,
+      assignedAt: r.assignedAt,
+      testDate: r.testDate,
+      deadlineDate: r.deadlineDate,
+      startedAt: r.startedAt,
+      completedAt: r.completedAt,
+      evaluatedAt: r.evaluatedAt,
+      evaluatedByName: nameOf(r.evaluatedBy),
+      reviewDecision: r.reviewDecision,
+      reviewedAt: r.reviewedAt,
+      reviewedByName: nameOf(r.reviewedBy),
+      };
+    });
+
+    res.json({ data, total, page, pageSize, totalPages: Math.ceil(total / pageSize) });
   });
 
   getApplicationSummary = asyncHandler(async (req, res) => {
@@ -5160,9 +5710,24 @@ export function generateRandomPassword(length = 10): string {
   return out;
 }
 
+/**
+ * Link to the candidate portal for emails, optionally deep-linked to a page.
+ *
+ * CANDIDATE_PORTAL_URL is the portal's own host where it's served separately.
+ * A deployment that never set it (the client's did not) still has the app's
+ * public URL, and a link there beats the "contact HR for the link" we were
+ * sending instead. Returns '' only when neither is configured.
+ */
+export function candidatePortalLink(page = ''): string {
+  const base = (config.candidatePortalUrl || config.appPublicUrl || '').replace(/\/+$/, '');
+  if (!base) return '';
+  return page ? `${base}/${page.replace(/^\/+/, '')}` : base;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Email candidate when a test is assigned to them.
-// Includes test details + (only on first-time) their portal credentials.
+// Carries the portal link for EVERY assignment (the candidate cannot attend
+// the assessment without it) plus, first time only, their login credentials.
 // ─────────────────────────────────────────────────────────────────────
 export async function sendCandidateTestMail(props: {
   to: string;
@@ -5189,10 +5754,20 @@ export async function sendCandidateTestMail(props: {
 Your candidate portal login (please change after first login):
   Email:    ${loginEmail}
   Password: ${firstTimePassword}
-
-Portal: ${portalUrl || '[contact HR for the link]'}
 `
     : "";
+
+  // The link goes to every candidate, not just first-timers: a repeat
+  // assignment used to arrive with no way to reach the assessment at all.
+  const portalBlock = portalUrl
+    ? `
+Attend your assessment here: ${portalUrl}
+Sign in with your registered email (${loginEmail}).
+`
+    : `
+Please sign in to the candidate portal with your registered email
+(${loginEmail}) to attend the assessment. Contact HR if you need the link.
+`;
 
   const text = `
 Hi ${candidateName},
@@ -5203,8 +5778,8 @@ Test: ${testName}
 Duration: ${duration} minutes
 Passing score: ${passingPercent}%
 Deadline: ${deadlineStr}
-${credentialsBlock}
-Please log in and complete the test before the deadline.
+${credentialsBlock}${portalBlock}
+Please complete the test before the deadline.
 
 Best regards,
 HR Team
@@ -5218,9 +5793,27 @@ HR Team
   <li><b>Password:</b> ${firstTimePassword}</li>
 </ul>
 <p><i>This is a one-time password — please change it after your first login.</i></p>
-${portalUrl ? `<p><a href="${portalUrl}" target="_blank">Open candidate portal</a></p>` : ""}
 `
     : "";
+
+  // Always present, whether or not credentials are being sent with this mail.
+  const portalHtml = portalUrl
+    ? `
+<p style="margin:18px 0;">
+  <a href="${portalUrl}" target="_blank"
+     style="background:#2563eb;color:#ffffff;text-decoration:none;padding:10px 18px;border-radius:6px;display:inline-block;font-weight:600;">
+    Attend assessment
+  </a>
+</p>
+<p style="font-size:12px;color:#555;">
+  Or paste this link into your browser: <a href="${portalUrl}" target="_blank">${portalUrl}</a><br>
+  Sign in with your registered email (<b>${loginEmail}</b>).
+</p>
+`
+    : `
+<p>Please sign in to the candidate portal with your registered email
+(<b>${loginEmail}</b>) to attend the assessment. Contact HR if you need the link.</p>
+`;
 
   const html = `
 <h2>New Assessment Assigned</h2>
@@ -5236,8 +5829,9 @@ ${portalUrl ? `<p><a href="${portalUrl}" target="_blank">Open candidate portal</
 </ul>
 
 ${credsHtml}
+${portalHtml}
 
-<p>Please log in and complete the test before the deadline.</p>
+<p>Please complete the test before the deadline.</p>
 
 <br>
 <p>Best regards,<br>HR Team</p>

@@ -60,6 +60,7 @@ export interface ProbationPdfEvaluation {
   hrComments: string | null;
   hrDecidedAt: Date | string | null;
   nextReviewDate: Date | string | null;
+  capturedOffline?: boolean;
 }
 
 export interface ProbationPdfEmployee {
@@ -79,8 +80,23 @@ export interface ProbationPdfManager {
   designation?: { name: string } | null;
 }
 
+/** An earlier round, summarised rather than reproduced in full. */
+export interface ProbationPdfPriorRound {
+  round: number;
+  evaluationDate: Date | string | null;
+  managerName: string | null;
+  ratings: unknown;
+  managerRecommendation: string | null;
+  hrDecision: string | null;
+  nextReviewDate: Date | string | null;
+  improvementPoints: string | null;
+  capturedOffline?: boolean;
+}
+
 export interface ProbationPdfInput {
   evaluation: ProbationPdfEvaluation;
+  /** Completed earlier rounds, oldest first. Empty for a first evaluation. */
+  previousRounds?: ProbationPdfPriorRound[];
   employee: ProbationPdfEmployee;
   manager: ProbationPdfManager | null;
   hrDecidedByName: string | null;
@@ -197,6 +213,20 @@ const baseMargins = hasLetterhead()
           { font: FONT_ITALIC, size: 8.5, align: 'center', color: '#555' },
         );
         y += 6;
+      }
+
+      // Say so when the record was transcribed rather than filled in here. The
+      // content is identical either way, so without this line the PDF would
+      // read as though the manager completed it in the system — and the signed
+      // paper form, not this printout, is the original.
+      if (input.evaluation.capturedOffline) {
+        text(
+          'Transcribed from the signed paper evaluation form. The signed original is held on the employee file.',
+          left,
+          width,
+          { font: FONT_ITALIC, size: 8, align: 'center', color: '#777' },
+        );
+        y += 8;
       }
 
       /* ── Particulars ────────────────────────────────────────────────────── */
@@ -444,6 +474,92 @@ const baseMargins = hasLetterhead()
         y += 4;
         text('Pending HR review.', left, width, { font: FONT_ITALIC, size: 9, color: '#777' });
         y += 12;
+      }
+
+      /* ── Previous rounds ────────────────────────────────────────────────── */
+      //
+      // Summarised, not reproduced: each earlier round was signed and filed as
+      // its own document, so repeating its full grid would double the page
+      // count to restate what is already on file. This gives the reader the
+      // probation history at a glance on the sheet they are signing.
+
+      const priors = input.previousRounds ?? [];
+      if (priors.length) {
+        ensure(70);
+        text('PREVIOUS EVALUATION HISTORY', left, width, { font: FONT_BOLD, size: 10 });
+        y += 8;
+
+        // Two columns of four, each rating sitting against its own category.
+        // A bare "M M E M E B M M" row forced the reader to count positions
+        // against the category table — which is usually on an earlier page.
+        const RATING_ROW_H = 11;
+        const ratingGridH = Math.ceil(PROBATION_CATEGORIES.length / 2) * RATING_ROW_H;
+
+        for (const prior of priors) {
+          const priorRatings = readRatings(prior.ratings);
+
+          const improve = (prior.improvementPoints ?? '').trim();
+          const quoted = improve.length > 220 ? `${improve.slice(0, 217)}…` : improve;
+
+          // Measure the block so a round is never split across a page break.
+          const quoteH = quoted ? measure(quoted, width - 24, FONT_ITALIC, 8) : 0;
+          ensure(52 + ratingGridH + quoteH);
+
+          doc
+            .moveTo(left, y)
+            .lineTo(left + width, y)
+            .strokeColor('#dddddd')
+            .lineWidth(0.5)
+            .stroke();
+          y += 6;
+
+          const head =
+            `Round ${prior.round}` +
+            (prior.evaluationDate ? ` — evaluated ${fmt(prior.evaluationDate)}` : '') +
+            (prior.managerName ? ` by ${prior.managerName}` : '') +
+            (prior.capturedOffline ? ' (from signed paper form)' : '');
+          text(head, left, width, { font: FONT_BOLD, size: 8.5 });
+          y += 2;
+
+          const labelW = 86;
+          const row = (label: string, value: string) => {
+            doc.font(FONT).fontSize(8).fillColor('#555').text(label, left + 10, y, { width: labelW });
+            doc.font(FONT).fontSize(8).fillColor('#000')
+               .text(value, left + 10 + labelW, y, { width: width - 10 - labelW });
+            y += 11;
+          };
+
+          const gridTop = y;
+          const colW = width / 2;
+          PROBATION_CATEGORIES.forEach((cat, i) => {
+            const col = i % 2;
+            const cellX = left + 10 + col * colW;
+            const cellY = gridTop + Math.floor(i / 2) * RATING_ROW_H;
+            const mark = priorRatings[cat.code] ?? '–';
+
+            doc.font(FONT).fontSize(7.5).fillColor('#555')
+               .text(cat.label, cellX, cellY, { width: colW - 46, lineBreak: false, ellipsis: true } as any);
+            doc.font(FONT_BOLD).fontSize(8.5).fillColor('#000')
+               .text(mark, cellX + colW - 40, cellY - 0.5, { width: 14, align: 'center' });
+          });
+          y = gridTop + ratingGridH + 4;
+
+          row('Manager', OUTCOME_LABELS[prior.managerRecommendation as Outcome] ?? '—');
+          row(
+            'HR decision',
+            (OUTCOME_LABELS[prior.hrDecision as Outcome] ?? '—') +
+              (prior.nextReviewDate ? `  (next review ${fmt(prior.nextReviewDate)})` : ''),
+          );
+
+          if (quoted) {
+            doc.font(FONT_ITALIC).fontSize(8).fillColor('#444')
+               .text(`“${quoted}”`, left + 10, y, { width: width - 24 });
+            y += quoteH + 2;
+          }
+          y += 6;
+        }
+
+        y += 8;
       }
 
       /* ── Signatures ─────────────────────────────────────────────────────── */

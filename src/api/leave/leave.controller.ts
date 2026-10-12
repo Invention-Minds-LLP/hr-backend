@@ -32,6 +32,10 @@ import { checkELApplication, getELAvailableBalance, getELRequestCountForYear } f
 
 type Tx = Prisma.TransactionClient;
 
+// Max RH allowed per financial year (out of available optional holidays).
+// Enforced at application time and reported by getLeaveBalance.
+const MAX_RH_PER_YEAR = 2;
+
 const LEAVE_APPLY_TEMPLATE_ID = "890321";
 const LEAVE_STATUS_TEMPLATE_ID = "909803";
 
@@ -148,9 +152,6 @@ export const createLeaveRequest = async (req: Request, res: Response) => {
           error: "RH can only be applied on a Restricted Holiday (optional holiday) date",
         });
       }
-
-      // Max 2 RH allowed per financial year (out of available optional holidays)
-      const MAX_RH_PER_YEAR = 2;
 
       const rhUsedCount = await prisma.leaveRequest.count({
         where: {
@@ -2633,8 +2634,68 @@ export const getLeaveBalance = async (req: AuthenticatedRequest, res: Response) 
       if (b.leaveTypeId) balanceMap.set(b.leaveTypeId, b);
     });
 
+    // CO and RH have no EmployeeLeaveBalance row that is kept up to date —
+    // CO is backed by CompOffCredit, RH by the per-FY cap on RH requests —
+    // so derive both here instead of reading the (stale) balance table.
+    const fyStart = new Date(Date.UTC(year, 3, 1));
+    const fyEnd = new Date(Date.UTC(year + 1, 3, 1));
+    const today = atStartOfDay(new Date());
+    const rhType = leaveTypes.find(lt => lt.name === "RH");
+
+    const [coAvailable, coNext, coUsed, rhUsed] = await Promise.all([
+      prisma.compOffCredit.count({
+        where: { employeeId, used: false, expiryDate: { gte: today } },
+      }),
+      prisma.compOffCredit.findFirst({
+        where: { employeeId, used: false, expiryDate: { gte: today } },
+        orderBy: { expiryDate: "asc" },
+        select: { expiryDate: true },
+      }),
+      prisma.compOffCredit.count({
+        where: { employeeId, used: true, usedOn: { gte: fyStart, lt: fyEnd } },
+      }),
+      rhType
+        ? prisma.leaveRequest.count({
+            where: {
+              employeeId,
+              leaveTypeId: rhType.id,
+              status: { in: ["PENDING", "APPROVED"] },
+              startDate: { gte: fyStart },
+              endDate: { lt: fyEnd },
+            },
+          })
+        : Promise.resolve(0),
+    ]);
+
     // 4️⃣ Merge master + balance
     const result = leaveTypes.map(lt => {
+      if (lt.name === "CO") {
+        return {
+          leaveTypeId: lt.id,
+          leaveType: lt.name,
+          totalAllowed: coAvailable + coUsed,
+          used: coUsed,
+          usedHalf: 0,
+          totalUsed: coUsed,
+          remaining: coAvailable,
+          // Earliest expiry among the available credits; null when none.
+          nextExpiry: coNext?.expiryDate ?? null,
+          year
+        };
+      }
+      if (lt.name === "RH") {
+        return {
+          leaveTypeId: lt.id,
+          leaveType: lt.name,
+          totalAllowed: MAX_RH_PER_YEAR,
+          used: rhUsed,
+          usedHalf: 0,
+          totalUsed: rhUsed,
+          remaining: Math.max(0, MAX_RH_PER_YEAR - rhUsed),
+          year
+        };
+      }
+
       const b = balanceMap.get(lt.id);
       const usedFull = b?.used ?? 0;
       const usedHalfCount = b?.halfDayUsed ?? 0;
@@ -3861,14 +3922,16 @@ function isWeeklyOffFromConfig(config: any, date: Date) {
     return config.fixedDays.includes(day);
   }
 
-  // Rotational
-  if (config.weeks && Array.isArray(config.weeks)) {
+  // Rotational. ShiftApproval stores weeks as an object keyed by week index
+  // ({ "3": 0 }), not an array — the Array.isArray check that stood here never
+  // matched, so every rotational employee fell through to "Sunday off" and was
+  // charged leave for their real week-off. getWeekOfMonth − 1 is the same
+  // Sunday-anchored index lib/workWeek uses; a week with no entry has no
+  // week-off, matching isWeekOff there.
+  if (config.weeks && typeof config.weeks === "object") {
     const weekIndex = getWeekOfMonth(date) - 1;
-    const offDay = config.weeks[weekIndex];
-
-    if (offDay !== undefined) {
-      return day === offDay;
-    }
+    const offDay = config.weeks[weekIndex] ?? config.weeks[String(weekIndex)];
+    return offDay !== undefined && day === Number(offDay);
   }
 
   return day === 0;

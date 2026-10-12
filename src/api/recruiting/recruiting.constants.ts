@@ -31,6 +31,27 @@ export function isPanelAckStatus(v: unknown): v is PanelAckStatus {
   return typeof v === "string" && (PanelAckStatusValues as readonly string[]).includes(v);
 }
 
+// ── InterviewRoundTemplateItem.type / JobInterviewRound.type ───────
+// What a configured round actually is. TEST assigns an evaluation test;
+// PANEL and MANAGEMENT schedule an interview with panel members.
+export const InterviewRoundTypeValues = ["TEST", "PANEL", "MANAGEMENT"] as const;
+export type InterviewRoundType = typeof InterviewRoundTypeValues[number];
+
+export function isInterviewRoundType(v: unknown): v is InterviewRoundType {
+  return typeof v === "string" && (InterviewRoundTypeValues as readonly string[]).includes(v);
+}
+
+/**
+ * What a job runs when nobody has configured anything: the order the frontend
+ * had hardcoded before rounds were configurable. Jobs created before this
+ * feature keep behaving exactly as they did.
+ */
+export const LEGACY_ROUND_SEQUENCE: { seq: number; type: InterviewRoundType; name: string }[] = [
+  { seq: 1, type: "PANEL", name: "Panel" },
+  { seq: 2, type: "TEST", name: "Test" },
+  { seq: 3, type: "MANAGEMENT", name: "Management" },
+];
+
 // ── Interview.stage ────────────────────────────────────────────────
 // Suggested standard rounds. Recruiters can still type any custom string,
 // but new code should prefer one of these. Future migration could enforce.

@@ -18,7 +18,7 @@ export const getQuestionsByBank = async (req: Request, res: Response) => {
 
 export const createQuestion = async (req: Request, res: Response) => {
   try {
-    const { questionBankId, text, type, weight, options } = req.body;
+    const { questionBankId, text, type, weight, options, modelAnswer } = req.body;
 
     const question = await prisma.question.create({
       data: {
@@ -26,6 +26,9 @@ export const createQuestion = async (req: Request, res: Response) => {
         text,
         type,
         weight,
+        // Reference answer, only meaningful for a Descriptive question — it is
+        // shown to the evaluator, never matched against the answer given.
+        modelAnswer: type === 'Descriptive' ? (modelAnswer?.trim() || null) : null,
         options: {
           create: options ?? [] // Only for MCQs
         }
@@ -53,13 +56,20 @@ export const deleteQuestion = async (req: Request, res: Response) => {
 export const updateQuestion = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
-    const { text, type, weight, answerType, options } = req.body;
+    const { text, type, weight, answerType, options, modelAnswer } = req.body;
 
     await prisma.$transaction(async (tx) => {
       // Update question fields
       await tx.question.update({
         where: { id },
-        data: { text, type, weight }
+        data: {
+          text,
+          type,
+          weight,
+          // Cleared when a question stops being descriptive, so a stale
+          // reference answer can't show up under an MCQ.
+          modelAnswer: type === 'Descriptive' ? (modelAnswer?.trim() || null) : null,
+        }
         // (store answerType too if you add a DB column for it)
       });
 

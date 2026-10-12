@@ -735,6 +735,62 @@ export async function generateFixedShiftsForMonth(baseDate: Date): Promise<numbe
 }
 
 /**
+ * Fill the month's ShiftAssignment rows for ONE employee on a FIXED shift.
+ *
+ * Called right after an employee is created: until now the month's rows only
+ * appeared on a server restart or the 1st-of-month cron, so somebody added
+ * mid-month had no shift on any future date of that month (the daily cron adds
+ * one day at a time). ROTATIONAL employees are out of scope — the crons don't
+ * generate for them either.
+ *
+ * Starts at the later of the 1st and their joining date (no shifts before they
+ * joined) and skips any day that already has a row. Returns rows created.
+ */
+export async function generateFixedShiftsForEmployee(
+  employeeId: number,
+  baseDate: Date = new Date()
+): Promise<number> {
+  const setting = await prisma.employeeShiftSetting.findUnique({
+    where: { employeeId },
+    select: { mode: true, fixedShiftId: true },
+  });
+  if (setting?.mode !== ShiftAssignMode.FIXED || !setting.fixedShiftId) return 0;
+
+  const employee = await prisma.employee.findUnique({
+    where: { id: employeeId },
+    select: { dateOfJoining: true },
+  });
+
+  const year = baseDate.getFullYear();
+  const monthIdx = baseDate.getMonth(); // 0-based
+  const monthStart = startOfDay(new Date(year, monthIdx, 1));
+  const nextMonthStart = startOfDay(new Date(year, monthIdx + 1, 1));
+  const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
+
+  const doj = employee?.dateOfJoining ? startOfDay(new Date(employee.dateOfJoining)) : null;
+  const from = doj && doj > monthStart ? doj : monthStart;
+  // Joining next month or later — the monthly cron covers that month.
+  if (from >= nextMonthStart) return 0;
+
+  const existing = await prisma.shiftAssignment.findMany({
+    where: { employeeId, date: { gte: from, lt: nextMonthStart } },
+    select: { date: true },
+  });
+  const seen = new Set(existing.map((r) => startOfDay(r.date).getTime()));
+
+  const rows: { employeeId: number; shiftId: number; date: Date }[] = [];
+  for (let d = from.getDate(); d <= daysInMonth; d++) {
+    const date = new Date(year, monthIdx, d);
+    if (seen.has(date.getTime())) continue;
+    rows.push({ employeeId, shiftId: setting.fixedShiftId, date });
+  }
+  if (!rows.length) return 0;
+
+  const result = await prisma.shiftAssignment.createMany({ data: rows });
+  return result.count;
+}
+
+/**
  * POST /shifts/generate-fixed-month  (optional body/query: month 1-12, year)
  * Manually generate the whole month's fixed-shift assignments on demand —
  * useful for filling the remaining days of the current month without waiting

@@ -34,6 +34,8 @@ import {
   applyProbationOutcome,
   normaliseRatings,
   probationDueDate,
+  probationCutoffDate,
+  isBeforeCutoff,
   resolveProbationManagerId,
   ProbationOutcome,
 } from '../../lib/probation';
@@ -114,6 +116,8 @@ export interface OpenEvaluationsResult {
   opened: number;
   unassigned: number;
   skipped: number;
+  /** Probations that closed before the go-live cutoff — backlog for HR. */
+  beforeCutoff: number;
 }
 
 /**
@@ -128,7 +132,8 @@ export interface OpenEvaluationsResult {
  * `asOf` exists so the cron can be tested without waiting for a date.
  */
 export async function openDueEvaluations(asOf: Date = new Date()): Promise<OpenEvaluationsResult> {
-  const result: OpenEvaluationsResult = { opened: 0, unassigned: 0, skipped: 0 };
+  const result: OpenEvaluationsResult = { opened: 0, unassigned: 0, skipped: 0, beforeCutoff: 0 };
+  const cutoff = probationCutoffDate();
 
   const candidates = await prisma.employee.findMany({
     where: {
@@ -201,6 +206,17 @@ export async function openDueEvaluations(asOf: Date = new Date()): Promise<OpenE
     const round = (last?.round ?? 0) + 1;
     const managerId = resolveProbationManagerId(emp);
     const effectiveDue = last?.nextReviewDate ? new Date(last.nextReviewDate) : dueDate;
+
+    // Anything that closed before the module went live is backlog: the decision
+    // was almost certainly already taken on paper, so chasing the manager for a
+    // fresh evaluation would be wrong. HR records those from the Probation
+    // screen instead. Checked against the EFFECTIVE due date so a historical
+    // extension's re-evaluation is judged on when it actually falls due, not on
+    // when the original probation started.
+    if (isBeforeCutoff(effectiveDue, cutoff)) {
+      result.beforeCutoff++;
+      continue;
+    }
 
     try {
       await prisma.probationEvaluation.create({
@@ -410,6 +426,8 @@ export const listDueEmployees = async (req: Request, res: Response) => {
       : [];
     const managerById = new Map(managers.map((m) => [m.id, m]));
 
+    const cutoff = probationCutoffDate();
+
     const rows = employees
       .filter((e) => !hasOpen.has(e.id))
       .map((e) => ({ emp: e, dueDate: probationDueDate(e) }))
@@ -427,9 +445,16 @@ export const listDueEmployees = async (req: Request, res: Response) => {
         probationStatus: emp.probationStatus,
         managerId: emp.reportingManager,
         managerName: emp.reportingManager ? fullName(managerById.get(emp.reportingManager)) || null : null,
+        // Closed before go-live: the daily job will never open a form for this
+        // one, so it only leaves the list when HR captures the paper decision.
+        beforeCutoff: isBeforeCutoff(dueDate, cutoff),
+        // Already made permanent while probation still reads as open — the
+        // signature of a confirmation signed on paper and never recorded here.
+        // A hint for HR to check the file, never grounds to auto-confirm.
+        likelyDecidedOnPaper: emp.employmentType === 'PERMANENT',
       }));
 
-    res.json(rows);
+    res.json({ cutoffDate: cutoff, rows });
   } catch (err: any) {
     console.error('[probation] listDueEmployees failed:', err);
     res.status(500).json({ error: err.message });
@@ -722,6 +747,215 @@ export const submitHrDecision = async (req: Request, res: Response) => {
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   CAPTURING A DECISION TAKEN ON PAPER
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * POST /api/probation/capture — HR transcribes a signed paper evaluation.
+ *
+ * Two cases, one endpoint:
+ *   • the daily job already opened a round and the decision was taken offline;
+ *   • the probation closed before the go-live cutoff, so no round exists at all
+ *     and this creates it.
+ *
+ * The whole form is transcribed, so a captured record is structurally identical
+ * to one filled in here and the PDF prints in full. What differs is the dates:
+ * `evaluationDate` and `hrDecidedAt` are the dates on the PAPER, while
+ * `submittedAt` stays the moment HR keyed it in — the audit trail must not
+ * claim the manager used the system. `capturedOffline` records that distinction
+ * so the PDF can state where the record came from.
+ *
+ * Nobody is notified: the decision was already taken and communicated offline.
+ */
+export const captureOfflineEvaluation = async (req: Request, res: Response) => {
+  try {
+    if (!(await canManage(req))) return res.status(403).json({ error: 'Forbidden' });
+    const me = empId(req);
+
+    const {
+      employeeId,
+      evaluationId,
+      ratings,
+      strongPoints,
+      improvementPoints,
+      recommendation,
+      managerComments,
+      employeeComments,
+      decision,
+      hrComments,
+      evaluationDate,
+      hrDecidedAt,
+      managerId,
+    } = req.body ?? {};
+
+    /* ── Locate or create the round ──────────────────────────────────────── */
+
+    let row = evaluationId
+      ? await prisma.probationEvaluation.findUnique({ where: { id: Number(evaluationId) } })
+      : null;
+
+    if (evaluationId && !row) return res.status(404).json({ error: 'Evaluation not found' });
+    if (row && row.status === 'COMPLETED') {
+      return res.status(400).json({ error: 'This evaluation is already completed' });
+    }
+
+    const targetEmployeeId = row?.employeeId ?? Number(employeeId);
+    if (!targetEmployeeId) {
+      return res.status(400).json({ error: 'employeeId or evaluationId is required' });
+    }
+
+    const emp = await prisma.employee.findUnique({
+      where: { id: targetEmployeeId },
+      select: { ...EMPLOYEE_SELECT, dateOfJoining: true },
+    });
+    if (!emp) return res.status(404).json({ error: 'Employee not found' });
+
+    /* ── Validate the transcription ──────────────────────────────────────── */
+
+    let parsedRatings;
+    try {
+      parsedRatings = normaliseRatings(ratings);
+    } catch (e: any) {
+      return res.status(400).json({ error: e.message });
+    }
+
+    const strong = String(strongPoints ?? '').trim();
+    const improve = String(improvementPoints ?? '').trim();
+    if (!strong) return res.status(400).json({ error: 'Strong points are required' });
+    if (!improve) return res.status(400).json({ error: 'Suggestions / areas for improvement are required' });
+
+    const valid: ProbationOutcome[] = ['CONFIRM', 'EXTEND', 'TERMINATE', 'DEPARTMENT_TRANSFER'];
+    if (!valid.includes(recommendation)) {
+      return res.status(400).json({ error: `recommendation must be one of ${valid.join(', ')}` });
+    }
+    if (!valid.includes(decision)) {
+      return res.status(400).json({ error: `decision must be one of ${valid.join(', ')}` });
+    }
+
+    const mgrComments = String(managerComments ?? '').trim();
+    if (recommendation !== 'CONFIRM' && !mgrComments) {
+      return res.status(400).json({ error: "The manager's comments are required for this recommendation" });
+    }
+    const hrText = String(hrComments ?? '').trim();
+    if (!hrText) return res.status(400).json({ error: 'HR comments are required' });
+
+    /* ── Dates come off the paper, and must be sane ──────────────────────── */
+
+    const now = new Date();
+    if (!evaluationDate) return res.status(400).json({ error: 'The date the manager signed the form is required' });
+
+    const signedOn = new Date(evaluationDate);
+    if (Number.isNaN(signedOn.getTime())) return res.status(400).json({ error: 'evaluationDate is not a valid date' });
+    if (signedOn.getTime() > now.getTime()) {
+      return res.status(400).json({ error: 'The evaluation date cannot be in the future' });
+    }
+    if (signedOn.getTime() < new Date(emp.dateOfJoining).getTime()) {
+      return res.status(400).json({ error: 'The evaluation date cannot be before the employee joined' });
+    }
+
+    const approvedOn = hrDecidedAt ? new Date(hrDecidedAt) : signedOn;
+    if (Number.isNaN(approvedOn.getTime())) return res.status(400).json({ error: 'hrDecidedAt is not a valid date' });
+    if (approvedOn.getTime() > now.getTime()) {
+      return res.status(400).json({ error: 'The HR approval date cannot be in the future' });
+    }
+    if (approvedOn.getTime() < signedOn.getTime()) {
+      return res.status(400).json({ error: 'HR cannot have approved the form before the manager signed it' });
+    }
+
+    /* ── Create the round if this is pre-cutoff backlog ───────────────────── */
+
+    const openRecord = await prisma.probationRecord.findFirst({
+      where: { employeeId: targetEmployeeId, status: 'IN_PROGRESS' },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, endDate: true },
+    });
+
+    if (!row) {
+      const lastRound = await prisma.probationEvaluation.findFirst({
+        where: { employeeId: targetEmployeeId },
+        orderBy: { round: 'desc' },
+        select: { round: true, status: true },
+      });
+      if (lastRound && lastRound.status !== 'COMPLETED' && lastRound.status !== 'CANCELLED') {
+        return res.status(400).json({
+          error: 'This employee already has an open evaluation — capture against that one instead',
+        });
+      }
+
+      row = await prisma.probationEvaluation.create({
+        data: {
+          employeeId: targetEmployeeId,
+          probationRecordId: openRecord?.id ?? null,
+          round: (lastRound?.round ?? 0) + 1,
+          status: 'PENDING_MANAGER',
+          // The window the paper form actually covered.
+          dueDate: probationDueDate(emp, openRecord?.endDate ?? null),
+          managerId: managerId ? Number(managerId) : resolveProbationManagerId(emp),
+        },
+      });
+    }
+
+    /* ── Apply the outcome using the PAPER dates ─────────────────────────── */
+
+    const nextReviewDate = decision === 'EXTEND' ? addMonths(signedOn, EXTENSION_MONTHS) : null;
+
+    const outcome = await applyProbationOutcome({
+      employeeId: targetEmployeeId,
+      outcome: decision,
+      decidedBy: me,
+      remarks: hrText,
+      newEndDate: nextReviewDate,
+      extendFrom: signedOn,
+      decidedOn: approvedOn,
+      audit: {
+        ...auditCtxFromReq(req),
+        reason: `Probation decision captured from signed paper form dated ${fmt(signedOn)}: ${decision}`,
+      },
+    });
+
+    const updated = await prisma.probationEvaluation.update({
+      where: { id: row.id },
+      data: {
+        status: 'COMPLETED',
+        capturedOffline: true,
+        ratings: parsedRatings,
+        strongPoints: strong,
+        improvementPoints: improve,
+        managerRecommendation: recommendation,
+        managerComments: mgrComments || null,
+        employeeComments: String(employeeComments ?? '').trim() || null,
+        managerId: managerId ? Number(managerId) : row.managerId,
+        evaluationDate: signedOn,
+        // When HR keyed it in — NOT when the manager signed.
+        submittedAt: now,
+        hrDecision: decision,
+        hrComments: hrText,
+        hrDecidedBy: me,
+        hrDecidedAt: approvedOn,
+        nextReviewDate,
+        probationRecordId: outcome.openRecordId ?? row.probationRecordId,
+      },
+      include: { employee: { select: EMPLOYEE_SELECT }, manager: { select: MANAGER_SELECT } },
+    });
+
+    // Outside the transaction, as elsewhere — revoking access must not be able
+    // to roll back a recorded decision.
+    if (decision === 'TERMINATE') {
+      try {
+        await revokeEmployeeAccess(targetEmployeeId, 'Probation terminated');
+      } catch (e) {
+        console.error('[probation] revokeEmployeeAccess failed:', e);
+      }
+    }
+
+    res.json({ ...updated, appliedOutcome: outcome });
+  } catch (err: any) {
+    console.error('[probation] captureOfflineEvaluation failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
    PDF
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -753,11 +987,30 @@ export const downloadEvaluationPdf = async (req: Request, res: Response) => {
       ? await prisma.employee.findUnique({ where: { id: row.hrDecidedBy }, select: MANAGER_SELECT })
       : null;
 
+    // Earlier rounds are summarised on the document so a confirmation after an
+    // extension carries the whole probation history on one sheet for the file.
+    const previousRounds = await prisma.probationEvaluation.findMany({
+      where: { employeeId: row.employeeId, round: { lt: row.round }, status: 'COMPLETED' },
+      orderBy: { round: 'asc' },
+      include: { manager: { select: MANAGER_SELECT } },
+    });
+
     const pdf = await buildProbationEvaluationPdf({
       evaluation: row as any,
       employee: row.employee as any,
       manager: row.manager as any,
       hrDecidedByName: hrDecidedByEmp ? fullName(hrDecidedByEmp) : null,
+      previousRounds: previousRounds.map((p) => ({
+        round: p.round,
+        evaluationDate: p.evaluationDate,
+        managerName: p.manager ? fullName(p.manager) : null,
+        ratings: p.ratings,
+        managerRecommendation: p.managerRecommendation,
+        hrDecision: p.hrDecision,
+        nextReviewDate: p.nextReviewDate,
+        improvementPoints: p.improvementPoints,
+        capturedOffline: p.capturedOffline,
+      })),
     });
 
     const code = row.employee?.employeeCode ?? row.employeeId;
