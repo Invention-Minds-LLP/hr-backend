@@ -11,6 +11,7 @@ import {
   submitHrDecision,
   downloadEvaluationPdf,
   generateDueEvaluations,
+  captureOfflineEvaluation,
 } from './probation.controller';
 
 const router = Router();
@@ -25,6 +26,9 @@ const canView = requirePermission('admin.probation.view', 'admin.probation.manag
 router.get('/categories', canView, getCategories);
 router.get('/due', canView, listDueEmployees);
 router.post('/generate', canView, generateDueEvaluations);
+// HR transcribing a decision signed on paper — creates the round when none
+// exists, which is how the pre-cutoff backlog is cleared.
+router.post('/capture', canView, captureOfflineEvaluation);
 
 router.get('/evaluations', canView, listEvaluations);
 router.get('/evaluations/:id', canView, getEvaluation);

@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { prisma } from '../lib/prisma';
 import { createNotification } from '../api/notifications/notifications.controller';
 import { openDueEvaluations } from '../api/probation/probation.controller';
-import { REMINDER_OFFSETS } from '../lib/probation';
+import { REMINDER_OFFSETS, probationCutoffDate, localDateStr } from '../lib/probation';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Probation evaluation cron.
@@ -75,9 +75,10 @@ export function initProbationEvaluationCron() {
   cron.schedule('15 9 * * *', async () => {
     try {
       const opened = await openDueEvaluations();
-      if (opened.opened > 0) {
+      if (opened.opened > 0 || opened.beforeCutoff > 0) {
         console.log(
-          `[CRON] probation evaluations: opened=${opened.opened} (unassigned=${opened.unassigned})`,
+          `[CRON] probation evaluations: opened=${opened.opened} (unassigned=${opened.unassigned})` +
+            (opened.beforeCutoff > 0 ? `, ${opened.beforeCutoff} left for HR as pre-cutoff backlog` : ''),
         );
       }
     } catch (e) {
@@ -91,5 +92,14 @@ export function initProbationEvaluationCron() {
       console.error('[CRON] sendProbationReminders failed', e);
     }
   });
-  console.log('🕒 Probation evaluation cron scheduled (09:15 daily)');
+  // State the cutoff at boot: whether historical probations get forms opened is
+  // the difference between a quiet go-live and every manager being chased about
+  // employees confirmed on paper months ago, so it must not be silent.
+  const cutoff = probationCutoffDate();
+  console.log(
+    '🕒 Probation evaluation cron scheduled (09:15 daily) — ' +
+      (cutoff
+        ? `only probations closing on/after ${localDateStr(cutoff)}`
+        : 'NO cutoff set (PROBATION_CUTOFF_DATE), every overdue probation will be opened'),
+  );
 }

@@ -259,6 +259,24 @@ export const config = {
     referralProbationDays: int("REFERRAL_PROBATION_DAYS", 90),
   },
 
+  // ── Probation confirmation ────────────────────────────────────────────────
+  probation: {
+    /**
+     * Go-live cutoff, as YYYY-MM-DD. The daily job will not open an evaluation
+     * for a probation that closed BEFORE this date.
+     *
+     * Without it, switching the module on retro-opens a form for every employee
+     * whose probation has ever lapsed — including everyone already confirmed on
+     * paper — and notifies their manager about each one. Those cases are
+     * backlog: HR records the signed decision from the Probation screen instead.
+     *
+     * Empty = no cutoff (every overdue probation is opened). Deliberate, so a
+     * deployment that forgets to set it misses nobody; `startSchedulers` logs
+     * which mode is active.
+     */
+    cutoffDate: optional("PROBATION_CUTOFF_DATE"),
+  },
+
   // ── Employee code generation ──────────────────────────────────────────────
   // Kept as raw strings: callers apply their own defaults ('EMP' / '001' / '1')
   // and coercion, which differ between the employee and recruiting flows.

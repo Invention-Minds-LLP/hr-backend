@@ -11,6 +11,10 @@ import {
   RECRUITER_ROLES, RECRUITER_DEPTS,
 } from './recruiting.controller';
 import { authenticateToken, requireRoleOrDept } from '../../middleware/authMiddleware';
+import {
+  listRoundTemplates, createRoundTemplate, updateRoundTemplate, deleteRoundTemplate,
+  getJobRounds, setJobRounds, getApplicationRounds,
+} from './interviewRounds.controller';
 
 const rc = new RecruitingController();
 export const recruitingRouter = Router();
@@ -83,6 +87,15 @@ recruitingRouter.patch('/offers/:id/schedule-join', ...recruiter, rc.scheduleJoi
 recruitingRouter.post('/offers/:id/mark-joined',   ...recruiter, rc.markJoined);
 recruitingRouter.post('/offers/:id/mark-no-show',  ...recruiter, rc.markNoShow);
 
+// Interview round configuration (templates in Settings, snapshot per job)
+recruitingRouter.get('/round-templates', ...recruiter, listRoundTemplates);
+recruitingRouter.post('/round-templates', ...recruiter, createRoundTemplate);
+recruitingRouter.put('/round-templates/:id', ...recruiter, updateRoundTemplate);
+recruitingRouter.delete('/round-templates/:id', ...recruiter, deleteRoundTemplate);
+recruitingRouter.get('/jobs/:id/rounds', ...recruiter, getJobRounds);
+recruitingRouter.put('/jobs/:id/rounds', ...recruiter, setJobRounds);
+recruitingRouter.get('/applications/:id/rounds', ...recruiter, getApplicationRounds);
+
 // Pipeline stats
 recruitingRouter.get('/pipeline-stats', ...recruiter, rc.pipelineStats);
 // Recruiter dashboard — funnel, time-to-hire, source effectiveness, panel load
@@ -105,7 +118,17 @@ recruitingRouter.post('/candidate/tests/:assignedId/submit', authenticateToken, 
 
 // Test review (recruiter)
 recruitingRouter.post('/applications/:id/tests/:aid/review', ...recruiter, rc.reviewCandidateTest);
+// Evaluator's view of a submission + manual marks for descriptive answers.
+// Not recruiter-only: the head of the job's department and the candidate's
+// panel members may mark too, so the check is per-record inside the handler
+// (candidateTestAccess). The PASS/FAIL decision above stays recruiter-guarded.
+recruitingRouter.get('/candidate/tests/:assignedId/overview', authenticateToken, rc.getCandidateTestOverview);
+recruitingRouter.post('/candidate/tests/:assignedId/evaluate', authenticateToken, rc.evaluateCandidateTest);
 recruitingRouter.get('/tests/review-queue', ...recruiter, rc.getTestReviewQueue);
+// Every candidate's assigned test, for the Candidate Tests list. Scoped
+// inside the handler: HR sees all, a department head or panel member sees
+// only the candidates they may mark.
+recruitingRouter.get('/tests/assigned', authenticateToken, rc.listCandidateAssignedTests);
 
 // Interview detail / feedback / list (panelist + recruiter)
 recruitingRouter.get('/interview/:id/summary', authenticateToken, getSummary);

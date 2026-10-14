@@ -24,6 +24,7 @@ import bcrypt from "bcryptjs";
 import cron from 'node-cron';
 import { syncEmployeeToDirectory, deactivateEmployeeInDirectory } from "../../lib/directory";
 import { allocateNewJoineeLeave, getLeaveStartMode } from "../leave/leave.controller";
+import { generateFixedShiftsForEmployee } from "../shift/shift.controller";
 import { config } from "../../config";
 
 
@@ -478,6 +479,21 @@ export const createEmployee = async (req: AuthenticatedRequest, res: Response) =
           startDate: new Date()
         }
       });
+      // Allot this month's daily shifts now. Without this the rows only appear
+      // on a server restart or the 1st-of-month cron, so a mid-month joiner has
+      // no shift on any remaining date of the month.
+      try {
+        const created = await generateFixedShiftsForEmployee(newEmployee.id);
+        console.log(
+          `Fixed-shift allotment for emp ${newEmployee.id}: ${created} day(s) created`
+        );
+      } catch (err) {
+        // Non-fatal: don't fail employee creation if shift allotment fails.
+        console.error(
+          `Fixed-shift allotment failed for emp ${newEmployee.id}:`,
+          err
+        );
+      }
     } else if (shiftMode === 'ROTATIONAL' && rotationPatternId) {
       await prisma.employeeShiftSetting.create({
         data: {
@@ -814,6 +830,11 @@ export const updateEmployee = async (req: AuthenticatedRequest, res: Response) =
       designationId,
       branchId,
       roleId,
+      // Pulled out of the rest-spread: it's the multiselect's id list, not an
+      // Employee column, and `prisma.employee.update` rejects unknown args —
+      // leaving it in failed every save with a 500. Applied as a relation
+      // `set` further down.
+      headedDepartmentIds,
       shiftMode,             // 'FIXED' | 'ROTATIONAL' | undefined
       fixedShiftId,          // number | undefined
       rotationPatternId,     // number | undefined

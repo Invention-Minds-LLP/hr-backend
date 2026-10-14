@@ -21,6 +21,7 @@ import { prisma } from './prisma';
 import { addMonths } from './appraisal-cycle';
 import { updateEmployeeWithAudit } from './employeeAudit';
 import type { AuditContext } from './employeeAudit';
+import { config } from '../config';
 
 /** Probation length when the employee carries no explicit probation dates. */
 export const DEFAULT_PROBATION_MONTHS = 6;
@@ -30,6 +31,44 @@ export const EXTENSION_MONTHS = 3;
 
 /** Days after the due date at which an unfilled form is chased. */
 export const REMINDER_OFFSETS = [3, 7, 14];
+
+/**
+ * Go-live cutoff from config, or null when none is set.
+ *
+ * Parsed once and validated: a malformed PROBATION_CUTOFF_DATE must not quietly
+ * become `Invalid Date`, because every comparison against it returns false and
+ * the cutoff would silently stop applying.
+ */
+export function probationCutoffDate(): Date | null {
+  const raw = config.probation.cutoffDate?.trim();
+  if (!raw) return null;
+  const d = new Date(`${raw}T00:00:00`);
+  if (Number.isNaN(d.getTime())) {
+    console.warn(`[probation] PROBATION_CUTOFF_DATE="${raw}" is not a valid date — ignoring the cutoff.`);
+    return null;
+  }
+  return d;
+}
+
+/**
+ * True when a probation closing on `dueDate` predates the module going live, so
+ * the daily job must leave it alone. HR captures these from the paper form.
+ */
+export function isBeforeCutoff(dueDate: Date, cutoff: Date | null): boolean {
+  return !!cutoff && dueDate.getTime() < cutoff.getTime();
+}
+
+/**
+ * YYYY-MM-DD in the PROCESS timezone.
+ *
+ * Not `toISOString().slice(0,10)`: the cutoff is local midnight, so in IST that
+ * converts back to the previous day and the boot log would advertise a cutoff
+ * one day earlier than the one actually being applied.
+ */
+export function localDateStr(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
 
 export type ProbationRating = 'E' | 'M' | 'B';
 

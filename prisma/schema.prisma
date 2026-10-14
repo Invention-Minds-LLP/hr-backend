@@ -307,11 +307,11 @@ model Document {
 }
 
 model Department {
-  id                      Int                       @id @default(autoincrement())
-  name                    String                    @unique
+  id    Int        @id @default(autoincrement())
+  name  String     @unique
   /// Employees who head this department. An HOD can head several, and
   /// clearance + requisition visibility follows this, not Employee.departmentId.
-  heads                   Employee[]                @relation("DepartmentHeads")
+  heads Employee[] @relation("DepartmentHeads")
 
   /// When somebody FROM this department leaves, these departments have to clear
   /// them. Set per department so a nurse's exit and an accountant's exit don't
@@ -348,6 +348,7 @@ model Department {
   resignationClearances   ResignationClearance[]
   clearanceTemplateItems  ClearanceTemplateItem[]
   dataScopes              EmployeeDataScope[]
+  interviewRoundTemplates InterviewRoundTemplate[]
 }
 
 model Branch {
@@ -764,6 +765,10 @@ model Question {
   type             String
   weight           Int
   correctAnswerIds String?
+  /// Reference answer for a Descriptive question, shown to whoever evaluates
+  /// the attempt. It is never compared to the candidate's answer — a written
+  /// answer won't match word for word, so the score stays manual.
+  modelAnswer      String?          @db.Text
   evaluationTestId Int?
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @default(now()) @updatedAt
@@ -808,6 +813,8 @@ model EvaluationTest {
   CandidateAssignedTest CandidateAssignedTest[]
   questions             Question[]
   TrainingTest          TrainingTest[]
+  roundTemplateItems    InterviewRoundTemplateItem[]
+  jobRounds             JobInterviewRound[]
 }
 
 model EvaluationAttempt {
@@ -1421,6 +1428,8 @@ model Job {
   applications          Application[]
   department            Department           @relation(fields: [departmentId], references: [id])
   ManpowerRequisition   ManpowerRequisition?
+  /// The round sequence this job runs, copied from a template at creation.
+  interviewRounds       JobInterviewRound[]
 
   /// Archive: keep the row, take it out of the working lists. Deliberately not
   /// folded into `status` — that is business state the lists still show, so
@@ -1577,6 +1586,12 @@ model Interview {
   createdAt               DateTime               @default(now())
   updatedAt               DateTime               @default(now()) @updatedAt
   candidateAssignedTestId Int?
+  /// Which configured round (JobInterviewRound.seq) this interview fulfils.
+  /// Null for interviews scheduled before rounds were configurable.
+  roundSeq                Int?
+  /// Set when HR schedules a round ahead of its turn — the reason is required
+  /// so an out-of-order process is visible rather than silent.
+  outOfOrderReason        String?
   application             Application            @relation(fields: [applicationId], references: [id])
   candidateAssignedTest   CandidateAssignedTest? @relation(fields: [candidateAssignedTestId], references: [id])
   InterviewFeedback       InterviewFeedback[]
@@ -1868,7 +1883,15 @@ model CandidateAssignedTest {
   startedAt      DateTime?
   completedAt    DateTime?
   score          Float?
-  response       String?
+  // The submitted answers as JSON, same shape as EvaluationAttempt.response.
+  // LongText because the default varchar(191) could not hold a single
+  // descriptive answer, so every submission with one failed to save.
+  response       String?        @db.LongText
+  /// Who marked the written answers, and when. Deliberately separate from the
+  /// review fields below: a department head or panel member may do the marking,
+  /// but only HR sets the PASS/FAIL decision.
+  evaluatedBy    Int?
+  evaluatedAt    DateTime?
   // Same story — kept as String for forward-compat. Allowed: PASS / FAIL / null.
   reviewDecision String?
   reviewNote     String?
@@ -1956,10 +1979,10 @@ model OvertimeApproval {
   // ── Completion acknowledgement ───────────────────────────────────────────
   // Approval sanctions the hours; acknowledgement confirms the work landed.
   // null = not yet reviewed, true = done, false = not done.
-  taskCompleted     Boolean?
-  taskAckBy         Int?
-  taskAckAt         DateTime?
-  taskAckNote       String?   @db.Text
+  taskCompleted Boolean?
+  taskAckBy     Int?
+  taskAckAt     DateTime?
+  taskAckNote   String?   @db.Text
 
   // ── HR sign-off (stage two) ──────────────────────────────────────────────
   // On an employee-raised request `managerStatus` is the manager's decision and
@@ -3510,6 +3533,13 @@ model ProbationEvaluation {
   /// CompOffCredit.expiryRemindersSent — a re-run can never double-notify.
   remindersSent String?
 
+  /// True when HR transcribed this from a signed paper form rather than the
+  /// manager filling it in here — the go-live backlog, and any decision taken
+  /// offline afterwards. The dates above are then the PAPER dates; `updatedAt`
+  /// and the employee audit log say who keyed it in and when, which is why
+  /// there is no separate capturedBy/capturedAt pair.
+  capturedOffline Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
@@ -4704,25 +4734,25 @@ model StatutoryConfig {
   notes         String?
 
   // ── Provident Fund ─────────────────────────────────────────────────────────
-  pfEnabled         Boolean @default(true)
-  pfEmployeeRate    Float   @default(12) // % of PF wage
-  pfEmployerRate    Float   @default(12)
-  pfWageCeiling     Float   @default(15000)
+  pfEnabled                Boolean @default(true)
+  pfEmployeeRate           Float   @default(12) // % of PF wage
+  pfEmployerRate           Float   @default(12)
+  pfWageCeiling            Float   @default(15000)
   // true  -> PF wage is capped at pfWageCeiling (statutory minimum contribution)
   // false -> PF is computed on full basic (current HRMINDS behaviour)
-  pfCapAtCeiling    Boolean @default(false)
+  pfCapAtCeiling           Boolean @default(false)
   // Only read when pfCapAtCeiling is false: employee PF stays on full basic but
   // the employer share is restricted to pfWageCeiling (a common arrangement).
-  pfEmployerCapAtCeiling Boolean @default(false)
-  pfAdminChargeRate Float   @default(0.5) // employer, % of PF wage
+  pfEmployerCapAtCeiling   Boolean @default(false)
+  pfAdminChargeRate        Float   @default(0.5) // employer, % of PF wage
   /// Monthly minimum admin charge for the establishment: the first applies when
   /// at least one member contributed in the month, the second when none did.
-  pfAdminMinCharge         Float @default(500)
-  pfAdminMinChargeInactive Float @default(75)
-  edliRate          Float   @default(0.5) // employer, % of PF wage
+  pfAdminMinCharge         Float   @default(500)
+  pfAdminMinChargeInactive Float   @default(75)
+  edliRate                 Float   @default(0.5) // employer, % of PF wage
   // Split of the employer 12%: 8.33% to pension (EPS) capped at the ceiling,
   // remainder to PF. Needed for the ECR file, not for net pay.
-  epsRate           Float   @default(8.33)
+  epsRate                  Float   @default(8.33)
 
   // ── ESI ────────────────────────────────────────────────────────────────────
   esiEnabled      Boolean @default(true)
@@ -5346,4 +5376,74 @@ model PayrollDispatch {
   @@index([payrollRunId])
   @@index([companyId])
   @@index([sentAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Interview round configuration
+//
+//  Which rounds a candidate goes through, and in what order, used to be
+//  hardcoded in the frontend as Panel → Test → Management. Clients run it the
+//  other way round for some roles (written test first, panel after), so the
+//  sequence is now configured.
+//
+//  A template is the reusable definition; JobInterviewRound is the copy taken
+//  when a job is created. Editing a template later must not reshuffle jobs
+//  already half-way through their hiring, hence the snapshot.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model InterviewRoundTemplate {
+  id           Int                          @id @default(autoincrement())
+  name         String
+  /// Optional: offer this template first for jobs in this department.
+  departmentId Int?
+  /// The fallback for a job whose department has no template of its own.
+  isDefault    Boolean                      @default(false)
+  isActive     Boolean                      @default(true)
+  createdBy    Int?
+  createdAt    DateTime                     @default(now())
+  updatedAt    DateTime                     @default(now()) @updatedAt
+  department   Department?                  @relation(fields: [departmentId], references: [id])
+  items        InterviewRoundTemplateItem[]
+
+  @@index([departmentId])
+  @@index([isDefault])
+}
+
+model InterviewRoundTemplateItem {
+  id         Int                    @id @default(autoincrement())
+  templateId Int
+  /// 1-based position in the sequence.
+  seq        Int
+  /// TEST | PANEL | MANAGEMENT — String to match the codebase's
+  /// "String-enum constants" convention (see recruiting.constants.ts).
+  type       String
+  /// What this round is called on screen, e.g. "Technical Panel".
+  name       String
+  /// For a TEST round: which test to assign. Null means HR picks at assign time.
+  testId     Int?
+  isRequired Boolean                @default(true)
+  template   InterviewRoundTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  test       EvaluationTest?        @relation(fields: [testId], references: [id])
+
+  @@unique([templateId, seq])
+  @@index([templateId])
+  @@index([testId])
+}
+
+model JobInterviewRound {
+  id         Int             @id @default(autoincrement())
+  jobId      Int
+  seq        Int
+  type       String
+  name       String
+  testId     Int?
+  isRequired Boolean         @default(true)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @default(now()) @updatedAt
+  job        Job             @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  test       EvaluationTest? @relation(fields: [testId], references: [id])
+
+  @@unique([jobId, seq])
+  @@index([jobId])
+  @@index([testId])
 }
