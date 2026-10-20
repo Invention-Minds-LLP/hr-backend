@@ -347,6 +347,20 @@ export const config = {
     bruteForceThreshold: int("SECURITY_BRUTEFORCE_THRESHOLD", 10),
     // Days to keep ApiAccessLog rows; a daily cron prunes older rows.
     retentionDays: int("ACCESS_LOG_RETENTION_DAYS", 90),
+
+    // ── DPDP controls (see src/lib/accountSecurity.ts) ──
+    // Google Authenticator at web login for these departments (matched by
+    // Department.name, case-insensitive) and these role ids. The HR department
+    // (HR_DEPARTMENT_ID) is always included. MFA_ENABLED=false switches it off.
+    mfaEnabled: bool("MFA_ENABLED", true),
+    mfaDepartments: list("MFA_DEPARTMENTS", ["Human Resources", "HR", "Management", "Operations"]),
+    mfaRoleIds: list("MFA_ROLE_IDS", ["4"]).map(Number).filter(Number.isFinite),
+    // Key that encrypts stored authenticator secrets. Changing it forces every
+    // enrolled user to re-scan the QR code. Falls back to JWT_SECRET if unset.
+    mfaEncKey: recommended("MFA_ENC_KEY"),
+    // Email OTP + captcha + reason before every download, logged in DownloadLog.
+    // DOWNLOAD_GATE_ENABLED=false switches it off.
+    downloadGateEnabled: bool("DOWNLOAD_GATE_ENABLED", true),
   },
 
   // ── Feature flags ─────────────────────────────────────────────────────────
