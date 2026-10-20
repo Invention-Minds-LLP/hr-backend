@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticateToken, requirePermission } from '../../middleware/authMiddleware';
+import { requireDownloadGrant } from '../../middleware/requireDownloadGrant';
 import {
   getCategories,
   listEvaluations,
@@ -32,7 +33,7 @@ router.post('/capture', canView, captureOfflineEvaluation);
 
 router.get('/evaluations', canView, listEvaluations);
 router.get('/evaluations/:id', canView, getEvaluation);
-router.get('/evaluations/:id/pdf', canView, downloadEvaluationPdf);
+router.get('/evaluations/:id/pdf', canView, requireDownloadGrant, downloadEvaluationPdf);
 router.post('/evaluations/:id/manager-submit', canView, submitManagerEvaluation);
 router.post('/evaluations/:id/hr-decision', canView, submitHrDecision);
 router.patch('/evaluations/:id/manager', canView, assignManager);

@@ -11,6 +11,7 @@ import {
   RECRUITER_ROLES, RECRUITER_DEPTS,
 } from './recruiting.controller';
 import { authenticateToken, requireRoleOrDept } from '../../middleware/authMiddleware';
+import { requireDownloadGrant } from '../../middleware/requireDownloadGrant';
 import {
   listRoundTemplates, createRoundTemplate, updateRoundTemplate, deleteRoundTemplate,
   getJobRounds, setJobRounds, getApplicationRounds,
@@ -70,7 +71,7 @@ recruitingRouter.post('/offers/:id/send',     ...recruiter, rc.sendOffer);
 // a role guard here couldn't, since the answer depends on which offer it is.
 // Candidates can also fetch their own letter via the same endpoint
 // (authenticated, but not role-gated — same pattern as /offers/:id/view).
-recruitingRouter.get('/offers/:id/pdf',       authenticateToken, rc.downloadOfferLetterPdf);
+recruitingRouter.get('/offers/:id/pdf',       authenticateToken, requireDownloadGrant, rc.downloadOfferLetterPdf);
 recruitingRouter.post('/offers/:id/preview',  ...recruiter, rc.previewOfferLetterPdf); // render PDF from unsaved values
 // Candidate actions. Route-level auth is `authenticateToken` because the
 // legitimate caller is EITHER the owning candidate OR recruiter-capable staff

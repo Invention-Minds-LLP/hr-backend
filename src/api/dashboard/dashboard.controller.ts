@@ -1003,7 +1003,7 @@ export class DashboardController {
 
         // now add OT pending (HR sees only manager-approved records)
         const otPending = await prisma.overtimeApproval.count({
-            where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart, minutes: { gt: 60 } } as any
+            where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart, minutes: { gt: 60 }, source: { not: 'EMPLOYEE_REQUEST' } } as any
         });
 
         attention.push({
@@ -1022,6 +1022,7 @@ export class DashboardController {
                     managerStatus: 'PENDING',
                     date: yesterdayStart,
                     minutes: { gt: 60 },
+                    source: { not: 'EMPLOYEE_REQUEST' },
                     employee: { reportingManager: userEmpId },
                 } as any,
             });
@@ -1988,7 +1989,8 @@ export class DashboardController {
         }
         if (key === 'otPending') {
             const items = await prisma.overtimeApproval.findMany({
-                where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart, minutes: { gt: 60 } } as any,
+                // Legacy sources only — see getHROtPending.
+                where: { status: 'PENDING', managerStatus: 'APPROVED', date: yesterdayStart, minutes: { gt: 60 }, source: { not: 'EMPLOYEE_REQUEST' } } as any,
                 include: {
                     employee: { select: { firstName: true, lastName: true, employeeCode: true, Department: { select: { name: true } } } }
                 }
@@ -2024,6 +2026,8 @@ export class DashboardController {
                     managerStatus: 'PENDING',
                     date: yesterdayStart,
                     minutes: { gt: 60 },
+                    // Legacy sources only — see getManagerOtPending.
+                    source: { not: 'EMPLOYEE_REQUEST' },
                     ...(userEmpId ? { employee: { reportingManager: userEmpId } } : {}),
                 } as any,
                 include: {
@@ -2088,10 +2092,14 @@ export class DashboardController {
             return res.status(400).json({ error: 'No OT IDs provided' });
         }
 
+        // Write the past tense. This used to store the raw action ('APPROVE'),
+        // which no downstream filter matches — payroll, the OT reports and the
+        // management rollups all look for 'APPROVED', so HR-approved overtime
+        // was approved into a dead end.
         const updated = await prisma.overtimeApproval.updateMany({
             where: { id: { in: ids }, status: 'PENDING', managerStatus: 'APPROVED' } as any,
             data: {
-                status: action,
+                status: action === 'APPROVE' ? 'APPROVED' : 'REJECTED',
                 approvedAt: new Date(),
             },
         });
@@ -2102,10 +2110,16 @@ export class DashboardController {
     getManagerOtPending = asyncHandler(async (req, res) => {
         const userEmpId = (req as any).user?.empId;
 
+        // Employee-raised requests are deliberately excluded: this queue's
+        // actions (approveOrRejectOTManager) only move managerStatus, which
+        // would leave such a row at status 'REQUESTED' — invisible to the HR
+        // queue and unpayable by payroll. They have their own two-step flow in
+        // api/overtime, surfaced separately on the same page.
         const items = await prisma.overtimeApproval.findMany({
             where: {
                 managerStatus: 'PENDING',
                 minutes: { gt: 60 },
+                source: { not: 'EMPLOYEE_REQUEST' },
                 ...(userEmpId ? { employee: { reportingManager: userEmpId } } : {}),
             } as any,
             include: {
@@ -2137,11 +2151,14 @@ export class DashboardController {
     });
 
     getHROtPending = asyncHandler(async (req, res) => {
+        // Employee-raised OT is manager-acknowledged, not HR-approved — it never
+        // enters this queue.
         const items = await prisma.overtimeApproval.findMany({
             where: {
                 managerStatus: 'APPROVED',
                 status: 'PENDING',
                 minutes: { gt: 60 },
+                source: { not: 'EMPLOYEE_REQUEST' },
             } as any,
             include: {
                 employee: {
@@ -2178,7 +2195,8 @@ export class DashboardController {
         const items = await prisma.overtimeApproval.findMany({
             where: {
                 employeeId: Number(empId),
-                status: 'APPROVE',
+                // 'APPROVE' is the legacy spelling left on historic rows.
+                status: { in: ['APPROVED', 'APPROVE'] },
             } as any,
             orderBy: { date: 'desc' },
         });
@@ -3486,24 +3504,34 @@ export const extendProbation = async (req: Request, res: Response) => {
 export const notifyExpiringDocs = async (req: Request, res: Response) => {
     try {
         const { documentIds } = req.body;
+        if (!Array.isArray(documentIds) || !documentIds.length) {
+            return res.status(400).json({ error: "documentIds required" });
+        }
+
         // fetch employees for those documents
         const docs = await prisma.document.findMany({
-            where: { id: { in: documentIds } },
-            select: { id: true, employeeId: true, title: true, expiryDate: true },
+            where: { id: { in: documentIds.map(Number) } },
+            select: { id: true, employeeId: true, title: true, type: true, expiryDate: true },
         });
 
-        // create notifications
-        await prisma.notification.createMany({
-            data: docs.map((doc) => ({
-                employeeId: doc.employeeId,
-                message: `Your document "${doc.title}" is expiring on ${fmtDate(doc.expiryDate)}.`,
-                channel: "EMAIL",
-            })),
-        });
+        // Routed through createNotification (not notification.createMany) so each
+        // one actually reaches the employee: SSE broadcast to an open bell, FCM
+        // push to the mobile app, and the inactive-employee guard. The old
+        // createMany wrote channel "EMAIL" rows that nothing ever delivered.
+        let notified = 0;
+        for (const doc of docs) {
+            const sentTo = await createNotification(
+                doc.employeeId,
+                `Your document "${doc.title || doc.type}" is expiring on ${fmtDate(doc.expiryDate)}. ` +
+                `Please share the renewed copy with HR before then.`,
+                "📄 Document expiring",
+            ).catch(() => null);
+            if (sentTo) notified++;
+        }
 
         console.log("Notified employees for expiring docs:", documentIds);
 
-        return res.json({ success: true, notified: docs.length });
+        return res.json({ success: true, notified });
 
     } catch (err) {
         console.error("Notify Docs Error:", err);

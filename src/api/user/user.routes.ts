@@ -1,13 +1,16 @@
 import { Router } from "express";
-import { adminResetPassword, createUser, listAllUsers, loginCandidate, loginInit, loginUser, logout, refreshAccessToken, resetMyPassword, setCandidatePassword, syncUsersFromEmployees, verifyCandidateOtp, verifyOtp } from "./user.controller";
+import { adminResetMfa, adminResetPassword, createUser, listAllUsers, loginCandidate, loginInit, loginMfa, loginUser, logout, refreshAccessToken, resetMyPassword, setCandidatePassword, syncUsersFromEmployees, verifyCandidateOtp, verifyOtp } from "./user.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
 
 router.post("/register", authenticateToken, createUser);
 router.post("/login",loginUser);
+// Google Authenticator step for HR / Management / Operations (see loginUser).
+router.post("/login/mfa", loginMfa);
 router.post("/reset-password", authenticateToken, resetMyPassword); // self-serve
 router.post("/admin/reset-password", authenticateToken, adminResetPassword); // admin only
+router.post("/admin/reset-mfa", authenticateToken, adminResetMfa); // HR only
 router.post("/candidate/set-password", authenticateToken,setCandidatePassword);
 // Candidate portal login is two-step: password sends an emailed OTP, the OTP
 // exchanges for the session token. /candidate/login no longer returns a token.

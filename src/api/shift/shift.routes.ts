@@ -45,6 +45,7 @@ import {
   exportShiftAdherenceReport,
 } from "./shift.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
+import { requireDownloadGrant } from "../../middleware/requireDownloadGrant";
 
 const router = Router();
 
@@ -129,11 +130,11 @@ router.delete('/month-lock', authenticateToken, reopenShiftMonth);
 
 /* HR monthly shift + attendance report */
 router.get('/attendance-report', authenticateToken, getMonthlyShiftAttendanceReport);
-router.get('/attendance-report/export', authenticateToken, exportMonthlyShiftAttendanceReport);
+router.get('/attendance-report/export', authenticateToken, requireDownloadGrant, exportMonthlyShiftAttendanceReport);
 
 /* HR shift adherence report (allotted vs actual shift) */
 router.get('/adherence-report', authenticateToken, getShiftAdherenceReport);
-router.get('/adherence-report/export', authenticateToken, exportShiftAdherenceReport);
+router.get('/adherence-report/export', authenticateToken, requireDownloadGrant, exportShiftAdherenceReport);
 
 
 export default router;

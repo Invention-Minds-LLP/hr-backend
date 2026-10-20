@@ -26,6 +26,14 @@ import {
   validateRefreshToken,
 } from "./auth.helpers";
 import { getEmployeeAccess } from "../../lib/employeeAccess";
+import {
+  SecurityError,
+  getMfaSetup,
+  readChallenge,
+  requiresMfa,
+  signChallenge,
+  verifyMfaCode,
+} from "../../lib/accountSecurity";
 
 // REGISTER / CREATE USER (linked to Employee)
 export const createUser = async (req: Request, res: Response) => {
@@ -89,9 +97,20 @@ export const createUser = async (req: Request, res: Response) => {
   }
 };
 
+const LOGIN_EMPLOYEE_SELECT = {
+  id: true,
+  departmentId: true,
+  photoUrl: true,
+  designation: true,
+  roleId: true,
+  gender: true,
+  employmentStatus: true,
+  role: { select: { name: true } },
+  Department: { select: { name: true } }
+} as const;
+
 // LOGIN USER
 export const loginUser = async (req: Request, res: Response) => {
-  console.log("Login attempt:", req.body);
   const ipAddress = getClientIp(req);
   const userAgent = req.headers["user-agent"] || undefined;
   try {
@@ -106,19 +125,9 @@ export const loginUser = async (req: Request, res: Response) => {
 
     const employee = await prisma.employee.findUnique({
       where: { employeeCode },
-      select: {
-        id: true,
-        departmentId: true,
-        photoUrl: true,
-        designation: true,
-        roleId: true,
-        gender: true,
-        employmentStatus: true,
-        role: { select: { name: true } },
-        Department: { select: { name: true } }
-      }
+      select: LOGIN_EMPLOYEE_SELECT
     })
-    
+
 
     if (!employee) return res.status(404).json({ error: "Employee not found" });
 
@@ -136,6 +145,95 @@ export const loginUser = async (req: Request, res: Response) => {
 
     if (!validPassword) return res.status(401).json({ error: "Invalid password" });
 
+    // HR / Management / Operations: the password alone is not a session. Hand
+    // back a 10-minute challenge; /users/login/mfa exchanges it + the Google
+    // Authenticator code for the real session.
+    if (requiresMfa({ departmentId: employee.departmentId, roleId: employee.roleId, departmentName: employee.Department?.name })) {
+      const step = user.totpEnabledAt ? 'mfa' : 'mfa_setup';
+      return res.json({
+        challenge: {
+          token: signChallenge(user.id),
+          step,
+          mfaSetup: step === 'mfa_setup' ? await getMfaSetup(user) : undefined,
+        }
+      });
+    }
+
+    return res.json(await issueWebSession(req, res, user, employee));
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Login failed" });
+  }
+};
+
+/** Step 2 for MFA users — POST /users/login/mfa { challenge, code } -> session. */
+export const loginMfa = async (req: Request, res: Response) => {
+  const ipAddress = getClientIp(req);
+  const userAgent = req.headers["user-agent"] || undefined;
+  try {
+    const userId = readChallenge(req.body?.challenge);
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(401).json({ error: "Your login session has expired. Please sign in again." });
+
+    const employee = await prisma.employee.findUnique({
+      where: { employeeCode: user.employeeCode },
+      select: LOGIN_EMPLOYEE_SELECT
+    });
+    if (!employee || (employee.employmentStatus !== "ACTIVE" && employee.employmentStatus !== "NOTICE_PERIOD")) {
+      return res.status(403).json({ error: "Your account is inactive. Please contact HR." });
+    }
+
+    try {
+      await verifyMfaCode(user, req.body?.code);
+    } catch (e) {
+      await prisma.loginHistory.create({
+        data: { userId: user.id, ipAddress, userAgent, success: false }
+      }).catch(() => { });
+      throw e;
+    }
+
+    return res.json(await issueWebSession(req, res, user, employee));
+  } catch (error) {
+    if (error instanceof SecurityError) return res.status(error.status).json({ error: error.message });
+    console.error(error);
+    res.status(500).json({ error: "Login failed" });
+  }
+};
+
+/** HR resets someone's authenticator (lost phone) — they re-scan a QR at next login. */
+export const adminResetMfa = async (req: Request, res: Response) => {
+  try {
+    const requesterDeptId = Number((req as any).user?.deptId ?? 0);
+    if (requesterDeptId !== config.recruiting.hrDepartmentId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const userId = Number(req.body?.userId);
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    await prisma.user.update({ where: { id: user.id }, data: { totpSecret: null, totpEnabledAt: null } });
+    // End their live sessions too, so a stolen device can't keep going.
+    await prisma.refreshToken.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } });
+
+    res.json({ message: `Authenticator reset for ${user.username}. They will scan a new QR code at next login.` });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to reset authenticator" });
+  }
+};
+
+/** Signs the access token, sets the refresh + CSRF cookies, returns the login body. */
+async function issueWebSession(
+  req: Request,
+  res: Response,
+  user: { id: number; username: string; employeeCode: string; role: string },
+  employee: {
+    id: number; departmentId: number; roleId: number; photoUrl: string | null; gender: any;
+    role: { name: string } | null; Department: { name: string } | null; designation: any;
+  }
+) {
     // Use role from Employee table (source of truth), not User table
     const roleName = employee.role?.name ?? user.role;
 
@@ -166,7 +264,7 @@ export const loginUser = async (req: Request, res: Response) => {
     });
 
     // Send only required fields
-    return res.json({
+    return {
       token,
       username: user.username,
       employeeCode: user.employeeCode,
@@ -179,12 +277,16 @@ export const loginUser = async (req: Request, res: Response) => {
       photoUrl: employee.photoUrl || null,
       roleId: employee.roleId,
       gender: employee.gender
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Login failed" });
-  }
-};
+    };
+}
+async function employeeNeedsMfa(employeeCode: string): Promise<boolean> {
+  const emp = await prisma.employee.findUnique({
+    where: { employeeCode },
+    select: { departmentId: true, roleId: true, Department: { select: { name: true } } }
+  });
+  return !!emp && requiresMfa({ departmentId: emp.departmentId, roleId: emp.roleId, departmentName: emp.Department?.name });
+}
+
 const getClientIp = (req: Request) => {
   const xfwd = (req.headers["x-forwarded-for"] as string) || "";
   return (xfwd.split(",")[0] || req.ip || req.socket.remoteAddress || "").trim();
@@ -449,13 +551,18 @@ export const loginInit = async (req: Request, res: Response) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
+    // This SMS path issues a session without Google Authenticator, so it is
+    // closed to the departments that must use it.
+    if (await employeeNeedsMfa(user.employeeCode)) {
+      return res.status(403).json({ message: 'Please sign in from the web portal with Google Authenticator.' });
+    }
+
     const phone = user.employee?.phone;
     if (!phone) {
       return res.status(400).json({ message: 'Phone number not found' });
     }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    console.log(`Generated OTP for empId ${empId}: ${otp}`);
 
     await otpService.generate(empId, otp);
 
@@ -492,7 +599,9 @@ export const verifyOtp = async (req: Request, res: Response) => {
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
-
+    if (await employeeNeedsMfa(user.employeeCode)) {
+      return res.status(403).json({ message: 'Please sign in from the web portal with Google Authenticator.' });
+    }
 
     // OTP success → finalize login
     const response = await userAuthService.finalizeLogin(user.id, ipAddress, userAgent);

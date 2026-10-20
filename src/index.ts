@@ -7,6 +7,7 @@ import { config, validateConfig } from "./config";
 
 import employeeRoutes from "./api/employee/employee.routes";
 import userRoutes from "./api/user/user.routes";
+import downloadOtpRoutes from "./api/download-otp/download-otp.routes";
 import meRoutes from "./api/me/me.routes";
 import accessRoutes from "./api/access/access.routes";
 import departmentRoutes from "./api/department/department.routes";
@@ -67,6 +68,7 @@ import weeklyRatingRoutes from "./api/weekly-rating/weekly-rating.routes";
 import pipRoutes, { respondViaToken } from "./api/pip/pip.routes";
 import probationRoutes from "./api/probation/probation.routes";
 import managementRoutes from "./api/management/management.routes";
+import managerRoutes from "./api/manager/manager.routes";
 import moduleUsageRoutes from "./api/module-usage/module-usage.routes";
 import { authenticateToken } from "./middleware/authMiddleware";
 import { softAuth, accessLogger } from "./middleware/accessLog";
@@ -118,7 +120,7 @@ app.use("/api/", rateLimit({
 
 // Stricter limit on auth endpoints to blunt credential/OTP brute-forcing.
 app.use(["/api/users/login", "/api/users/login-init", "/api/users/verify-otp",
-         "/api/users/candidate/login", "/api/auth"],
+         "/api/users/candidate/login", "/api/auth", "/api/download-otp/verify"],
   rateLimit({
     windowMs: 10 * 60 * 1000,
     max: 20,
@@ -161,7 +163,9 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   // X-CSRF-Token: double-submit header the SPA echoes from the hr_csrf cookie
   // on the cookie-authenticated endpoints (/api/users/refresh, /logout).
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token']
+  // X-Download-Grant / X-Download-Ticket: DPDP download gate (requireDownloadGrant).
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token',
+    'X-Download-Grant', 'X-Download-Ticket']
 }));
 
 app.use(express.json({ limit: "2mb" }));
@@ -200,6 +204,7 @@ app.use("/uploads", express.static(UPLOADS_DIR, { fallthrough: false, maxAge: "1
 // Routes
 app.use("/api/employees", employeeRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/download-otp", downloadOtpRoutes);
 app.use("/api/me", meRoutes);
 app.use("/api/access", accessRoutes);
 app.use("/api/departments", departmentRoutes);
@@ -256,6 +261,9 @@ app.use("/api/weekly-rating", weeklyRatingRoutes);
 app.use("/api/pip", pipRoutes);
 app.use("/api/probation", probationRoutes);
 app.use("/api/management", managementRoutes);
+// Manager / HOD dashboard — same shape as /api/management but scoped to the
+// caller's own direct reports rather than the whole institution.
+app.use("/api/manager", managerRoutes);
 app.use("/api/module-usage", moduleUsageRoutes);
 // Public endpoint — no auth required (employee responds via token link in email)
 app.post("/api/pip-respond/:token", respondViaToken);
