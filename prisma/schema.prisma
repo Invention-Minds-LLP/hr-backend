@@ -1160,11 +1160,60 @@ model User {
   passwordHash  String
   role          String
   lastLogin     DateTime?
+  // Google Authenticator (TOTP). Required at web login for HR / Management /
+  // Operations — see lib/accountSecurity.ts. The secret is AES-256-GCM
+  // encrypted with MFA_ENC_KEY; totpEnabledAt is set on the first good code,
+  // and clearing both columns forces the user to re-enrol.
+  totpSecret    String?        @db.Text
+  totpEnabledAt DateTime?
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @default(now()) @updatedAt
   loginHistory  LoginHistory[]
   refreshTokens RefreshToken[]
+  emailOtps     UserEmailOtp[]
+  downloadLogs  DownloadLog[]
   employee      Employee       @relation(fields: [employeeCode], references: [employeeCode])
+}
+
+/// Emailed one-time codes (download unlock). Hashed, 5-minute expiry, max 5
+/// wrong attempts, only the newest row per user+purpose is usable.
+model UserEmailOtp {
+  id         String    @id @default(uuid())
+  userId     Int
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose    String
+  email      String
+  codeHash   String // sha256 of the OTP
+  expiresAt  DateTime
+  attempts   Int       @default(0)
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId, purpose, createdAt])
+}
+
+/// DPDP audit trail: one row per authorised download/export/print — who, what,
+/// why, from where. servedAt is stamped when a server file route consumes the
+/// row's one-time ticket; it stays null for exports built in the browser.
+model DownloadLog {
+  id             String    @id @default(uuid())
+  userId         Int
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  employeeCode   String
+  username       String
+  role           String
+  departmentName String?
+  label          String // what, e.g. "Payslip PDF"
+  page           String? // app route the download was started from
+  reason         String    @db.Text
+  ip             String?
+  userAgent      String?   @db.Text
+  serverRoute    String?   @db.Text
+  servedAt       DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
 }
 
 model LoginHistory {
