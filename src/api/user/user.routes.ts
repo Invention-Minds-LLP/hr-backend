@@ -10,7 +10,7 @@ router.post("/login",loginUser);
 router.post("/login/mfa", loginMfa);
 router.post("/reset-password", authenticateToken, resetMyPassword); // self-serve
 router.post("/admin/reset-password", authenticateToken, adminResetPassword); // admin only
-router.post("/admin/reset-mfa", authenticateToken, adminResetMfa); // HR only
+router.post("/admin/reset-mfa", authenticateToken, adminResetMfa); // IT department only
 router.post("/candidate/set-password", authenticateToken,setCandidatePassword);
 // Candidate portal login is two-step: password sends an emailed OTP, the OTP
 // exchanges for the session token. /candidate/login no longer returns a token.

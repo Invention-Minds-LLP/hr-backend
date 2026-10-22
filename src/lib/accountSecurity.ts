@@ -73,6 +73,12 @@ export function requiresMfa(emp: MfaSubject): boolean {
   return !!name && config.security.mfaDepartments.some((d) => d.trim().toLowerCase() === name);
 }
 
+/** IT (MFA_RESET_DEPARTMENTS) resets a user's authenticator after a lost / reinstalled phone. */
+export function canResetMfa(departmentName: string | null | undefined): boolean {
+  const name = (departmentName || '').trim().toLowerCase();
+  return !!name && config.security.mfaResetDepartments.some((d) => d.trim().toLowerCase() === name);
+}
+
 // ---- Login challenge token -------------------------------------------------
 // Issued after a correct password when MFA is required. It is NOT a session:
 // it only lets the holder call /users/login/mfa within 10 minutes.

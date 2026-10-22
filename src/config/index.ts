@@ -355,6 +355,9 @@ export const config = {
     mfaEnabled: bool("MFA_ENABLED", true),
     mfaDepartments: list("MFA_DEPARTMENTS", ["Human Resources", "HR", "Management", "Operations"]),
     mfaRoleIds: list("MFA_ROLE_IDS", ["4"]).map(Number).filter(Number.isFinite),
+    // Departments (Department.name, case-insensitive) whose members may reset
+    // someone's Google Authenticator after a lost / reinstalled phone.
+    mfaResetDepartments: list("MFA_RESET_DEPARTMENTS", ["IT", "Information Technology"]),
     // Key that encrypts stored authenticator secrets. Changing it forces every
     // enrolled user to re-scan the QR code. Falls back to JWT_SECRET if unset.
     mfaEncKey: recommended("MFA_ENC_KEY"),

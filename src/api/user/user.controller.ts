@@ -28,6 +28,7 @@ import {
 import { getEmployeeAccess } from "../../lib/employeeAccess";
 import {
   SecurityError,
+  canResetMfa,
   getMfaSetup,
   readChallenge,
   requiresMfa,
@@ -200,12 +201,17 @@ export const loginMfa = async (req: Request, res: Response) => {
   }
 };
 
-/** HR resets someone's authenticator (lost phone) — they re-scan a QR at next login. */
+/** IT resets someone's authenticator (lost phone) — they re-scan a QR at next login. */
 export const adminResetMfa = async (req: Request, res: Response) => {
   try {
-    const requesterDeptId = Number((req as any).user?.deptId ?? 0);
-    if (requesterDeptId !== config.recruiting.hrDepartmentId) {
-      return res.status(403).json({ error: "Forbidden" });
+    // Department read fresh from the DB, not the token: a transfer out of IT
+    // takes effect immediately.
+    const requester = await prisma.employee.findUnique({
+      where: { id: Number((req as any).user?.empId ?? 0) },
+      select: { Department: { select: { name: true } } }
+    });
+    if (!canResetMfa(requester?.Department?.name)) {
+      return res.status(403).json({ error: "Only the IT department can reset Google Authenticator." });
     }
     const userId = Number(req.body?.userId);
     if (!userId) return res.status(400).json({ error: "userId is required" });
@@ -276,7 +282,8 @@ async function issueWebSession(
       designation: employee?.designation?.name || '',
       photoUrl: employee.photoUrl || null,
       roleId: employee.roleId,
-      gender: employee.gender
+      gender: employee.gender,
+      canResetMfa: canResetMfa(employee.Department?.name)
     };
 }
 async function employeeNeedsMfa(employeeCode: string): Promise<boolean> {
@@ -702,7 +709,8 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
       designation: employee?.designation?.name || '',
       photoUrl: employee.photoUrl || null,
       roleId: employee.roleId,
-      gender: employee.gender
+      gender: employee.gender,
+      canResetMfa: canResetMfa(employee.Department?.name)
     });
   } catch (error) {
     console.error('Refresh error:', error);
