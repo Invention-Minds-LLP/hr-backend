@@ -38,9 +38,10 @@ export class SecurityError extends Error {
 
 // ---- TOTP secret encryption (AES-256-GCM) ----------------------------------
 
+const keyFrom = (raw: string): Buffer => crypto.createHash('sha256').update(raw).digest();
+
 function encKey(): Buffer {
-  const raw = config.security.mfaEncKey || config.jwtSecret;
-  return crypto.createHash('sha256').update(raw).digest();
+  return keyFrom(config.security.mfaEncKey || config.jwtSecret);
 }
 
 function encryptSecret(plain: string): string {
@@ -50,11 +51,25 @@ function encryptSecret(plain: string): string {
   return [iv, cipher.getAuthTag(), data].map((b) => b.toString('base64')).join('.');
 }
 
-function decryptSecret(stored: string): string {
+function decryptWith(key: Buffer, stored: string): string {
   const [iv, tag, data] = stored.split('.').map((s) => Buffer.from(s, 'base64'));
-  const decipher = crypto.createDecipheriv('aes-256-gcm', encKey(), iv);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+}
+
+/**
+ * Decrypts with the current key. Secrets enrolled before MFA_ENC_KEY was set
+ * were encrypted with the JWT_SECRET fallback — those still open, and
+ * `legacy` tells the caller to re-encrypt under the current key.
+ */
+function decryptSecret(stored: string): { secret: string; legacy: boolean } {
+  try {
+    return { secret: decryptWith(encKey(), stored), legacy: false };
+  } catch (e) {
+    if (!config.security.mfaEncKey) throw e;
+    return { secret: decryptWith(keyFrom(config.jwtSecret), stored), legacy: true };
+  }
 }
 
 // ---- Who needs Google Authenticator ----------------------------------------
@@ -111,10 +126,15 @@ type TotpUser = { id: number; username: string; employeeCode: string; totpSecret
 
 /** Returns the pending secret's QR + manual key, creating the secret if needed. */
 export async function getMfaSetup(user: TotpUser): Promise<{ qrDataUrl: string; manualKey: string }> {
-  let secret: string;
+  let secret: string | null = null;
   if (user.totpSecret && !user.totpEnabledAt) {
-    secret = decryptSecret(user.totpSecret); // keep the same secret across retries
-  } else {
+    try {
+      secret = decryptSecret(user.totpSecret).secret; // keep the same secret across retries
+    } catch {
+      secret = null; // unreadable pending secret — nothing enrolled yet, so just issue a new one
+    }
+  }
+  if (!secret) {
     secret = authenticator.generateSecret();
     await prisma.user.update({ where: { id: user.id }, data: { totpSecret: encryptSecret(secret), totpEnabledAt: null } });
   }
@@ -127,17 +147,21 @@ export async function verifyMfaCode(user: TotpUser, code: unknown): Promise<void
   const token = String(code ?? '').trim();
   if (!/^\d{6}$/.test(token) || !user.totpSecret) throw new SecurityError(400, 'Enter the 6-digit code from Google Authenticator.');
   let secret: string;
+  let legacy: boolean;
   try {
-    secret = decryptSecret(user.totpSecret);
+    ({ secret, legacy } = decryptSecret(user.totpSecret));
   } catch {
-    // MFA_ENC_KEY changed since enrolment — HR must reset this user's authenticator.
-    throw new SecurityError(409, 'Your authenticator needs to be set up again. Please contact HR.');
+    // Encrypted under a key this server no longer has — IT must reset it.
+    throw new SecurityError(409, 'Your authenticator needs to be set up again. Please contact your IT team.');
   }
   if (!authenticator.verify({ token, secret })) {
     throw new SecurityError(401, 'Incorrect authenticator code.');
   }
-  if (!user.totpEnabledAt) {
-    await prisma.user.update({ where: { id: user.id }, data: { totpEnabledAt: new Date() } });
+  const data: { totpEnabledAt?: Date; totpSecret?: string } = {};
+  if (!user.totpEnabledAt) data.totpEnabledAt = new Date();
+  if (legacy) data.totpSecret = encryptSecret(secret); // move to the current MFA_ENC_KEY
+  if (Object.keys(data).length) {
+    await prisma.user.update({ where: { id: user.id }, data });
   }
 }
 

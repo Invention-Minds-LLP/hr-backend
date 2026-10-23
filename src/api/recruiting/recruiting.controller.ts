@@ -4516,10 +4516,14 @@ export const upsertFeedback = asyncHandler(async (req, res) => {
   // If you want to allow HR to submit on behalf of panelists, remove this.
   // if (req.user.id !== panelId) return bad(res, 'Cannot submit for another panelist', 403);
 
-  // Compute average from provided scores
+  // Compute average from provided scores. A question left null is "not
+  // applicable" for this candidate and is left out of the average entirely.
   const scores = [jobSkills, jobKnowledge, attitude, communication]
     .map(n => (typeof n === 'number' ? n : null))
     .filter((n): n is number => n != null);
+  if (submit && !scores.length) {
+    return bad(res, 'Rate at least one question before submitting. Questions that don\'t apply can be left as N/A.', 400);
+  }
   const average = scores.length
     ? +(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)
     : null;
@@ -5451,7 +5455,9 @@ export const listInterviews = asyncHandler(async (req, res) => {
         application: {
           select: {
             id: true,
-            candidate: { select: { id: true, name: true, email: true, phone: true, experience: true, qualification: true } },
+            // resumeUrl: the evaluation form opened from here shows the résumé
+            // beside the form (same as the panelist list, listEmployeeInterviews).
+            candidate: { select: { id: true, name: true, email: true, phone: true, experience: true, qualification: true, resumeUrl: true } },
             job: { select: { id: true, title: true, department: { select: { id: true, name: true } } } }
           }
         },
