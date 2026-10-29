@@ -16,6 +16,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import PDFDocument from 'pdfkit';
+import fs from 'fs';
 
 type Align = 'left' | 'center' | 'right' | 'justify';
 
@@ -261,6 +262,7 @@ export interface HtmlPdfOptions {
   /** Rendered before the body on the first page — letterhead. */
   headerHtml?: string | null;
   footerHtml?: string | null;
+  letterheadImage?: string;
   /** Drawn bottom-right of the last page. */
   signature?: {
     name?: string | null;
@@ -281,7 +283,7 @@ function drawBlocks(doc: PDFKit.PDFDocument, blocks: Block[], leftMargin: number
       doc.moveDown(block.spaceBefore / 12);
       const y = doc.y;
       doc.moveTo(leftMargin, y).lineTo(leftMargin + contentWidth, y)
-         .strokeColor('#cccccc').lineWidth(0.7).stroke();
+        .strokeColor('#cccccc').lineWidth(0.7).stroke();
       doc.y = y + block.spaceAfter;
       continue;
     }
@@ -305,9 +307,9 @@ function drawBlocks(doc: PDFKit.PDFDocument, blocks: Block[], leftMargin: number
 
       const family =
         run.style.bold && run.style.italic ? 'Helvetica-BoldOblique'
-        : run.style.bold ? 'Helvetica-Bold'
-        : run.style.italic ? 'Helvetica-Oblique'
-        : 'Helvetica';
+          : run.style.bold ? 'Helvetica-Bold'
+            : run.style.italic ? 'Helvetica-Oblique'
+              : 'Helvetica';
 
       doc.font(family).fontSize(run.style.size).fillColor('#000');
 
@@ -331,63 +333,102 @@ function drawBlocks(doc: PDFKit.PDFDocument, blocks: Block[], leftMargin: number
  * Encrypted when a password is supplied, same convention as Form 16.
  */
 export function renderHtmlToPdf(bodyHtml: string, opts: HtmlPdfOptions = {}): Promise<Buffer> {
+
   return new Promise((resolve, reject) => {
     try {
       const margin = opts.margin ?? 56;
+
+
       const doc = new PDFDocument({
         size: 'A4',
         margin,
+        bufferPages: true,
+        autoFirstPage: true,
+
         ...(opts.password
           ? {
-              userPassword: opts.password,
-              ownerPassword: `${opts.password}-OWNER`,
-              permissions: { printing: 'highResolution' },
-            }
+            userPassword: opts.password,
+            ownerPassword: `${opts.password}-OWNER`,
+            permissions: { printing: 'highResolution' },
+          }
           : {}),
       });
 
       const chunks: Buffer[] = [];
-      doc.on('data', (c) => chunks.push(c));
+
+      doc.on('data', (chunk) => chunks.push(chunk));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      const left = doc.page.margins.left;
-      const contentWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+      const left = margin;
 
-      if (opts.headerHtml) {
-        drawBlocks(doc, parseHtmlBlocks(opts.headerHtml), left, contentWidth);
-        doc.moveDown(0.3);
-        doc.moveTo(left, doc.y).lineTo(left + contentWidth, doc.y)
-           .strokeColor('#1f3a93').lineWidth(1).stroke();
-        doc.moveDown(0.8);
+      const contentWidth =
+        doc.page.width - margin - margin;
+      let letterheadBuffer: Buffer | null = null;
+
+      if (
+        opts.letterheadImage &&
+        fs.existsSync(opts.letterheadImage)
+      ) {
+        letterheadBuffer = fs.readFileSync(
+          opts.letterheadImage
+        );
       }
 
-      drawBlocks(doc, parseHtmlBlocks(bodyHtml), left, contentWidth);
+      const addLetterhead = () => {
+        if (!letterheadBuffer) return;
+
+        doc.save();
+
+        doc.image(
+          letterheadBuffer,
+          0,
+          0,
+          {
+            width: 595.28,
+            height: 841.89,
+          }
+        );
+
+        doc.restore();
+
+        doc.x = left;
+        doc.y = 150;
+      };
+
+      addLetterhead();
+
+      drawBlocks(
+        doc,
+        parseHtmlBlocks(bodyHtml),
+        left,
+        contentWidth
+      );
 
       if (opts.signature) {
         const s = opts.signature;
         doc.moveDown(2.5);
         if (s.place) {
           doc.font('Helvetica').fontSize(BASE_SIZE).fillColor('#000')
-             .text(`Place: ${s.place}`, left, doc.y, { width: contentWidth });
+            .text(`Place: ${s.place}`, left, doc.y, { width: contentWidth });
         }
         doc.moveDown(2);
         doc.font('Helvetica-Bold').fontSize(BASE_SIZE)
-           .text(s.name || '', left, doc.y, { width: contentWidth });
+          .text(s.name || '', left, doc.y, { width: contentWidth });
         if (s.designation) {
           doc.font('Helvetica').fontSize(BASE_SIZE - 0.5)
-             .text(s.designation, { width: contentWidth });
+            .text(s.designation, { width: contentWidth });
         }
         if (s.company) {
           doc.font('Helvetica').fontSize(BASE_SIZE - 0.5).fillColor('#555')
-             .text(s.company, { width: contentWidth });
+            .text(s.company, { width: contentWidth });
         }
       }
 
       if (opts.footerHtml) {
         doc.moveDown(1.2);
         doc.moveTo(left, doc.y).lineTo(left + contentWidth, doc.y)
-           .strokeColor('#dddddd').lineWidth(0.5).stroke();
+          .strokeColor('#dddddd').lineWidth(0.5).stroke();
         doc.moveDown(0.5);
         drawBlocks(doc, parseHtmlBlocks(opts.footerHtml), left, contentWidth);
       }

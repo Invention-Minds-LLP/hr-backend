@@ -5,6 +5,8 @@ import cron from 'node-cron';
 import { prisma } from "../../lib/prisma";
 import { sendWhatsAppTemplate } from "../leave/leave.controller";
 import { createNotification } from "../notifications/notifications.controller";
+import { getAppraisalAccess } from "./appraisalAccess";
+import { buildAppraisalRatingsPdf } from "./appraisalPdf";
 
 const APPRAISAL_REMINDER_COUNT_TEMPLATE_ID = '';
 const APPRAISAL_CREATED_TEMPLATE_ID = "888277";
@@ -405,6 +407,38 @@ export const getAllAppraisalsWithManagerReview = async (req: Request, res: Respo
   } catch (error) {
     console.error("Error fetching appraisals:", error);
     res.status(500).json({ error: "Failed to fetch appraisals" });
+  }
+};
+
+export const downloadAppraisalRatingsPdf = async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const u = {
+      role: user?.role || "",
+      empId: Number(user?.empId),
+      deptId: Number(user?.deptId),
+    };
+
+    const appraisal = await prisma.appraisalForm.findFirst({
+      where: { id: Number(req.params.id), archivedAt: null },
+      include: {
+        employee: { select: { reportingManager: true, inchargeId: true, departmentId: true } },
+      },
+    });
+    if (!appraisal) return res.status(404).json({ error: "Not found" });
+
+    const { canAccess, canViewScores } = getAppraisalAccess(u, appraisal);
+    if (!canAccess || !canViewScores) return res.status(403).json({ error: "Forbidden" });
+
+    const result = await buildAppraisalRatingsPdf(appraisal.id);
+    if (!result) return res.status(404).json({ error: "No ratings found" });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
+    res.send(result.pdf);
+  } catch (error) {
+    console.error("Ratings PDF error:", error);
+    res.status(500).json({ error: "Failed to generate PDF" });
   }
 };
 

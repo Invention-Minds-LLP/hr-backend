@@ -1186,7 +1186,7 @@ export const getManagerEmployees = async (
         employmentType: true,
 
         Department: {
-          select: { name: true }
+          select: { id: true, name: true }
         },
 
         designation: {

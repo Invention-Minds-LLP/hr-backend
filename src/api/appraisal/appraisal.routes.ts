@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { bulkCreateAppraisals, getAllAppraisalsWithManagerReview, saveManagerReview } from './appraisal.controller';
+import { bulkCreateAppraisals, getAllAppraisalsWithManagerReview, saveManagerReview, downloadAppraisalRatingsPdf } from './appraisal.controller';
 import {
   getSelfAppraisalQuestions, createSelfAppraisalQuestion, toggleSelfAppraisalQuestion,
   hrVerifyAppraisal, submitSelfAppraisal, submitManagerAppraisalV2, submitManagementAppraisal,
@@ -57,6 +57,8 @@ router.get('/employees/:empId/pauses/active', authenticateToken, getActivePause)
 router.post('/employees/:empId/pauses', authenticateToken, createPause);
 router.patch('/pauses/:pauseId', authenticateToken, updatePause);
 router.delete('/pauses/:pauseId', authenticateToken, deletePause);
+
+router.get('/:id/ratings-pdf', authenticateToken, downloadAppraisalRatingsPdf);
 
 // Test/Admin endpoints
 router.post('/admin/test-auto-draft', async (req, res) => {
