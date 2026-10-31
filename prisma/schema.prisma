@@ -1197,6 +1197,10 @@ model UserEmailOtp {
 /// row's one-time ticket; it stays null for exports built in the browser.
 model DownloadLog {
   id             String    @id @default(uuid())
+  /// Printed in the footer of the downloaded file: <employeeCode>-<yyyyMMdd>-<HHmmss>-<nnnn>
+  /// (IST; nnnn = this employee's running download count). Lets a leaked
+  /// file be traced back to this row from the Download Logs search.
+  downloadCode   String?   @unique
   userId         Int
   user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   employeeCode   String

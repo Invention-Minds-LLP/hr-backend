@@ -6,10 +6,16 @@
 import 'dotenv/config';
 import jwt from 'jsonwebtoken';
 import { authenticator } from 'otplib';
+import { inflateSync } from 'zlib';
+import ExcelJS from 'exceljs';
+import { PDFDocument } from 'pdf-lib';
 import { config } from '../config';
+import { stampDownload } from '../lib/downloadStamp';
 import {
   SecurityError,
+  buildDownloadCode,
   createCaptcha,
+  downloadStampText,
   isValidDownloadGrant,
   maskEmail,
   readChallenge,
@@ -80,6 +86,48 @@ async function main() {
   check('selecting every tile is wrong', throwsStatus(() => verifyCaptcha(c2.captchaId, [0, 1, 2, 3, 4, 5, 6, 7, 8], 7)), 400);
   const c3 = await createCaptcha(7);
   check('an empty answer is wrong', throwsStatus(() => verifyCaptcha(c3.captchaId, [], 7)), 400);
+
+  console.log('\nDownload ID');
+  // 31 Oct 2026 10:00:45 UTC = 15:30:45 IST
+  const at = new Date(Date.UTC(2026, 9, 31, 10, 0, 45));
+  check('employee + IST date-time + count', buildDownloadCode('EMP001', at, 7), 'EMP001-20261031-153045-0007');
+  check('odd characters in the code are dropped', buildDownloadCode('emp/01 ', at, 12), 'EMP01-20261031-153045-0012');
+  const stamp = downloadStampText({ downloadCode: 'EMP001-20261031-153045-0007', username: 'john.doe', employeeCode: 'EMP001', createdAt: at });
+  check('footer text', stamp,
+    'Download ID: EMP001-20261031-153045-0007 | Downloaded by john.doe (EMP001) on 31-10-2026 15:30:45 IST | Download #7');
+
+  console.log('\nFooter stamping');
+  const pdf = await PDFDocument.create();
+  pdf.addPage(); pdf.addPage();
+  const stampedPdf = await stampDownload(Buffer.from(await pdf.save({ useObjectStreams: false })), 'application/pdf', stamp);
+  const reread = await PDFDocument.load(stampedPdf!);
+  check('PDF still opens with both pages', reread.getPageCount(), 2);
+  // pdf-lib writes page content Flate-compressed with text as hex strings:
+  // inflate every stream and count those that draw the stamp.
+  const raw = stampedPdf!.toString('latin1');
+  const hexStamp = Buffer.from(stamp, 'latin1').toString('hex').toUpperCase();
+  let pagesStamped = 0;
+  for (const m of raw.matchAll(/stream\r?\n([\s\S]*?)\r?\nendstream/g)) {
+    try {
+      const text = inflateSync(Buffer.from(m[1], 'latin1')).toString('latin1');
+      if (text.toUpperCase().includes(hexStamp)) pagesStamped++;
+    } catch { /* not a Flate stream */ }
+  }
+  check('PDF: the stamp text is drawn on both pages', pagesStamped, 2);
+
+  const wb = new ExcelJS.Workbook();
+  wb.addWorksheet('Employees').addRows([['Code', 'Name'], ['EMP001', 'John']]);
+  wb.addWorksheet('Summary').addRow(['Total', 1]);
+  const stampedXlsx = await stampDownload(Buffer.from(await wb.xlsx.writeBuffer()),
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', stamp);
+  const wb2 = new ExcelJS.Workbook();
+  await wb2.xlsx.load(stampedXlsx as any);
+  const lastCell = (name: string) => { const ws = wb2.getWorksheet(name)!; return ws.getRow(ws.rowCount).getCell(1).value; };
+  check('Excel: stamp row under the data (sheet 1)', lastCell('Employees'), stamp);
+  check('Excel: stamp row under the data (sheet 2)', lastCell('Summary'), stamp);
+  check('Excel: data untouched', wb2.getWorksheet('Employees')!.getRow(2).getCell(2).value, 'John');
+  check('Excel: printed footer set', (wb2.getWorksheet('Employees')!.headerFooter.oddFooter || '').includes('EMP001-20261031-153045-0007'), true);
+  check('other formats are left alone', await stampDownload(Buffer.from('a,b\n1,2'), 'text/csv', stamp), null);
 
   console.log('\nEmail masking');
   check('keeps two letters + domain', maskEmail('priya.sharma@example.com'), 'pr••••••••••@example.com');

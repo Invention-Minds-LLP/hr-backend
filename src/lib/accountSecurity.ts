@@ -250,6 +250,33 @@ export const maskEmail = (email: string): string => {
   return `${local.slice(0, 2)}${'•'.repeat(Math.max(1, local.length - 2))}@${domain}`;
 };
 
+// ---- Download ID (footer stamp) ---------------------------------------------
+
+/** IST date/time parts, independent of the server's TZ. */
+function istParts(d: Date): Record<'year' | 'month' | 'day' | 'hour' | 'minute' | 'second', string> {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
+  return { year: get('year'), month: get('month'), day: get('day'), hour: get('hour'), minute: get('minute'), second: get('second') };
+}
+
+/** EMP001-20261031-153045-0007 — employee, IST date-time, nth download of this employee. */
+export function buildDownloadCode(employeeCode: string, at: Date, count: number): string {
+  const p = istParts(at);
+  const emp = (employeeCode || 'UNKNOWN').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  return `${emp}-${p.year}${p.month}${p.day}-${p.hour}${p.minute}${p.second}-${String(count).padStart(4, '0')}`;
+}
+
+/** The footer line printed on the file. ASCII only — PDF standard fonts are WinAnsi. */
+export function downloadStampText(log: { downloadCode: string; username: string; employeeCode: string; createdAt: Date }): string {
+  const p = istParts(log.createdAt);
+  const count = Number(log.downloadCode.split('-').pop()) || 0;
+  return `Download ID: ${log.downloadCode} | Downloaded by ${log.username} (${log.employeeCode}) ` +
+    `on ${p.day}-${p.month}-${p.year} ${p.hour}:${p.minute}:${p.second} IST | Download #${count}`;
+}
+
 // ---- Download grant --------------------------------------------------------
 
 export function signDownloadGrant(userId: number): { grant: string; expiresAt: Date } {

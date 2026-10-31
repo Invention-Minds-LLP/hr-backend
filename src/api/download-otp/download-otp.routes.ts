@@ -6,7 +6,9 @@ import {
   MAX_REASON,
   MIN_REASON,
   SecurityError,
+  buildDownloadCode,
   createCaptcha,
+  downloadStampText,
   isValidDownloadGrant,
   maskEmail,
   sendEmailOtp,
@@ -98,22 +100,46 @@ router.post('/authorize', handle(async (req, res) => {
 
   const xfwd = (req.headers['x-forwarded-for'] as string) || '';
   const ip = (xfwd.split(',')[0] || req.ip || req.socket?.remoteAddress || '').trim();
-  const log = await prisma.downloadLog.create({
-    data: {
-      userId,
-      employeeCode: user.employeeCode,
-      username: user.username,
-      role: user.employee?.role?.name ?? user.role,
-      departmentName: user.employee?.Department?.name ?? null,
-      label: label || 'Unlabelled download',
-      page,
-      reason: reason.slice(0, MAX_REASON),
-      ip: ip.slice(0, 64) || null,
-      userAgent: String(req.headers['user-agent'] || '').slice(0, 1000) || null,
-    },
-    select: { id: true },
+
+  // Download ID for the file footer: employee + IST date-time + this
+  // employee's running download count. Two downloads by the same person in the
+  // same second race for one count; the unique index catches that and we
+  // recount once.
+  let log: { id: string; downloadCode: string | null; createdAt: Date } | null = null;
+  for (let attempt = 0; attempt < 3 && !log; attempt++) {
+    const now = new Date();
+    const count = (await prisma.downloadLog.count({ where: { userId } })) + 1 + attempt;
+    try {
+      log = await prisma.downloadLog.create({
+        data: {
+          downloadCode: buildDownloadCode(user.employeeCode, now, count),
+          userId,
+          employeeCode: user.employeeCode,
+          username: user.username,
+          role: user.employee?.role?.name ?? user.role,
+          departmentName: user.employee?.Department?.name ?? null,
+          label: label || 'Unlabelled download',
+          page,
+          reason: reason.slice(0, MAX_REASON),
+          ip: ip.slice(0, 64) || null,
+          userAgent: String(req.headers['user-agent'] || '').slice(0, 1000) || null,
+          createdAt: now,
+        },
+        select: { id: true, downloadCode: true, createdAt: true },
+      });
+    } catch (e: any) {
+      if (e?.code !== 'P2002') throw e; // only retry the unique-code collision
+    }
+  }
+  if (!log?.downloadCode) throw new SecurityError(409, 'Could not record this download. Please try again.');
+
+  res.status(200).json({
+    logId: log.id,
+    ticket: signDownloadTicket(userId, log.id),
+    downloadCode: log.downloadCode,
+    // Browser-built exports (Excel / CSV / print) put this line in their footer.
+    stamp: downloadStampText({ downloadCode: log.downloadCode, username: user.username, employeeCode: user.employeeCode, createdAt: log.createdAt }),
   });
-  res.status(200).json({ logId: log.id, ticket: signDownloadTicket(userId, log.id) });
 }));
 
 // Audit trail viewer — HR department and Management only.
@@ -133,6 +159,7 @@ router.get('/logs', handle(async (req, res) => {
   const where: any = {};
   if (search) {
     where.OR = [
+      { downloadCode: { contains: search } },
       { username: { contains: search } },
       { employeeCode: { contains: search } },
       { label: { contains: search } },
@@ -152,7 +179,7 @@ router.get('/logs', handle(async (req, res) => {
       skip: (page - 1) * pageSize,
       take: pageSize,
       select: {
-        id: true, employeeCode: true, username: true, role: true, departmentName: true, label: true,
+        id: true, downloadCode: true, employeeCode: true, username: true, role: true, departmentName: true, label: true,
         page: true, reason: true, ip: true, serverRoute: true, servedAt: true, createdAt: true,
       },
     }),
