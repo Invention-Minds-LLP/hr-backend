@@ -83,3 +83,47 @@ export async function resolvePermissions(empId: number): Promise<PermissionKey[]
   // stable for anyone eyeballing the payload.
   return PERMISSION_KEYS.filter((k) => effective.has(k));
 }
+
+/**
+ * Same rules as resolvePermissions(), for many employees in ONE query — for
+ * reports that need "who can see X" across the whole workforce.
+ */
+export async function resolvePermissionsBulk(empIds: number[]): Promise<Map<number, Set<PermissionKey>>> {
+  const out = new Map<number, Set<PermissionKey>>();
+  if (!empIds.length) return out;
+
+  const employees = await prisma.employee.findMany({
+    where: { id: { in: empIds } },
+    select: {
+      id: true,
+      roleId: true,
+      departmentId: true,
+      role: { select: { name: true, permissions: { select: { name: true } } } },
+      designation: { select: { name: true } },
+      Department: { select: { name: true } },
+      permissionOverrides: { select: { granted: true, permission: { select: { name: true } } } },
+    },
+  });
+  const seeded = await isCatalogSeeded();
+
+  for (const employee of employees) {
+    if (!seeded) {
+      out.set(employee.id, new Set(computePermissions({
+        empId: employee.id,
+        roleId: Number(employee.roleId ?? 0),
+        deptId: Number(employee.departmentId ?? 0),
+        roleName: employee.role?.name ?? "",
+        designation: employee.designation?.name ?? "",
+        departmentName: employee.Department?.name ?? "",
+      })));
+      continue;
+    }
+    const effective = new Set<string>(employee.role?.permissions.map((p) => p.name) ?? []);
+    for (const override of employee.permissionOverrides) {
+      if (override.granted) effective.add(override.permission.name);
+      else effective.delete(override.permission.name);
+    }
+    out.set(employee.id, new Set(PERMISSION_KEYS.filter((k) => effective.has(k))));
+  }
+  return out;
+}
