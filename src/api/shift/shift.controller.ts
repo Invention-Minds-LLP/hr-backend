@@ -3907,7 +3907,6 @@ async function buildShiftAdherenceReport(month: number, year: number): Promise<A
       },
     })
   : [];
-  console.log('Approved leaves:', leaves);
   // Shift templates for nearest-match, grouped by department (fallback: all).
   const templates = await prisma.shiftTemplate.findMany({
     select: { id: true, name: true, shiftType: true, startTime: true, departments: { select: { id: true } } },
@@ -3981,7 +3980,6 @@ for (const leave of leaves) {
     }
   }
 }
-console.log('Leave map:', Array.from(leaveByKey.entries()));
 
   const shiftTypeSet = new Set<string>();
 
@@ -4028,9 +4026,6 @@ console.log('Leave map:', Array.from(leaveByKey.entries()));
         }
         return base;
       }
-
-        console.log('Checking leave:', key);
-console.log('Found leave:', leaveByKey.get(key));
 
       // No check-in
       const leaveType = leaveByKey.get(key);
