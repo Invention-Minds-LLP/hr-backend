@@ -21,6 +21,9 @@ interface Client {
  *  proxy/access log is worthless by the time anyone reads it. */
 const STREAM_TICKET_TTL_SECONDS = 60;
 
+/** Keep-alive interval for open streams — well under nginx's 60s proxy_read_timeout. */
+const SSE_HEARTBEAT_MS = 25 * 1000;
+
 /**
  * Mint a one-minute ticket authorising an SSE subscription.
  *
@@ -84,6 +87,9 @@ export const registerForNotifications = (req: Request, res: Response): void => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  // nginx buffers proxied responses by default, which would hold notifications
+  // back until its buffer fills. This tells it to pass the stream straight through.
+  res.setHeader("X-Accel-Buffering", "no");
   // CORS is handled by the global allowlist in index.ts. This used to hand-set
   // `Access-Control-Allow-Origin: *`, which overrode that allowlist and let any
   // site on the internet open the stream.
@@ -94,8 +100,14 @@ export const registerForNotifications = (req: Request, res: Response): void => {
   clients.push({ employeeId, res });
   console.log(`🔗 Employee ${employeeId} connected. Total clients: ${clients.length}`);
 
+  // A proxy drops a connection it sees as idle (nginx: 60s by default), which
+  // made every open tab reconnect about once a minute. An SSE comment line
+  // (": …") keeps it busy and is ignored by EventSource.
+  const heartbeat = setInterval(() => res.write(": ping\n\n"), SSE_HEARTBEAT_MS);
+
   // Handle disconnect
   req.on("close", () => {
+    clearInterval(heartbeat);
     clients = clients.filter(c => c.res !== res);
     console.log(`❌ Employee ${employeeId} disconnected. Remaining: ${clients.length}`);
   });

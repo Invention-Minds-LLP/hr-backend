@@ -33,6 +33,7 @@ import {
   decideEditRequest,
 } from "./performanceEditRequest.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
+import { requireDownloadGrant } from "../../middleware/requireDownloadGrant";
 
 const router = Router();
 
@@ -50,7 +51,7 @@ router.get("/self-appraisal/cycles", authenticateToken, listSelfAppraisalCycles)
 router.get("/self-appraisal", authenticateToken, getSelfAppraisal);
 router.post("/self-appraisal", authenticateToken, submitSelfAppraisal);
 router.patch("/self-appraisal/:id/reopen", authenticateToken, reopenSelfAppraisal);
-router.get("/export/:employeeId", authenticateToken, exportPerformanceSheet);
+router.get("/export/:employeeId", authenticateToken, requireDownloadGrant, exportPerformanceSheet);
 router.post("/assign", authenticateToken, assignFormToEmployee);
 router.patch("/summary/:id/template", authenticateToken, assignSummaryTemplate);
 

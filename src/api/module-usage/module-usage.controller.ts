@@ -1,7 +1,7 @@
 // Module Utilization analytics.
 //
-// Answers: "per application module, which active employees actually used it
-// (hit at least one of its APIs) in a date range, and who never did?"
+// Answers: "per application module, which employees who CAN use it actually
+// did something in it in a date range, and who never did?"
 //
 // Data source: ApiAccessLog (written by src/middleware/accessLog.ts on every
 // /api request). `userId` there is the numeric Employee.id (the `empId` JWT
@@ -9,48 +9,83 @@
 //
 // NOTE: rows only land in ApiAccessLog for every request when
 // config.security.logAllToDb is true; otherwise only security-flagged
-// requests are stored and this report would undercount usage.
+// requests are stored and this report would undercount usage. Rows older than
+// config.security.retentionDays are pruned, so the response says where the
+// data actually starts (`dataFrom`).
 
 import { Request, Response } from "express";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { config } from "../../config";
+import { PermissionKey } from "../../lib/permissions";
+import { resolvePermissionsBulk } from "../../lib/permissionResolver";
 
 /* ── module map ──────────────────────────────────────────────────────────
  * Maps the first path segment after /api/ (as mounted in src/index.ts) to a
- * user-facing business module. Prefixes not listed here (users, auth,
- * notifications, sms, export, pip-respond, temp…) are infrastructure and are
- * deliberately excluded from the report.
+ * user-facing business module. Prefixes not listed here (users, auth, me,
+ * access, notifications, sms, export, download-otp, module-usage…) are
+ * infrastructure and are deliberately excluded from the report.
+ *
+ *   writesOnly — only POST/PUT/PATCH/DELETE count. For lookup data every
+ *                screen loads in the background (department/branch dropdowns,
+ *                the holiday calendar): a GET there says nothing about use.
+ *   audience   — who the module is for. Omitted = every active employee
+ *                (self-service); otherwise employees holding ANY of the keys,
+ *                so HR-only modules aren't measured against the whole staff.
+ *
+ * The frontend hides modules the client isn't licensed for (environment
+ * payrollEnabled / weeklyTrackerEnabled), keyed by `key` — keep them in step.
  */
-const MODULE_MAP: { key: string; label: string; prefixes: string[] }[] = [
+type ModuleDef = {
+  key: string;
+  label: string;
+  prefixes: string[];
+  writesOnly?: boolean;
+  audience?: PermissionKey[];
+};
+
+const MODULE_MAP: ModuleDef[] = [
   {
     key: "attendance",
     label: "Attendance",
-    prefixes: ["attendance", "biometric", "mobile-attendance", "force-present", "shifts", "geo-tracking"],
+    prefixes: ["attendance", "mobile-attendance", "force-present", "shifts", "geo-tracking", "overtime"],
   },
   {
     key: "leave",
     label: "Leave",
-    prefixes: ["leaves", "comp-off", "encashment", "permission", "wfh", "entitle", "holidays"],
+    prefixes: ["leaves", "comp-off", "encashment", "permission", "wfh", "entitle"],
   },
   {
     key: "payroll",
     label: "Payroll",
-    prefixes: ["payroll", "loans", "incentives"],
+    prefixes: ["payroll", "loans", "incentives", "tax"],
   },
   {
     key: "performance",
     label: "Performance",
-    prefixes: ["appraisals", "performance", "weekly-rating", "weekly-tracker", "tests", "pip"],
+    prefixes: ["appraisals", "performance", "weekly-rating", "pip", "probation"],
+  },
+  {
+    key: "weekly-tracker",
+    label: "Weekly Tracker",
+    prefixes: ["weekly-tracker"],
+    audience: ["admin.weeklyTracker.view"],
   },
   {
     key: "recruitment",
     label: "Recruitment",
-    prefixes: ["recruiting", "internships", "requisitions", "test-assign", "test-attempts", "question-banks", "questions"],
+    prefixes: ["recruiting", "internships", "requisitions", "tests", "test-assign", "test-attempts", "question-banks", "questions"],
+    audience: ["recruitment.jobs.view", "recruitment.internships.view", "recruitment.interviews.view", "recruitment.requisition.view"],
   },
   {
     key: "employee-management",
     label: "Employee Management",
-    prefixes: ["employees", "resignations", "hr-corrections"],
+    prefixes: ["employees", "resignations", "hr-corrections", "letters", "archive"],
+  },
+  {
+    key: "assets",
+    label: "Assets",
+    prefixes: ["assets"],
   },
   {
     key: "grievance-compliance",
@@ -70,19 +105,47 @@ const MODULE_MAP: { key: string; label: string; prefixes: string[] }[] = [
   {
     key: "masters",
     label: "Masters",
-    prefixes: ["departments", "designation", "roles", "branches"],
+    prefixes: ["departments", "designation", "roles", "branches", "holidays", "companies"],
+    writesOnly: true,
+    audience: [
+      "masters.departments.view", "masters.designations.view", "masters.roles.view", "masters.leaveTypes.view",
+      "masters.shiftTemplates.view", "masters.holidays.view", "masters.incidentCategories.view",
+      "masters.permissions.manage", "masters.dataScope.manage", "admin.companies.view",
+    ],
   },
   {
     key: "dashboards",
     label: "Dashboards",
-    prefixes: ["dashboard", "management"],
+    prefixes: ["dashboard", "management", "manager"],
+    audience: [
+      "dashboard.hr.view", "dashboard.management.view", "dashboard.hrAnalytics.view",
+      "dashboard.manager.view", "admin.moduleUtilization.view",
+    ],
   },
 ];
 
-// prefix -> module key, built once.
-const PREFIX_TO_MODULE = new Map<string, string>();
+/* GETs fired by shared widgets on almost every screen — the navbar's own
+ * profile load, employee pickers, the announcement popup. Opening any page
+ * triggers them, so they're not use of the module they happen to live in.
+ * Paths are normalised (numeric segments → :id) before matching. */
+const PASSIVE_GETS = new Set([
+  "/api/employees/:id",
+  "/api/employees/:id/requests",
+  "/api/employees/active",
+  "/api/employees/today",
+  "/api/employees/incharge",
+  "/api/employees/specific-roles",
+  "/api/employees/by-role",
+  "/api/employees/dept",
+  "/api/announcement/live/all",
+  "/api/announcement/live-employee",
+  "/api/assets/meta",
+]);
+
+// prefix -> module, built once.
+const PREFIX_TO_MODULE = new Map<string, ModuleDef>();
 for (const m of MODULE_MAP) {
-  for (const p of m.prefixes) PREFIX_TO_MODULE.set(p, m.key);
+  for (const p of m.prefixes) PREFIX_TO_MODULE.set(p, m);
 }
 
 interface UserLite {
@@ -117,24 +180,29 @@ export const getModuleUsageSummary = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "'from' must be on or before 'to'" });
     }
 
-    // 1) Distinct (userId, path prefix) pairs in the window.
-    //    SUBSTRING_INDEX(SUBSTRING_INDEX(path,'/',3),'/',-1) extracts the
-    //    segment after /api/ — e.g. '/api/leaves/123' → 'leaves'.
-    const rows = await prisma.$queryRaw<{ userId: number; prefix: string }[]>(
-      Prisma.sql`
-        SELECT DISTINCT
-          userId,
-          SUBSTRING_INDEX(SUBSTRING_INDEX(path, '/', 3), '/', -1) AS prefix
-        FROM \`ApiAccessLog\`
-        WHERE createdAt >= ${from}
-          AND createdAt <= ${to}
-          AND isAnonymous = false
-          AND userId IS NOT NULL
-          AND path LIKE '/api/%'
-      `,
-    );
+    // 1) Distinct (userId, method, normalised path) in the window. The path is
+    //    kept (not just its prefix) so background lookups can be told apart
+    //    from real work; numeric ids are folded so the set stays small.
+    const [rows, firstLog] = await Promise.all([
+      prisma.$queryRaw<{ userId: number; method: string; path: string }[]>(
+        Prisma.sql`
+          SELECT DISTINCT
+            userId,
+            method,
+            REGEXP_REPLACE(path, '/[0-9]+(/|$)', '/:id$1') AS path
+          FROM \`ApiAccessLog\`
+          WHERE createdAt >= ${from}
+            AND createdAt <= ${to}
+            AND isAnonymous = false
+            AND userId IS NOT NULL
+            AND path LIKE '/api/%'
+            AND statusCode < 400
+        `,
+      ),
+      prisma.apiAccessLog.findFirst({ orderBy: { createdAt: "asc" }, select: { createdAt: true } }),
+    ]);
 
-    // 2) Eligible denominator: employees who currently have system access
+    // 2) Employees who currently have system access
     //    (same definition as src/lib/employeeAccess.ts: ACTIVE or NOTICE_PERIOD).
     const employees = await prisma.employee.findMany({
       where: { employmentStatus: { in: ["ACTIVE", "NOTICE_PERIOD"] } },
@@ -155,31 +223,39 @@ export const getModuleUsageSummary = async (req: Request, res: Response) => {
       department: e.Department?.name ?? null,
     }));
     const eligibleById = new Map(eligible.map((u) => [u.id, u]));
+    const permsById = await resolvePermissionsBulk(eligible.map((u) => u.id));
 
-    // 3) Per-module sets of distinct users (only counting eligible employees).
+    // 3) Per-module sets of distinct users.
     const usersByModule = new Map<string, Set<number>>();
     for (const m of MODULE_MAP) usersByModule.set(m.key, new Set());
 
     for (const row of rows) {
       const userId = Number(row.userId);
-      if (!eligibleById.has(userId)) continue; // resigned/terminated since → not in denominator
-      const moduleKey = PREFIX_TO_MODULE.get(String(row.prefix));
-      if (!moduleKey) continue; // infrastructure or unknown prefix
-      usersByModule.get(moduleKey)!.add(userId);
+      if (!eligibleById.has(userId)) continue; // resigned/terminated since
+      const path = String(row.path);
+      const mod = PREFIX_TO_MODULE.get(path.split("/")[2] ?? "");
+      if (!mod) continue; // infrastructure or unknown prefix
+      const isRead = String(row.method).toUpperCase() === "GET";
+      if (isRead && (mod.writesOnly || PASSIVE_GETS.has(path))) continue;
+      usersByModule.get(mod.key)!.add(userId);
     }
 
     const modules = MODULE_MAP.map((m) => {
       const activeIds = usersByModule.get(m.key)!;
+      const audience = m.audience
+        ? eligible.filter((u) => m.audience!.some((k) => permsById.get(u.id)?.has(k)))
+        : eligible;
       const activeUsers: UserLite[] = [];
       const inactiveUsers: UserLite[] = [];
-      for (const u of eligible) {
+      for (const u of audience) {
         (activeIds.has(u.id) ? activeUsers : inactiveUsers).push(u);
       }
-      const eligibleCount = eligible.length;
+      const eligibleCount = audience.length;
       const activeCount = activeUsers.length;
       return {
         key: m.key,
         label: m.label,
+        audience: m.audience ? "access" : "all",
         eligibleCount,
         activeCount,
         inactiveCount: eligibleCount - activeCount,
@@ -193,6 +269,9 @@ export const getModuleUsageSummary = async (req: Request, res: Response) => {
       from: from.toISOString(),
       to: to.toISOString(),
       totalEligible: eligible.length,
+      // Earliest log row still on file, and how long rows are kept.
+      dataFrom: firstLog?.createdAt.toISOString() ?? null,
+      retentionDays: config.security.retentionDays,
       modules,
     });
   } catch (err: any) {

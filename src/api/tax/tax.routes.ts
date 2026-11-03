@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticateToken } from '../../middleware/authMiddleware';
+import { requireDownloadGrant } from '../../middleware/requireDownloadGrant';
 import {
   getTaxProfile,
   updateTaxProfile,
@@ -43,7 +44,7 @@ router.get('/comparison/:employeeId', authenticateToken, getRegimeComparison);
 // ── Form 16 ───────────────────────────────────────────────────────────────────
 router.get('/form16',            authenticateToken, listForm16);
 router.post('/form16/email',     authenticateToken, emailForm16Batch);
-router.get('/form16/download',   authenticateToken, downloadForm16);
-router.get('/form16/download/:employeeId', authenticateToken, downloadForm16);
+router.get('/form16/download',   authenticateToken, requireDownloadGrant, downloadForm16);
+router.get('/form16/download/:employeeId', authenticateToken, requireDownloadGrant, downloadForm16);
 
 export default router;

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticateToken } from '../../middleware/authMiddleware';
+import { requireDownloadGrant } from '../../middleware/requireDownloadGrant';
 import {
   listTemplates, getTemplate, upsertTemplate, deleteTemplate, getTokens,
   previewLetter, issueLetter, downloadIssuedLetter, listIssued, listMyLetters,
@@ -16,7 +17,7 @@ router.get('/my', authenticateToken, listMyLetters);
 
 // Issued-letter history
 router.get('/issued',                authenticateToken, listIssued);
-router.get('/issued/:id/pdf',        authenticateToken, downloadIssuedLetter);
+router.get('/issued/:id/pdf',        authenticateToken, requireDownloadGrant, downloadIssuedLetter);
 router.patch('/issued/:id/revoke',   authenticateToken, revokeIssued);
 
 // Render + issue
