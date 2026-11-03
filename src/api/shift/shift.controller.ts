@@ -3967,9 +3967,9 @@ async function buildShiftAdherenceReport(month: number, year: number): Promise<A
 for (const leave of leaves) {
   let code = leave.leaveType.name.toUpperCase();
 
-  if (code.includes('casual')) code = 'CL';
-  else if (code.includes('sick')) code = 'SL';
-  else if (code.includes('comp')) code = 'CO';
+  // if (code.includes('casual')) code = 'CL';
+  // else if (code.includes('sick')) code = 'SL';
+  // else if (code.includes('comp')) code = 'CO';
 
   const from = isoLocalDate(leave.startDate);
   const to = isoLocalDate(leave.endDate);
