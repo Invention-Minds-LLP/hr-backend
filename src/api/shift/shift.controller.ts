@@ -3824,13 +3824,14 @@ type AdherenceCell = {
   iso: string;
   dayName: string;
   isSunday: boolean;
-  type: 'MATCH' | 'MISMATCH' | 'NO_SHIFT' | 'WEEKOFF' | 'HOLIDAY' | 'ABSENT' | 'EMPTY';
+  type: 'MATCH' | 'MISMATCH' | 'NO_SHIFT' | 'WEEKOFF' | 'HOLIDAY' | 'ABSENT' | 'LEAVE' | 'EMPTY';
   allottedName: string | null;
   allottedType: string | null;
   workedName: string | null;
   workedType: string | null;
   checkIn: string;
   note: string | null;
+  leaveType?: string | null;
 };
 
 type AdherenceRow = {
@@ -3887,6 +3888,26 @@ async function buildShiftAdherenceReport(month: number, year: number): Promise<A
   const attByKey = new Map<string, (typeof attendance)[number]>();
   for (const a of attendance) attByKey.set(`${a.employeeId}_${isoLocalDate(a.date)}`, a);
 
+  const leaves = empIds.length
+  ? await prisma.leaveRequest.findMany({
+      where: {
+        employeeId: { in: empIds },
+        status: 'APPROVED',
+        cancelledAt: null,
+        startDate: { lt: end },
+        endDate: { gte: start },
+      },
+      select: {
+        employeeId: true,
+        startDate: true,
+        endDate: true,
+        leaveType: {
+          select: { name: true },
+        },
+      },
+    })
+  : [];
+  console.log('Approved leaves:', leaves);
   // Shift templates for nearest-match, grouped by department (fallback: all).
   const templates = await prisma.shiftTemplate.findMany({
     select: { id: true, name: true, shiftType: true, startTime: true, departments: { select: { id: true } } },
@@ -3942,6 +3963,26 @@ async function buildShiftAdherenceReport(month: number, year: number): Promise<A
     });
   }
 
+  const leaveByKey = new Map<string, string>();
+
+for (const leave of leaves) {
+  let code = leave.leaveType.name.toUpperCase();
+
+  if (code.includes('casual')) code = 'CL';
+  else if (code.includes('sick')) code = 'SL';
+  else if (code.includes('comp')) code = 'CO';
+
+  const from = isoLocalDate(leave.startDate);
+  const to = isoLocalDate(leave.endDate);
+
+  for (const day of days) {
+    if (day.iso >= from && day.iso <= to) {
+      leaveByKey.set(`${leave.employeeId}_${day.iso}`, code);
+    }
+  }
+}
+console.log('Leave map:', Array.from(leaveByKey.entries()));
+
   const shiftTypeSet = new Set<string>();
 
   const rows: AdherenceRow[] = employees.map(emp => {
@@ -3988,9 +4029,18 @@ async function buildShiftAdherenceReport(month: number, year: number): Promise<A
         return base;
       }
 
+        console.log('Checking leave:', key);
+console.log('Found leave:', leaveByKey.get(key));
+
       // No check-in
+      const leaveType = leaveByKey.get(key);
       if (isHoliday) { base.type = 'HOLIDAY'; base.note = holidayNameByIso.get(dm.iso) ?? 'Holiday'; summary.holiday++; }
       else if (isWeekOff) { base.type = 'WEEKOFF'; summary.weekOff++; }
+      else if (leaveType) {
+  base.type = 'LEAVE';
+  base.leaveType = leaveType;
+  base.note = leaveType;
+}
       else if (allotted) { base.type = 'ABSENT'; summary.absent++; }
       else base.type = 'EMPTY';
       return base;
