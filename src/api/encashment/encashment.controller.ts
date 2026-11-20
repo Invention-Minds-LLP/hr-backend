@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
+import { rebuildSummaryChainTx } from "../leave/leave.controller";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GET ENCASHMENT ELIGIBLE EMPLOYEES
@@ -223,6 +224,15 @@ export const processEncashment = async (req: Request, res: Response) => {
         ledgerId: ledger.id,
       };
     }, { timeout: 10000 });
+
+    // The encashment is committed — keep the monthly/yearly summaries in step.
+    // Outside the transaction (slow DB); a failure here must not report the
+    // encashment itself as failed.
+    try {
+      await rebuildSummaryChainTx(prisma, Number(employeeId), el.id, year, new Date().getMonth() + 1);
+    } catch (summaryErr) {
+      console.error("processEncashment summary rebuild failed:", summaryErr);
+    }
 
     return res.json(result);
   } catch (error: any) {

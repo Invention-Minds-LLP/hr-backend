@@ -1884,29 +1884,15 @@ export const updateLeaveStatus = async (req: AuthenticatedRequest, res: Response
       rebuildEmployeeId = body.employeeId;
       rebuildLeaveTypeId = body.leaveTypeId;
 
-      // Rebuild in order (month chain)
-      touchedMonths.sort((a, b) => a.year - b.year || a.month - b.month);
       if (
         rebuildEmployeeId !== null &&
         rebuildLeaveTypeId !== null
       ) {
-        for (const m of touchedMonths) {
-          await rebuildMonthlySummaryTx(
-            prisma,
-            rebuildEmployeeId,
-            rebuildLeaveTypeId,
-            m.year,
-            m.month
-          );
-        }
-
+        // Per financial year, rebuild from the earliest touched month onward so
+        // every later month picks up the new closing (not just the touched ones).
         for (const y of yearsTouched) {
-          await rebuildYearlySummaryTx(
-            prisma,
-            rebuildEmployeeId,
-            rebuildLeaveTypeId,
-            y
-          );
+          const fromMonth = earliestFyMonth(touchedMonths.filter((t: any) => t.year === y).map((t: any) => t.month));
+          await rebuildSummaryChainTx(prisma, rebuildEmployeeId, rebuildLeaveTypeId, y, fromMonth);
         }
       }
     }
@@ -2159,8 +2145,7 @@ export const createLeaveBalances = async (req: Request, res: Response) => {
     // 🔁 REBUILD SUMMARIES (OUTSIDE TX)
     // =========================
     for (const leaveTypeId of affectedLeaveTypes) {
-      await rebuildMonthlySummaryTx(prisma, employeeId, leaveTypeId, year, month);
-      await rebuildYearlySummaryTx(prisma, employeeId, leaveTypeId, year);
+      await rebuildSummaryChainTx(prisma, employeeId, leaveTypeId, year, month);
     }
 
     return res.json({ message: "Leave balances updated successfully" });
@@ -3129,15 +3114,19 @@ async function rebuildYearlySummaryTx(
   // const opening = months.find((m) => m.month === 1)?.opening ?? 0;
   const opening = months.find((m) => m.month === 4)?.opening ?? 0;
   const credited = months.reduce((s, m) => s + Number(m.credited ?? 0), 0);
-  const used = months.reduce((s, m) => s + Number(m.used ?? 0), 0);
+  const usedInclEncashment = months.reduce((s, m) => s + Number(m.used ?? 0), 0);
   const lapsed = months.reduce((s, m) => s + Number(m.lapsed ?? 0), 0);
 
-  // Sum encashment debits from the ledger for this year
+  // Encashment debits for this year, reported as their own column. The monthly
+  // summary has no encashed column, so it counts them inside `used`; take them
+  // out here so yearly "used" is leave actually taken and the closing doesn't
+  // subtract the encashed days twice (it used to come out short by exactly that).
   const encashmentEntries = await tx.leaveLedger.findMany({
     where: { employeeId, leaveTypeId, year, action: "ENCASHMENT" },
     select: { debit: true },
   });
   const encashed = encashmentEntries.reduce((s, e) => s + Number(e.debit ?? 0), 0);
+  const used = usedInclEncashment - encashed;
 
   const closing = opening + credited - used - lapsed - encashed;
 
@@ -3151,6 +3140,74 @@ async function rebuildYearlySummaryTx(
 
   return { opening, credited, used, lapsed, closing };
 }
+
+/**
+ * Rebuild `fromMonth` and then every LATER month of the same financial year,
+ * followed by the yearly summary.
+ *
+ * Each month's opening is the previous month's closing, so rebuilding only the
+ * month a change landed in leaves every later month that was already built
+ * with a stale opening. That is how a leave recorded in April after May's row
+ * existed made May–October all read 6 days too high (JMRH175).
+ *
+ * Later months are rebuilt up to the last one that has a summary row or a
+ * ledger entry, filling any gap months in between so the chain stays unbroken.
+ * Months after the current month are never created — the cascade stops at
+ * today for the running financial year.
+ *
+ * `openingOverride` applies to `fromMonth` only, exactly as in
+ * rebuildMonthlySummaryTx.
+ */
+export async function rebuildSummaryChainTx(
+  tx: Tx,
+  employeeId: number,
+  leaveTypeId: number,
+  year: number,
+  fromMonth: number,
+  openingOverride?: number
+) {
+  await rebuildMonthlySummaryTx(tx, employeeId, leaveTypeId, year, fromMonth, openingOverride);
+
+  const today = new Date();
+  const currentFy = getFinancialYear(today);
+  // A future financial year has nothing after today to cascade into.
+  if (year <= currentFy) {
+    const lastAllowed = year === currentFy ? today.getMonth() + 1 : 3; // March closes a past FY
+    const later = fyMonthsBetween(fromMonth, lastAllowed).slice(1);
+
+    if (later.length) {
+      const [rows, ledgerMonths] = await Promise.all([
+        tx.leaveMonthlySummary.findMany({
+          where: { employeeId, leaveTypeId, year, month: { in: later } },
+          select: { month: true },
+        }),
+        tx.leaveLedger.findMany({
+          where: { employeeId, leaveTypeId, year, month: { in: later } },
+          select: { month: true },
+          distinct: ["month"],
+        }),
+      ]);
+      const present = new Set<number>(
+        [...rows, ...ledgerMonths].map((r) => r.month).filter((m): m is number => m !== null)
+      );
+      // Rebuild through the last month that actually holds something.
+      let lastIdx = -1;
+      later.forEach((m, i) => { if (present.has(m)) lastIdx = i; });
+      for (const m of later.slice(0, lastIdx + 1)) {
+        await rebuildMonthlySummaryTx(tx, employeeId, leaveTypeId, year, m);
+      }
+    }
+  }
+
+  await rebuildYearlySummaryTx(tx, employeeId, leaveTypeId, year);
+}
+
+/** The month that comes first in financial-year order (April first, March last). */
+export function earliestFyMonth(months: number[]): number {
+  const idx = (m: number) => (m >= 4 ? m - 4 : m + 8);
+  return months.reduce((a, b) => (idx(b) < idx(a) ? b : a));
+}
+
 /**
  * If a leave spans multiple months, you should rebuild all touched months.
  */
@@ -3629,6 +3686,17 @@ async function runELAccrual(overrideYear?: number, overrideMonth?: number) {
     calMonth = nowIst.month === 1 ? 12 : nowIst.month - 1;
     calYear = nowIst.month === 1 ? nowIst.year - 1 : nowIst.year;
   }
+  // A credit is for a month that has ENDED. The manual trigger takes a
+  // financial year, so {year: 2026, month: 3} means March 2027 — passing the
+  // calendar year by mistake posted a credit into a future month (seen live as
+  // a "2026 / March" row). Refuse any period whose month isn't over yet.
+  const periodEnd = new Date(calYear, calMonth, 0); // last day of calMonth
+  if (atStartOfDay(new Date()) <= periodEnd) {
+    throw new Error(
+      `EL accrual for ${calMonth}/${calYear} refused — that month has not ended yet. ` +
+      `Note: "year" is the FINANCIAL year (Jan–Mar belong to the previous year's FY).`
+    );
+  }
   const month = calMonth;
   const year = calMonth >= 4 ? calYear : calYear - 1; // financial year
 
@@ -3827,8 +3895,7 @@ async function runELAccrual(overrideYear?: number, overrideMonth?: number) {
 
       // 4.8️⃣ Summaries — outside transaction to avoid timeout
       if (didCredit) {
-        await rebuildMonthlySummaryTx(prisma, emp.id, el.id, year, month);
-        await rebuildYearlySummaryTx(prisma, emp.id, el.id, year);
+        await rebuildSummaryChainTx(prisma, emp.id, el.id, year, month);
       }
     } catch (err: any) {
       errors.push(`emp ${emp.id}: ${err?.message ?? "unknown"}`);
@@ -4408,20 +4475,7 @@ export const bulkUploadLeaveBalancesExcel = async (req: Request, res: Response) 
       for (const key of affected) {
         const [employeeId, leaveTypeId] = key.split("-").map(Number);
 
-        await rebuildMonthlySummaryTx(
-          prisma,
-          employeeId,
-          leaveTypeId,
-          year,
-          month
-        );
-
-        await rebuildYearlySummaryTx(
-          prisma,
-          employeeId,
-          leaveTypeId,
-          year
-        );
+        await rebuildSummaryChainTx(prisma, employeeId, leaveTypeId, year, month);
       }
 
       return res.json({

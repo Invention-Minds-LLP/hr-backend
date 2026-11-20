@@ -3,7 +3,7 @@ import { prisma } from "../../lib/prisma";
 import { normalizeAttendanceStatus } from "../../lib/attendanceStatus";
 import {
   countWorkingDays, getTouchedMonths, insertLedgerTx, getLastLedgerBalanceTx,
-  getCalendarYear, computeTotalUsed,
+  getCalendarYear, computeTotalUsed, rebuildSummaryChainTx, earliestFyMonth,
 } from "../leave/leave.controller";
 import { createNotification } from "../notifications/notifications.controller";
 // NOTE: hr-corrections has its own local getFinancialYear() — reuse that.
@@ -1322,6 +1322,21 @@ export const applyLeaveOnBehalf = async (req: any, res: Response) => {
 
       return leave;
     }, { timeout: 15000 });
+
+    // Keep the monthly/yearly summaries in step with the ledger debits above —
+    // from the earliest touched month onward, outside the transaction (slow DB).
+    // The leave is already committed, so a failure here is logged, not returned.
+    if (!SKIP_BALANCE_TYPES.includes(lt.name)) {
+      try {
+        const touched = getTouchedMonths(start, end);
+        for (const fy of Array.from(new Set(touched.map((t) => t.year)))) {
+          const fromMonth = earliestFyMonth(touched.filter((t) => t.year === fy).map((t) => t.month));
+          await rebuildSummaryChainTx(prisma, Number(employeeId), Number(leaveTypeId), fy, fromMonth);
+        }
+      } catch (summaryErr) {
+        console.error("[applyLeaveOnBehalf summary rebuild] failed:", summaryErr);
+      }
+    }
 
     // ── Notification (employee only — supervisors are not notified for
     //    HR corrections / HR-applied leave; failures don't roll back). ──

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { PrismaClient } from '@prisma/client';
 import { createNotification } from '../notifications/notifications.controller';
+import { rebuildSummaryChainTx } from '../leave/leave.controller';
 import { ShiftType } from '@prisma/client';
 import { generateCompOffIfEligible } from '../../services/comOff.service';
 import { resolveAttendanceMode } from '../../lib/attendanceMode';
@@ -1317,6 +1318,10 @@ export async function autoCancelLeaveIfPresent(employeeId: number, date: Date) {
       }
     }
 
+    // Set when the CANCELLATION ledger entry below is written, so the summaries
+    // can be rebuilt once the transaction has committed.
+    let ledgerWritten = false;
+
     await prisma.$transaction(async (tx) => {
       // ── Cancel / shrink / split the leave ──────────────────────────
       if (isSingle) {
@@ -1424,6 +1429,7 @@ export async function autoCancelLeaveIfPresent(employeeId: number, date: Date) {
               remarks: `Auto-cancelled: Present via biometric on ${fmtDate(date)}`,
             },
           });
+          ledgerWritten = true;
         }
       }
 
@@ -1440,6 +1446,16 @@ export async function autoCancelLeaveIfPresent(employeeId: number, date: Date) {
         }
       }
     }, { timeout: 15000 });
+
+    // Restored leave changes this month's closing and every later month's
+    // opening — rebuild the summary chain outside the transaction.
+    if (ledgerWritten) {
+      try {
+        await rebuildSummaryChainTx(prisma, employeeId, leave.leaveTypeId, year, month);
+      } catch (summaryErr) {
+        console.error(`Summary rebuild after biometric auto-cancel failed for emp ${employeeId}:`, summaryErr);
+      }
+    }
 
     // ── Notifications ────────────────────────────────────────────────
     const empName = `${leave.employee.firstName} ${leave.employee.lastName}`;

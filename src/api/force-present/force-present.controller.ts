@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { Prisma } from "@prisma/client";
 import { compOffExpiryFor } from "../../services/comOff.service";
+import { rebuildSummaryChainTx } from "../leave/leave.controller";
 
 type Tx = Prisma.TransactionClient;
 
@@ -86,6 +87,9 @@ export const markForcePresent = async (req: Request, res: Response) => {
         // (e.g., emergency, went directly to client without biometric)
         let daysRestored = 0;
         let leaveRequestId: number | null = null;
+        // Set when a CANCELLATION ledger entry is written, so the summaries can
+        // be rebuilt once the transaction has committed.
+        let ledgerLeaveTypeId: number | null = null;
 
         if (leave) {
           leaveRequestId = leave.id;
@@ -210,6 +214,7 @@ export const markForcePresent = async (req: Request, res: Response) => {
                   remarks: `Force present on ${date}: ${reason}`,
                 },
               });
+              ledgerLeaveTypeId = leave.leaveTypeId;
             }
           } else {
             // CO leave: restore the CompOff credit that was consumed
@@ -289,10 +294,21 @@ export const markForcePresent = async (req: Request, res: Response) => {
           },
         });
 
-        return { kind: "OK" as const, status: 200, body: action, attendanceId };
+        return { kind: "OK" as const, status: 200, body: action, attendanceId, ledgerLeaveTypeId };
       },
       { timeout: 20000 }
     );
+
+    // Restored leave changes this month's closing and every later month's
+    // opening — rebuild the summary chain. The force-present is committed, so a
+    // failure here is logged rather than returned.
+    if (result.ledgerLeaveTypeId !== null) {
+      try {
+        await rebuildSummaryChainTx(prisma, Number(employeeId), result.ledgerLeaveTypeId, year, month);
+      } catch (summaryErr) {
+        console.error("markForcePresent summary rebuild failed:", summaryErr);
+      }
+    }
 
     // Link attendance to the force-present action outside the transaction
     // (non-critical back-reference — keeps transaction lean)
