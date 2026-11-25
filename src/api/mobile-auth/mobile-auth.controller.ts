@@ -10,6 +10,31 @@ import { sendEmailOtp } from '../../utils/sendEmailOtp';
 import { resolveAttendanceMode } from '../../lib/attendanceMode';
 import { config } from '../../config';
 
+/**
+ * Load a mobile sign-in session and reject unknown / expired ones (15 min TTL).
+ * Every step after phone/init goes through this so a bad sessionId is a clean
+ * 401, never a crash.
+ */
+async function liveSession(sessionId: unknown, res: Response) {
+    if (typeof sessionId !== 'string' || !sessionId) {
+        res.status(401).json({ message: 'Session not found' });
+        return null;
+    }
+    const session = await prisma.mobileAuthSession.findUnique({
+        where: { id: sessionId },
+        include: { employee: true }
+    });
+    if (!session) {
+        res.status(401).json({ message: 'Session not found' });
+        return null;
+    }
+    if (session.expiresAt < new Date()) {
+        res.status(401).json({ message: 'Session expired. Please start again.' });
+        return null;
+    }
+    return session;
+}
+
 export const mobilePhoneInit = async (req: Request, res: Response) => {
     const { phone } = req.body;
 
@@ -133,14 +158,8 @@ export const mobilePhoneInit = async (req: Request, res: Response) => {
 export const mobilePhoneVerify = async (req: Request, res: Response) => {
     const { sessionId, otp } = req.body;
 
-    const session = await prisma.mobileAuthSession.findUnique({
-        where: { id: sessionId },
-        include: { employee: true }
-    });
-
-    if (!session || session.expiresAt < new Date()) {
-        return res.status(401).json({ message: 'Session expired' });
-    }
+    const session = await liveSession(sessionId, res);
+    if (!session) return;
 
     const valid = await otpService.verify(session.employee.phone, otp);
     if (!valid) {
@@ -157,17 +176,11 @@ export const mobilePhoneVerify = async (req: Request, res: Response) => {
 export const mobileConfirmIdentity = async (req: Request, res: Response) => {
     const { sessionId, firstName, departmentId } = req.body;
 
-    const session = await prisma.mobileAuthSession.findUnique({
-        where: { id: sessionId },
-        include: { employee: true }
-    });
-
-    if (!session) {
-        return res.status(401).json({ message: 'Session not found' });
-    }
+    const session = await liveSession(sessionId, res);
+    if (!session) return;
 
     if (
-        session?.employee.firstName !== firstName ||
+        session.employee.firstName !== firstName ||
         session.employee.departmentId !== departmentId
     ) {
         return res.status(401).json({ message: 'Identity mismatch' });
@@ -190,23 +203,18 @@ export const mobileConfirmClient = async (req: Request, res: Response) => {
     const { sessionId, confirmed } = req.body;
 
     if (!confirmed) {
-        // User said "No"
-        await prisma.mobileAuthSession.delete({
-            where: { id: sessionId }
-        });
+        // User said "No". deleteMany: an unknown/already-removed session is not an error.
+        if (typeof sessionId === 'string' && sessionId) {
+            await prisma.mobileAuthSession.deleteMany({ where: { id: sessionId } });
+        }
 
         return res.status(400).json({
             message: 'Login cancelled by user'
         });
     }
 
-    const session = await prisma.mobileAuthSession.findUnique({
-        where: { id: sessionId }
-    });
-
-    if (!session) {
-        return res.status(401).json({ message: 'Session not found' });
-    }
+    const session = await liveSession(sessionId, res);
+    if (!session) return;
 
     await prisma.mobileAuthSession.update({
         where: { id: sessionId },
@@ -219,17 +227,10 @@ export const mobileConfirmClient = async (req: Request, res: Response) => {
 export const mobileEmailInit = async (req: Request, res: Response) => {
     const { sessionId, email } = req.body;
 
-    const session = await prisma.mobileAuthSession.findUnique({
-        where: { id: sessionId },
-        include: { employee: true }
-    });
+    const session = await liveSession(sessionId, res);
+    if (!session) return;
 
-    if (!session) {
-        return res.status(401).json({ message: 'Session not found' });
-    }
-    console.log('Email OTP init for session:', sessionId, 'Employee:', session.employee, 'Provided email:', email);
-
-    if (session?.employee.email !== email) {
+    if (session.employee.email !== email) {
         return res.status(401).json({ message: 'Email mismatch' });
     }
 
@@ -238,7 +239,7 @@ export const mobileEmailInit = async (req: Request, res: Response) => {
     await sendEmailOtp({
         to: email,
         otp,
-        employeeName: session?.employee.firstName,
+        employeeName: session.employee.firstName,
         purpose: 'Mobile Login'
     });
 
@@ -248,12 +249,13 @@ export const mobileEmailInit = async (req: Request, res: Response) => {
 export const mobileEmailVerify = async (req: Request, res: Response) => {
     const { sessionId, otp } = req.body;
 
-    const session = await prisma.mobileAuthSession.findUnique({
-        where: { id: sessionId },
-        include: { employee: true }
-    });
+    const session = await liveSession(sessionId, res);
+    if (!session) return;
+    if (!session.employee.email) {
+        return res.status(400).json({ message: 'No email is on file for this employee. Please contact HR.' });
+    }
 
-    const valid = await otpService.verify(session!.employee.email!, otp);
+    const valid = await otpService.verify(session.employee.email, otp);
     if (!valid) return res.status(401).json({ message: 'Invalid OTP' });
 
     await prisma.mobileAuthSession.update({
@@ -279,10 +281,23 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
     });
 
 
-    const employee = session?.employee;
-    console.log('Finalizing login for session:', sessionId, 'Employee:', employee);
+    if (!session) {
+        return res.status(401).json({ message: 'Session not found' });
+    }
+    if (session.expiresAt < new Date()) {
+        return res.status(401).json({ message: 'Session expired. Please start again.' });
+    }
+
+    // Every earlier step must have been completed on the server — the app's
+    // screens alone are not proof. Phone OTP may be skipped only when this
+    // backend is configured to skip it (MOBILE_SKIP_PHONE_OTP=true).
+    const phoneOk = session.phoneVerified || config.flags.skipPhoneOtp;
+    if (!phoneOk || !session.emailVerified || !session.identityOk) {
+        return res.status(401).json({ message: 'Please verify your phone/email code first' });
+    }
+
+    const employee = session.employee;
     if (
-        !employee ||
         employee.employeeCode !== employeeCode ||
         employee.bloodGroup !== bloodGroup
     ) {
@@ -292,14 +307,17 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
     const user = await prisma.user.findUnique({
         where: { employeeCode }
     });
+    if (!user) {
+        return res.status(401).json({ message: 'No login exists for this employee. Please contact HR.' });
+    }
 
     // Get role from Employee table
     const empRole = await prisma.role.findUnique({ where: { id: employee.roleId }, select: { name: true } });
-    const roleName = empRole?.name ?? user!.role;
+    const roleName = empRole?.name ?? user.role;
 
     const accessToken = jwt.sign(
         {
-            userId: user!.id,
+            userId: user.id,
             empId: employee.id,
             role: roleName
         },
@@ -311,7 +329,7 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
 
     await prisma.refreshToken.create({
         data: {
-            userId: user!.id,
+            userId: user.id,
             token: refreshToken,
             expiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000)
         }
@@ -324,9 +342,9 @@ export const mobileFinalizeLogin = async (req: Request, res: Response) => {
         refreshToken,
 
         // user details
-        username: user!.username,
-        employeeCode: user!.employeeCode,
-        id: user!.id,
+        username: user.username,
+        employeeCode: user.employeeCode,
+        id: user.id,
         role: roleName,
 
         // employee details

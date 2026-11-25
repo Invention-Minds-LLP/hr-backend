@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { authenticateToken } from "../../middleware/authMiddleware";
+import { authenticateToken, requirePermission } from "../../middleware/authMiddleware";
 import {
     getEmployeeSessions, getSessionPoints, getGeoTrackingStatus,
     updateGeoConsent,
@@ -32,15 +32,19 @@ router.post(
   createLocationSession
 );
 
+// Any employee's sessions / route points: Location Tracking viewers only
+// (previously any logged-in user could read anyone's location history).
 router.get(
     "/manager/geo/:employeeId/sessions",
     authenticateToken,
+    requirePermission("admin.geoTracking.view"),
     getEmployeeSessions
 );
 
 router.get(
     "/manager/geo/session/:sessionId/points",
     authenticateToken,
+    requirePermission("admin.geoTracking.view"),
     getSessionPoints
 );
 router.get(

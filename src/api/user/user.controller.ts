@@ -88,7 +88,9 @@ export const createUser = async (req: Request, res: Response) => {
         username,
         passwordHash: hashedPassword,
         role: role.name
-      }
+      },
+      // Never send the password hash or MFA secret back to the client.
+      select: { id: true, employeeCode: true, username: true, role: true, createdAt: true }
     });
 
     res.status(201).json(user);
@@ -307,17 +309,20 @@ export const resetMyPassword = async (req: Request, res: Response) => {
     const { confirmPassword, newPassword } = req.body;
 
     if (!authUserId) return res.status(401).json({ error: "Unauthorized" });
+    // Every client (web settings, mobile) sends `confirmPassword` as the
+    // re-typed NEW password — none sends the current password, so no
+    // current-password check is possible here without a client change.
     if (!confirmPassword || !newPassword) {
-      return res.status(400).json({ error: "currentPassword and newPassword are required" });
+      return res.status(400).json({ error: "newPassword and confirmPassword are required" });
+    }
+    if (confirmPassword !== newPassword) {
+      return res.status(400).json({ error: "Passwords do not match" });
     }
 
     // Always operate on the authenticated user's own account — never trust a
     // userId supplied in the request body (that allowed resetting anyone's password).
     const user = await prisma.user.findUnique({ where: { id: authUserId } });
     if (!user) return res.status(404).json({ error: "User not found" });
-
-    const ok = await bcrypt.compare(confirmPassword, user.passwordHash);
-    // if (!ok) return res.status(401).json({ error: "Current password is incorrect" });
 
     const newHash = await bcrypt.hash(newPassword, 10);
     await prisma.user.update({

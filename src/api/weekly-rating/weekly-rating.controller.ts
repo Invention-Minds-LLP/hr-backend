@@ -1,6 +1,61 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
+import { HOD_ROLE_ID, HR_ROLE_ID, isDepartmentHead } from "../../lib/departmentHeads";
+import { isInScope, scopedEmployeeWhere } from "../../lib/dataScope";
+import { MGMT_DASHBOARD_EMPID_ALLOWLIST } from "../../lib/permissions";
+import { resolvePermissions } from "../../lib/permissionResolver";
+
+// ── Access control ────────────────────────────────────────────────────────────
+// Identity always comes from the verified token, never from the request body or
+// query (same model as weekly-tracker.controller.ts). HR = HR Manager role or the
+// HR department (dept 1); Management = role 4 or the Management allow-list. HR /
+// Management reach is limited to their branch/department data scope.
+type Viewer = { empId: number; roleId: number | null; deptId: number | null; isHR: boolean; isHRManager: boolean; isMgmt: boolean };
+
+async function getViewer(req: Request): Promise<Viewer | null> {
+  const empId = Number((req as any).user?.empId ?? 0);
+  if (!empId) return null;
+  const me = await prisma.employee.findUnique({ where: { id: empId }, select: { roleId: true, departmentId: true } });
+  if (!me) return null;
+  return {
+    empId,
+    roleId: me.roleId ?? null,
+    deptId: me.departmentId ?? null,
+    isHR: me.roleId === HR_ROLE_ID || me.departmentId === 1,
+    isHRManager: me.roleId === HR_ROLE_ID,
+    isMgmt: me.roleId === 4 || MGMT_DASHBOARD_EMPID_ALLOWLIST.includes(empId),
+  };
+}
+
+type RatedEmployee = { id: number; reportingManager: number | null; departmentId: number | null };
+
+async function ratedEmployee(id: number): Promise<RatedEmployee | null> {
+  if (!Number.isInteger(id) || id <= 0) return null;
+  return prisma.employee.findUnique({ where: { id }, select: { id: true, reportingManager: true, departmentId: true } });
+}
+
+/**
+ * May `v` rate / review employee `emp` as a manager? Matches the web rating
+ * overview (roleIds 1/3/4): their reporting manager · a role-3 HOD heading their
+ * department · the HR Manager (role 1) or Management (role 4) within scope.
+ */
+async function canRateOthers(v: Viewer, emp: RatedEmployee): Promise<boolean> {
+  if (v.empId === emp.id) return false;
+  if (emp.reportingManager && v.empId === emp.reportingManager) return true;
+  if (v.roleId === HOD_ROLE_ID && (await isDepartmentHead(v.empId, emp.departmentId))) return true;
+  if (v.isHRManager || v.isMgmt) return isInScope(v.empId, emp.id);
+  return false;
+}
+
+/** Question masters: HR, or the existing Masters-menu permission (the rating-questions page has no own key). */
+async function canManageQuestions(v: Viewer): Promise<boolean> {
+  if (v.isHR) return true;
+  return (await resolvePermissions(v.empId)).includes("masters.section.view" as any);
+}
+
+const unauthorized = (res: Response) => res.status(401).json({ error: "Unauthorized" });
+const forbidden = (res: Response, msg: string) => res.status(403).json({ error: msg });
 
 // ── Helper: ISO week label ──────────────────────────────────────────────
 function getWeekLabel(date: Date): string {
@@ -129,7 +184,11 @@ export const getQuestionsForEmployee = async (req: Request, res: Response) => {
 
 export const createQuestion = async (req: Request, res: Response) => {
   try {
-    const { text, createdBy, designationId } = req.body;
+    const v = await getViewer(req);
+    if (!v) return unauthorized(res);
+    if (!(await canManageQuestions(v))) return forbidden(res, "Only HR can manage rating questions");
+    const { text, designationId } = req.body;
+    const createdBy = v.empId;
     if (!text?.trim()) return res.status(400).json({ error: "Question text is required" });
     if (!designationId) return res.status(400).json({ error: "Designation is required for custom questions" });
 
@@ -164,6 +223,9 @@ export const createQuestion = async (req: Request, res: Response) => {
 
 export const toggleQuestion = async (req: Request, res: Response) => {
   try {
+    const v = await getViewer(req);
+    if (!v) return unauthorized(res);
+    if (!(await canManageQuestions(v))) return forbidden(res, "Only HR can manage rating questions");
     const id = Number(req.params.id);
     const { isActive } = req.body;
 
@@ -197,8 +259,11 @@ export const toggleQuestion = async (req: Request, res: Response) => {
 // Delete removed — questions can only be deactivated, not deleted
 
 // Seed defaults if not present
-export const seedDefaultQuestions = async (_req: Request, res: Response) => {
+export const seedDefaultQuestions = async (req: Request, res: Response) => {
   try {
+    const v = await getViewer(req);
+    if (!v) return unauthorized(res);
+    if (!(await canManageQuestions(v))) return forbidden(res, "Only HR can manage rating questions");
     const existing = await prisma.weeklyRatingQuestion.count({ where: { isDefault: true } });
     if (existing > 0) return res.json({ message: "Default questions already exist", count: existing });
 
@@ -218,11 +283,19 @@ export const seedDefaultQuestions = async (_req: Request, res: Response) => {
 // Get team members for the manager to rate
 export const getTeamForRating = async (req: Request, res: Response) => {
   try {
-    const managerId = Number(req.query.managerId);
+    const v = await getViewer(req);
+    if (!v) return unauthorized(res);
+    // Ordinary managers always get their own team; only HR / Management may look
+    // at another manager's team, and only within their data scope.
+    const requested = Number(req.query.managerId) || v.empId;
+    let managerId = v.empId;
+    if (requested !== v.empId) {
+      if (!(v.isHR || v.isMgmt)) return forbidden(res, "You can only view your own team");
+      if (!(await isInScope(v.empId, requested))) return forbidden(res, "That manager is outside your scope");
+      managerId = requested;
+    }
     // Normalize so the exact-match lookup below finds the canonically-stored row.
     const weekStartDate = req.query.weekStartDate ? istWeekStart(new Date(String(req.query.weekStartDate))) : null;
-
-    if (!managerId) return res.status(400).json({ error: "managerId is required" });
 
     const team = await prisma.employee.findMany({
       where: {
@@ -272,10 +345,23 @@ export const getTeamForRating = async (req: Request, res: Response) => {
 // Manager rating: ratedBy !== employeeId → raterType = MANAGER
 export const submitRating = async (req: Request, res: Response) => {
   try {
-    const { employeeId, ratedBy, weekStartDate, weekEndDate, managerRemarks, answers, status } = req.body;
+    const v = await getViewer(req);
+    if (!v) return unauthorized(res);
+    // The rater is always the caller (body `ratedBy` is ignored, so nobody can
+    // forge someone else's self-rating or rate under another manager's name).
+    const { employeeId, weekStartDate, weekEndDate, managerRemarks, answers, status } = req.body;
+    const ratedBy = v.empId;
 
-    if (!employeeId || !ratedBy || !weekStartDate || !weekEndDate || !answers?.length) {
-      return res.status(400).json({ error: "employeeId, ratedBy, weekStartDate, weekEndDate, answers are required" });
+    if (!employeeId || !weekStartDate || !weekEndDate || !answers?.length) {
+      return res.status(400).json({ error: "employeeId, weekStartDate, weekEndDate, answers are required" });
+    }
+
+    if (Number(employeeId) !== v.empId) {
+      const emp = await ratedEmployee(Number(employeeId));
+      if (!emp) return res.status(404).json({ error: "Employee not found" });
+      if (!(await canRateOthers(v, emp))) {
+        return forbidden(res, "Only this employee's reporting manager, department head, HR Manager or Management can rate them");
+      }
     }
 
     if (answers.length > 10) {
@@ -314,6 +400,8 @@ export const submitRating = async (req: Request, res: Response) => {
       rating = await prisma.weeklyPerformanceRating.update({
         where: { id: existing.id },
         data: {
+          // Record who last rated (e.g. HOD revising the reporting manager's draft).
+          ratedBy,
           overallScore,
           managerRemarks: managerRemarks || null,
           status: status || "SUBMITTED",
@@ -361,6 +449,8 @@ export const submitRating = async (req: Request, res: Response) => {
 export const getRatingDetail = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
+    const v = await getViewer(req);
+    if (!v) return unauthorized(res);
     const rating = await prisma.weeklyPerformanceRating.findUnique({
       where: { id },
       include: {
@@ -369,6 +459,17 @@ export const getRatingDetail = async (req: Request, res: Response) => {
       },
     });
     if (!rating) return res.status(404).json({ error: "Rating not found" });
+
+    // The rated employee sees only their own SELF rating (manager ratings are
+    // private, as the web says). The rater, anyone allowed to rate this employee
+    // (manager prefill), and HR / Management in scope may read it.
+    const isOwnSelf = rating.employeeId === v.empId && (rating as any).raterType === "SELF";
+    let allowed = isOwnSelf || rating.ratedBy === v.empId;
+    if (!allowed && rating.employeeId !== v.empId) {
+      const emp = await ratedEmployee(rating.employeeId);
+      allowed = !!emp && ((await canRateOthers(v, emp)) || ((v.isHR || v.isMgmt) && (await isInScope(v.empId, emp.id))));
+    }
+    if (!allowed) return forbidden(res, "You do not have access to this rating");
     return res.json(rating);
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
@@ -405,13 +506,22 @@ export const getMyRatings = async (req: Request, res: Response) => {
 // HR: Get all ratings (filterable)
 export const getAllRatings = async (req: Request, res: Response) => {
   try {
+    // HR / Management only — this exposes manager ratings, which are private to
+    // the employee. Limited to the caller's branch/department data scope.
+    const v = await getViewer(req);
+    if (!v) return unauthorized(res);
+    if (!(v.isHR || v.isMgmt)) return forbidden(res, "Only HR or Management can view all ratings");
+
     const { employeeId, ratedBy, weekStartDate, departmentId, status } = req.query;
     const where: any = {};
     if (employeeId) where.employeeId = Number(employeeId);
     if (ratedBy) where.ratedBy = Number(ratedBy);
     if (status) where.status = String(status);
     if (weekStartDate) where.weekStartDate = istWeekStart(new Date(String(weekStartDate)));
-    if (departmentId) where.employee = { departmentId: Number(departmentId) };
+    const empScope = await scopedEmployeeWhere(v.empId);
+    const empFilters = [departmentId ? { departmentId: Number(departmentId) } : null, Object.keys(empScope).length ? empScope : null].filter(Boolean);
+    if (empFilters.length === 1) where.employee = empFilters[0];
+    else if (empFilters.length > 1) where.employee = { AND: empFilters };
 
     const ratings = await prisma.weeklyPerformanceRating.findMany({
       where,
@@ -450,9 +560,14 @@ export const getAllRatings = async (req: Request, res: Response) => {
 // Delete rating (only DRAFT)
 export const deleteRating = async (req: Request, res: Response) => {
   try {
+    const v = await getViewer(req);
+    if (!v) return unauthorized(res);
     const id = Number(req.params.id);
     const rating = await prisma.weeklyPerformanceRating.findUnique({ where: { id } });
     if (!rating) return res.status(404).json({ error: "Rating not found" });
+    // The person who wrote it, or HR (within scope).
+    const mayDelete = rating.ratedBy === v.empId || (v.isHR && (await isInScope(v.empId, rating.employeeId)));
+    if (!mayDelete) return forbidden(res, "You can only delete ratings you wrote");
     if (rating.status !== "DRAFT") return res.status(400).json({ error: "Can only delete DRAFT ratings" });
 
     await prisma.weeklyPerformanceRating.delete({ where: { id } });
@@ -516,7 +631,19 @@ export const getMySelfRatings = async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 export const getComparison = async (req: Request, res: Response) => {
   try {
+    const v = await getViewer(req);
+    if (!v) return unauthorized(res);
     const employeeId = Number(req.params.employeeId);
+    const emp = await ratedEmployee(employeeId);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+    // Self vs manager side by side: Management / HR within scope, or the
+    // employee's reporting manager / department head. Not the employee themselves
+    // (it reveals the private manager rating).
+    const isReviewer =
+      (emp.reportingManager != null && v.empId === emp.reportingManager) ||
+      (v.roleId === HOD_ROLE_ID && (await isDepartmentHead(v.empId, emp.departmentId)));
+    const isAdmin = (v.isHR || v.isMgmt) && v.empId !== emp.id && (await isInScope(v.empId, emp.id));
+    if (!isReviewer && !isAdmin) return forbidden(res, "You do not have access to this comparison");
     const weekStartParam = req.query.weekStartDate ? String(req.query.weekStartDate) : null;
 
     const where: any = { employeeId };

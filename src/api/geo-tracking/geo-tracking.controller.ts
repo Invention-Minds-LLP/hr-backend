@@ -1,6 +1,10 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { Prisma } from "@prisma/client";
+import { HOD_ROLE_ID, HR_ROLE_ID, headedDepartmentIds } from "../../lib/departmentHeads";
+import { withEmployeeScope } from "../../lib/dataScope";
+import { MGMT_DASHBOARD_EMPID_ALLOWLIST } from "../../lib/permissions";
 import fs from "fs";
 import path from "path";
 import formidable, { File as FormidableFile } from "formidable";
@@ -30,6 +34,19 @@ export function calculateDistance(
         Math.sin(dLon / 2) ** 2;
 
     return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+/** Session id from a body/param value (apps may send it as a string). null when not a positive integer. */
+function toSessionId(v: unknown): number | null {
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** Optional numeric field (accuracy / speed): a finite number or null. */
+function optionalNumber(v: unknown): number | null {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
 }
 
 
@@ -73,8 +90,39 @@ export const updateGeoConsent = async (req: AuthenticatedRequest, res: Response)
 /**
  * Add location point
  */
-export const addLocationPoint = async (req: Request, res: Response) => {
-    const { sessionId, latitude, longitude, accuracy, speed } = req.body;
+// A point is kept when EITHER condition holds:
+//   • moved >= MIN_POINT_DISTANCE_M from the last point  → captures the route
+//     shape while moving (a pure time throttle dropped most movement points), or
+//   • MAX_IDLE_MS elapsed since the last point           → a heartbeat while
+//     stationary, so presence at a site is still logged.
+// Volume stays bounded: ~1 point / 20 m while moving, ~1 / min while idle.
+const MIN_POINT_DISTANCE_M = 20;
+const MAX_IDLE_MS = 60000; // 60s
+
+export const addLocationPoint = async (req: AuthenticatedRequest, res: Response) => {
+    const empId = Number(req.user?.empId ?? 0);
+    const sessionId = toSessionId(req.body?.sessionId);
+    const latitude = Number(req.body?.latitude);
+    const longitude = Number(req.body?.longitude);
+    const accuracy = optionalNumber(req.body?.accuracy);
+    const speed = optionalNumber(req.body?.speed);
+    const { recordedAt } = req.body ?? {};
+
+    if (!sessionId) {
+        return res.status(400).json({ message: "Invalid session" });
+    }
+    if (
+        !Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+        !Number.isFinite(longitude) || longitude < -180 || longitude > 180
+    ) {
+        return res.status(400).json({ message: "Invalid coordinates" });
+    }
+
+    // Use the device's GPS fix time when supplied; fall back to server time.
+    // Without this, buffered points flushed in a batch all get the same insert
+    // timestamp (and out of order), which breaks route ordering and end-location.
+    const parsed = recordedAt != null ? new Date(recordedAt) : null;
+    const pointTime = parsed && !isNaN(parsed.getTime()) ? parsed : new Date();
 
     const session = await prisma.locationSession.findUnique({
         where: { id: sessionId }
@@ -82,6 +130,11 @@ export const addLocationPoint = async (req: Request, res: Response) => {
 
     if (!session || session.status !== "ACTIVE") {
         return res.status(400).json({ message: "Invalid session" });
+    }
+
+    // Only the session's own employee may add points to it.
+    if (session.employeeId !== empId) {
+        return res.status(403).json({ message: "Forbidden: not your session" });
     }
 
     const lastPoint = await prisma.locationPoint.findFirst({
@@ -99,11 +152,14 @@ export const addLocationPoint = async (req: Request, res: Response) => {
             longitude
         );
 
+        // Compare against the device fix time so this works for both live
+        // points and buffered batches.
         const timeDiff =
-            Date.now() - new Date(lastPoint.recordedAt).getTime();
+            pointTime.getTime() - new Date(lastPoint.recordedAt).getTime();
 
-        // skip noisy point
-        if (timeDiff < 300000) {
+        // Keep if the device moved enough OR enough time has passed; otherwise
+        // it's a near-duplicate of the last point — skip it.
+        if (distance < MIN_POINT_DISTANCE_M && timeDiff < MAX_IDLE_MS) {
           return res.json({ skipped: true });
         }
     }
@@ -114,7 +170,8 @@ export const addLocationPoint = async (req: Request, res: Response) => {
             latitude,
             longitude,
             accuracy,
-            speed
+            speed,
+            recordedAt: pointTime
         }
     });
 
@@ -215,7 +272,10 @@ export const startLocationSession = async (
     res: Response
 ) => {
     const empId = req.user.empId;
-    const { sessionId } = req.body;
+    const sessionId = toSessionId(req.body?.sessionId);
+    if (!sessionId) {
+        return res.status(400).json({ message: "Invalid session" });
+    }
 
     const session = await prisma.locationSession.findFirst({
         where: {
@@ -247,7 +307,10 @@ export const endLocationSession = async (
     res: Response
 ) => {
     const empId = req.user.empId;
-    const { sessionId } = req.body;
+    const sessionId = toSessionId(req.body?.sessionId);
+    if (!sessionId) {
+        return res.status(400).json({ message: "Invalid session" });
+    }
 
     const session = await prisma.locationSession.findFirst({
         where: {
@@ -401,7 +464,11 @@ export const updateSessionName = async (
   res: Response
 ) => {
   const empId = req.user.empId;
-  const { sessionId, name } = req.body;
+  const sessionId = toSessionId(req.body?.sessionId);
+  const { name } = req.body ?? {};
+  if (!sessionId) {
+    return res.status(400).json({ message: "Invalid session" });
+  }
 
   const session = await prisma.locationSession.findFirst({
     where: {
@@ -435,12 +502,40 @@ export const getManagerTeamSessions = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {
-  const managerId = req.user.empId;
+  const viewerId = Number(req.user?.empId ?? 0);
+  if (!viewerId) return res.status(401).json({ message: "Unauthorized" });
+
+  const me = await prisma.employee.findUnique({
+    where: { id: viewerId },
+    select: { roleId: true, departmentId: true },
+  });
+  if (!me) return res.status(401).json({ message: "Unauthorized" });
+
+  // Who sees whose field sessions (same rule as weekly reports):
+  //  - HR (HR Manager role or HR department) and Management: every employee in their
+  //    data scope who uses tracking (has sessions or tracking switched on);
+  //  - everyone else: their direct reports, the team they are in-charge of and, for
+  //    HODs, the departments they head. (Previously only direct reports, so HR saw
+  //    nothing for employees who don't report to them.)
+  const isHR = me.roleId === HR_ROLE_ID || me.departmentId === 1;
+  const isMgmt = me.roleId === 4 || MGMT_DASHBOARD_EMPID_ALLOWLIST.includes(viewerId);
+
+  let where: Prisma.EmployeeWhereInput;
+  if (isHR || isMgmt) {
+    where = (await withEmployeeScope(viewerId, {
+      OR: [{ locationSessions: { some: {} } }, { geoTrackingEnabled: true }],
+    })) as Prisma.EmployeeWhereInput;
+  } else {
+    const team: Prisma.EmployeeWhereInput[] = [{ reportingManager: viewerId }, { inchargeId: viewerId }];
+    if (me.roleId === HOD_ROLE_ID) {
+      const depts = await headedDepartmentIds(viewerId);
+      if (depts.length) team.push({ departmentId: { in: depts } });
+    }
+    where = { OR: team, id: { not: viewerId } };
+  }
 
   const employees = await prisma.employee.findMany({
-    where: {
-      reportingManager: managerId
-    },
+    where,
     select: {
       id: true,
       firstName: true,
@@ -449,7 +544,9 @@ export const getManagerTeamSessions = async (
       locationSessions: {
         orderBy: { createdAt: "desc" },
         include: {
-          locations: true,
+          // Chronological order — points can be inserted out of order when the
+          // app flushes offline-queued points after newer live ones.
+          locations: { orderBy: { recordedAt: "asc" } },
           photos: true
         }
       }

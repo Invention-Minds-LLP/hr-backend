@@ -37,6 +37,7 @@ import {
   getProbationHistory,
   getEmployeeAuditLog,
   queryAuditLog,
+  downloadEmployeeTemplate,
 } from "./employee.controller";
 import { authenticateToken, requirePermission } from "../../middleware/authMiddleware";
 import { bulkUploadLeaveBalancesExcel } from "../leave/leave.controller";
@@ -51,6 +52,10 @@ router.get("/absent-without-leave", getUnreportedAbsentees);
 router.get("/by-manager/:managerId", getEmployeesByManager);
 router.get('/by-role', getEmployeesByRole);
 router.post('/bulk-upload',authenticateToken, bulkUploadLeaveBalancesExcel);
+// Employee bulk import (kept above the /:id routes so "bulk-import" isn't read as an id)
+const canManageEmployees = requirePermission("admin.employee.view");
+router.get('/bulk-import/template', authenticateToken, canManageEmployees, downloadEmployeeTemplate);
+router.post('/bulk-import', authenticateToken, canManageEmployees, bulkUploadEmployees);
 router.get("/specific-roles",authenticateToken, getSpecificRoles);
 router.get("/active",authenticateToken, getActiveEmployees);
 router.get('/dept',authenticateToken, listMentors)

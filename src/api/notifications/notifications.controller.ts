@@ -288,6 +288,60 @@ export const removeDeviceToken = async (req: Request, res: Response) => {
 
 
 import admin from '../../lib/firebase';
+import axios from 'axios';
+
+// The Expo app (hrminds-expo, v1.1.0+) registers Expo push tokens through the
+// same /notifications/device-token endpoint; the older Capacitor app registers
+// FCM tokens. Both live in DeviceToken and are told apart by their prefix.
+const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
+const EXPO_BATCH = 100; // Expo accepts up to 100 messages per request
+const isExpoToken = (t: string) => t.startsWith('ExponentPushToken[') || t.startsWith('ExpoPushToken[');
+
+/** FCM per-token error codes that mean the token will never work again. */
+const DEAD_FCM_TOKEN_CODES = new Set([
+  'messaging/registration-token-not-registered',
+  'messaging/invalid-registration-token',
+  'messaging/invalid-argument',
+]);
+
+type ExpoTicket = { status: 'ok' | 'error'; id?: string; message?: string; details?: { error?: string } };
+
+async function sendExpoPush(tokens: string[], title: string, body: string) {
+  for (let i = 0; i < tokens.length; i += EXPO_BATCH) {
+    const chunk = tokens.slice(i, i + EXPO_BATCH);
+    try {
+      const r = await axios.post<{ data: ExpoTicket[] }>(
+        EXPO_PUSH_URL,
+        chunk.map((to) => ({
+          to,
+          title,
+          body,
+          data: { route: '/notifications' },
+          sound: 'default',
+          priority: 'high',
+          channelId: 'alerts',
+        })),
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            ...(process.env.EXPO_ACCESS_TOKEN ? { Authorization: `Bearer ${process.env.EXPO_ACCESS_TOKEN}` } : {}),
+          },
+          timeout: 15_000,
+        },
+      );
+      const tickets = r.data?.data ?? [];
+      for (let j = 0; j < tickets.length; j++) {
+        // Uninstalled app or rotated token — stop sending to it.
+        if (tickets[j].status === 'error' && tickets[j].details?.error === 'DeviceNotRegistered') {
+          await prisma.deviceToken.deleteMany({ where: { token: chunk[j] } });
+        }
+      }
+    } catch (e) {
+      console.error('[push] Expo send failed:', (e as Error).message);
+    }
+  }
+}
 
 export const sendPushNotification = async (
   employeeId: number,
@@ -310,9 +364,19 @@ export const sendPushNotification = async (
 
   if (!tokens.length) return;
 
+  const finalTitle = title || deriveNotificationTitle(message);
+  const expoTokens = tokens.filter(t => isExpoToken(t.token)).map(t => t.token);
+  const fcmTokens = tokens.filter(t => !isExpoToken(t.token));
+
+  if (expoTokens.length) {
+    await sendExpoPush(expoTokens, finalTitle, message);
+  }
+
+  if (!fcmTokens.length) return;
+
   const payload = {
     notification: {
-      title: title || deriveNotificationTitle(message),
+      title: finalTitle,
       body: message,
     },
     data: {
@@ -321,16 +385,18 @@ export const sendPushNotification = async (
   };
 
   const response = await admin.messaging().sendEachForMulticast({
-    tokens: tokens.map(t => t.token),
+    tokens: fcmTokens.map(t => t.token),
     ...payload
   });
 
-  // Cleanup invalid tokens
-  response.responses.forEach(async (r, i) => {
-    if (!r.success) {
-      await prisma.deviceToken.delete({
-        where: { token: tokens[i].token }
-      });
-    }
-  });
+  // Remove only tokens FCM reports as dead (app uninstalled / token rotated /
+  // malformed). Transient failures (network, quota, server errors) keep the
+  // token, so a hiccup no longer silently unsubscribes the employee from push.
+  const deadTokens = response.responses
+    .map((r, i) => (!r.success && r.error && DEAD_FCM_TOKEN_CODES.has(r.error.code) ? fcmTokens[i].token : null))
+    .filter((t): t is string => !!t);
+
+  if (deadTokens.length) {
+    await prisma.deviceToken.deleteMany({ where: { token: { in: deadTokens } } });
+  }
 };

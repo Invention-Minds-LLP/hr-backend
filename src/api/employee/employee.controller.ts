@@ -25,6 +25,12 @@ import cron from 'node-cron';
 import { syncEmployeeToDirectory, deactivateEmployeeInDirectory } from "../../lib/directory";
 import { allocateNewJoineeLeave, getLeaveStartMode } from "../leave/leave.controller";
 import { generateFixedShiftsForEmployee } from "../shift/shift.controller";
+import {
+  EMPLOYEE_IMPORT_COLUMNS,
+  validateEmployeeImportRow,
+  type ImportLookups,
+  type ValidatedImportRow,
+} from "../../lib/employeeImport";
 import { config } from "../../config";
 
 
@@ -2864,94 +2870,6 @@ function ensureDirExists(dirPath: string) {
   }
 }
 
-export async function mapExcelRowToEmployee(
-  row: Record<string, any>
-): Promise<Prisma.EmployeeCreateInput> {
-
-  const departmentName = row.departmentName?.trim();
-  const branchName = row.branchName?.trim();
-  const roleName = row.roleName?.trim();
-  const designationName = row.designationName?.trim();
-
-  if (!departmentName || !branchName || !roleName || !designationName) {
-    throw new Error("Department, Branch, Role and Designation are required");
-  }
-
-  const [dept, branch, role, designation] = await Promise.all([
-    prisma.department.upsert({
-      where: { name: departmentName },
-      update: {},
-      create: { name: departmentName },
-    }),
-    prisma.branch.upsert({
-      where: { name: branchName },
-      update: {},
-      create: { name: branchName },
-    }),
-    prisma.role.upsert({
-      where: { name: roleName },
-      update: {},
-      create: { name: roleName },
-    }),
-    prisma.designation.upsert({
-      where: { name: designationName },
-      update: {},
-      create: { name: designationName },
-    }),
-  ]);
-
-  // const manager = row.reportingManagerCode
-  //   ? await prisma.employee.findUnique({
-  //       where: { employeeCode: normalizeCode(row.reportingManagerCode) },
-  //     })
-  //   : null;
-  const managerCode = normalizeManagerCode(row.reportingManagerCode);
-
-  const manager = managerCode
-    ? await prisma.employee.findUnique({
-      where: { employeeCode: managerCode },
-    })
-    : null;
-
-
-  const dob = parseDate(row.dob);
-  const doj = parseDate(row.dateOfJoining);
-
-  if (!dob || !doj) throw new Error("Invalid DOB or Date of Joining");
-
-  console.log("Mapped Employee:", {
-    gender: normalizeGender(row.gender),
-    employmentType: normalizeEmploymentType(row.employmentType),
-    employmentStatus: normalizeEmploymentStatus(row.employmentStatus),
-  });
-
-  return {
-    employeeCode: normalizeCode(row.employeeCode),
-    referenceCode: row.referenceCode || null,
-    firstName: row.firstName,
-    lastName: row.lastName,
-    gender: normalizeGender(row.gender),
-
-    dob,
-    dateOfJoining: doj,
-
-    phone: String(row.phone),
-    email: String(row.email),
-
-    employmentType: normalizeEmploymentType(row.employmentType),
-    employmentStatus: normalizeEmploymentStatus(row.employmentStatus),
-    employeeType: row.employeeType || "CLINICAL",
-
-    reportingManager: manager ? manager.id : null,
-
-    Department: { connect: { id: dept.id } },
-    Branch: { connect: { id: branch.id } },
-    role: { connect: { id: role.id } },
-    designation: { connect: { id: designation.id } },
-    bloodGroup: 'O+',
-  };
-}
-
 
 
 interface UploadLog {
@@ -3062,184 +2980,231 @@ function toDate(value: any): Date {
 //     return res.status(500).json({ error: error.message || "Server error" });
 //   }
 // };
+/** Columns the import cannot work without; the rest may be left out of the sheet. */
+const IMPORT_REQUIRED_COLUMNS = EMPLOYEE_IMPORT_COLUMNS.filter(
+  c => !["referenceCode", "reportingManagerCode", "employeeType", "bloodGroup"].includes(c)
+);
+const IMPORT_MAX_ROWS = 2000;
+
+/** Empty import sheet (headers only) plus an Instructions sheet. Contains no employee data. */
 export const downloadEmployeeTemplate = (_req: Request, res: Response) => {
-  const headers = [{
-    employeeCode: "",
-    referenceCode: "",
-    firstName: "",
-    lastName: "",
-    gender: "MALE | FEMALE | OTHER",
-    dob: "YYYY-MM-DD",
-    dateOfJoining: "YYYY-MM-DD",
-    departmentName: "",
-    branchName: "",
-    roleName: "",
-    designationName: "",
-    reportingManagerCode: "",
-    employmentType: "PERMANENT | CONTRACT | PROBATION",
-    employmentStatus: "ACTIVE | TERMINATED | SUSPENDED",
-    phone: "",
-    email: "",
-  }];
+  const employees = XLSX.utils.aoa_to_sheet([[...EMPLOYEE_IMPORT_COLUMNS]]);
+  employees["!cols"] = EMPLOYEE_IMPORT_COLUMNS.map(h => ({ wch: Math.max(h.length + 2, 16) }));
 
-  const sheet = XLSX.utils.json_to_sheet(headers);
+  const guide = XLSX.utils.aoa_to_sheet([
+    ["Column", "Required", "Allowed values / format", "Notes"],
+    ["employeeCode", "Yes", "Text", "Must be unique — not already in the system and not repeated in the file."],
+    ["referenceCode", "No", "Text", ""],
+    ["firstName", "Yes", "Text", ""],
+    ["lastName", "Yes", "Text", ""],
+    ["gender", "Yes", "MALE / FEMALE / OTHER (or M / F / O)", ""],
+    ["dob", "Yes", "YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY or an Excel date cell", ""],
+    ["dateOfJoining", "Yes", "YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY or an Excel date cell", ""],
+    ["departmentName", "Yes", "Exact name as in Masters", "Unknown names are rejected, not created."],
+    ["branchName", "Yes", "Exact name as in Masters", "Unknown names are rejected, not created."],
+    ["roleName", "Yes", "Exact role name as in the system", "Unknown names are rejected, not created."],
+    ["designationName", "Yes", "Exact name as in Masters", "Unknown names are rejected, not created."],
+    ["reportingManagerCode", "No", "Employee code, or blank / 0", "May be an existing employee or one added in the same file."],
+    ["employmentType", "Yes", Object.values($Enums.EmploymentType).join(" / "), ""],
+    ["employmentStatus", "Yes", Object.values($Enums.EmploymentStatus).join(" / "), ""],
+    ["employeeType", "No", "Text, e.g. CLINICAL / NON-CLINICAL", "Defaults to CLINICAL when blank."],
+    ["bloodGroup", "No", "A+ / A- / B+ / B- / AB+ / AB- / O+ / O-", ""],
+    ["phone", "Yes", "Text (format the column as Text)", ""],
+    ["email", "Yes", "Text", ""],
+    [],
+    ["Only the first sheet is read. Row 1 must hold these exact column names (case-sensitive)."],
+    [`At most ${IMPORT_MAX_ROWS} rows per file. Rows that fail are listed after upload; the others are saved.`],
+  ]);
+  guide["!cols"] = [{ wch: 22 }, { wch: 10 }, { wch: 60 }, { wch: 70 }];
+
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, sheet, "Employees");
+  XLSX.utils.book_append_sheet(wb, employees, "Employees");
+  XLSX.utils.book_append_sheet(wb, guide, "Instructions");
 
-  res.setHeader(
-    "Content-Disposition",
-    "attachment; filename=employee-upload-template.xlsx"
-  );
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", "attachment; filename=employee-import-template.xlsx");
   res.end(XLSX.write(wb, { type: "buffer", bookType: "xlsx" }));
 };
+
+async function loadImportLookups(codes: string[]): Promise<ImportLookups> {
+  const [departments, branches, roles, designations, existing] = await Promise.all([
+    prisma.department.findMany({ select: { id: true, name: true } }),
+    prisma.branch.findMany({ select: { id: true, name: true } }),
+    prisma.role.findMany({ select: { id: true, name: true } }),
+    prisma.designation.findMany({ select: { id: true, name: true } }),
+    prisma.employee.findMany({
+      where: { employeeCode: { in: codes } }, // MySQL collation is case-insensitive
+      select: { employeeCode: true },
+    }),
+  ]);
+  const byName = (rows: { id: number; name: string }[]) =>
+    new Map(rows.map(r => [r.name.trim().toLowerCase(), r.id] as [string, number]));
+
+  return {
+    departments: byName(departments),
+    branches: byName(branches),
+    roles: byName(roles),
+    designations: byName(designations),
+    existingCodes: new Set(existing.map(e => e.employeeCode.toUpperCase())),
+  };
+}
+
+function importSaveError(e: any): string {
+  if (e?.code === "P2002") return "employeeCode already exists";
+  if (e?.code === "P2003") return "Department, branch, role or designation no longer exists";
+  return e?.message ? String(e.message).split("\n").pop()!.trim() : "Could not save this row";
+}
 function normalizeCode(code: any): string {
   return String(code || "").trim().toUpperCase();
 }
 
-export const bulkUploadEmployees = async (req: Request, res: Response) => {
-  try {
-    const form = formidable({ multiples: false, keepExtensions: true });
+/**
+ * POST /employees/bulk-import — multipart field "file" (.xlsx).
+ *
+ * 1. Every row is validated up front (masters must already exist — nothing is auto-created).
+ * 2. Valid rows are saved one at a time, so one bad row never sinks the rest
+ *    (and no long transaction against the slow remote DB).
+ * 3. Reporting managers are linked in a second pass, so a manager added in the
+ *    same file is found.
+ * 4. Same follow-up as manual create: DOJ leave allocation + directory sync.
+ */
+export const bulkUploadEmployees = (req: Request, res: Response) => {
+  const form = formidable({ multiples: false, keepExtensions: true, maxFileSize: 10 * 1024 * 1024 });
 
-    form.parse(req, async (err, fields, files) => {
-      if (err) {
-        return res.status(500).json({ error: "File parsing error" });
-      }
+  form.parse(req, async (err, _fields, files) => {
+    try {
+      if (err) return res.status(400).json({ error: "Could not read the uploaded file" });
 
       const fileObj = Array.isArray(files.file) ? files.file[0] : files.file;
-      if (!fileObj) {
-        return res.status(400).json({ error: "No file uploaded" });
+      if (!fileObj) return res.status(400).json({ error: "No file uploaded" });
+
+      let sheet: XLSX.WorkSheet;
+      try {
+        const workbook = XLSX.readFile(fileObj.filepath);
+        sheet = workbook.Sheets[workbook.SheetNames[0]];
+      } catch {
+        return res.status(400).json({ error: "The file is not a valid Excel workbook" });
       }
 
-      const workbook = XLSX.readFile(fileObj.filepath);
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rawRows = XLSX.utils.sheet_to_json(sheet);
-
-      if (!rawRows.length) {
-        return res.status(400).json({ error: "Empty Excel file" });
+      const header = ((XLSX.utils.sheet_to_json(sheet, { header: 1 })[0] as unknown[]) || [])
+        .map(h => String(h ?? "").trim());
+      const missing = IMPORT_REQUIRED_COLUMNS.filter(c => !header.includes(c));
+      if (missing.length) {
+        return res.status(400).json({
+          error: `Missing columns: ${missing.join(", ")}. Download the template and keep its header row as is.`,
+        });
       }
 
-      const errorRows: any[] = [];
-      const logs: string[] = [];
-      const createOps: Prisma.PrismaPromise<any>[] = [];
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "", blankrows: false });
+      if (!rows.length) return res.status(400).json({ error: "The sheet has no employee rows" });
+      if (rows.length > IMPORT_MAX_ROWS) {
+        return res.status(400).json({ error: `Too many rows (${rows.length}). Split the file into ${IMPORT_MAX_ROWS} rows or fewer.` });
+      }
 
-      /** ---------------------------
-       * 1️⃣ Collect employeeCodes
-       ----------------------------*/
-      const excelCodes = rawRows.map((r: any) =>
-        normalizeCode(r.employeeCode)
-      );
+      const failed: { rowNumber: number; employeeCode: string; error: string }[] = [];
+      const warnings: string[] = [];
 
-      /** ---------------------------
-       * 2️⃣ Find existing codes in DB
-       ----------------------------*/
-      const existingEmployees = await prisma.employee.findMany({
-        where: { employeeCode: { in: excelCodes } },
-        select: { employeeCode: true },
-      });
+      /* ---------- 1. validate ---------- */
+      const codes = rows.map(r => normalizeCode(r.employeeCode)).filter(Boolean);
+      const lookups = await loadImportLookups(codes);
 
-      const existingCodeSet = new Set(
-        existingEmployees.map(e => e.employeeCode.toUpperCase())
-      );
-
-      /** ---------------------------
-       * 3️⃣ Detect duplicates in Excel
-       ----------------------------*/
-      const seenExcelCodes = new Set<string>();
-
-      for (let i = 0; i < rawRows.length; i++) {
-        const row = rawRows[i] as any;
-        const employeeCode = normalizeCode(row.employeeCode);
-
+      const valid: { rowNumber: number; row: ValidatedImportRow }[] = [];
+      const seen = new Set<string>();
+      rows.forEach((raw, i) => {
+        const rowNumber = i + 2; // sheet row; row 1 is the header
+        const code = normalizeCode(raw.employeeCode);
         try {
-          if (!employeeCode) {
-            throw new Error("EmployeeCode is required");
-          }
-
-          // Duplicate inside Excel
-          if (seenExcelCodes.has(employeeCode)) {
-            throw new Error(`Duplicate employeeCode in Excel: ${employeeCode}`);
-          }
-          seenExcelCodes.add(employeeCode);
-
-          // Duplicate in DB
-          if (existingCodeSet.has(employeeCode)) {
-            throw new Error(`EmployeeCode already exists: ${employeeCode}`);
-          }
-
-          // Map & create
-          const mapped = await mapExcelRowToEmployee(row);
-
-          // createOps.push(prisma.employee.create({ data: mapped }));
-          createOps.push(
-            prisma.employee.create({
-              data: {
-                ...mapped
-              }
-            })
-          );
-
-          logs.push(`Row ${i + 1}: SUCCESS (${employeeCode})`);
-        } catch (error: any) {
-          errorRows.push({
-            rowNumber: i + 1,
-            employeeCode,
-            error: error.message,
-            ...row,
-          });
-
-          logs.push(`Row ${i + 1}: FAILED → ${error.message}`);
+          if (code && seen.has(code)) throw new Error(`employeeCode ${code} appears more than once in the file`);
+          if (code) seen.add(code);
+          valid.push({ rowNumber, row: validateEmployeeImportRow(raw, lookups) });
+        } catch (e: any) {
+          failed.push({ rowNumber, employeeCode: code, error: e.message });
         }
-      }
-
-      /** ---------------------------
-       * 4️⃣ Execute inserts
-       ----------------------------*/
-      if (createOps.length > 0) {
-        await prisma.$transaction(createOps);
-      }
-
-      /** ---------------------------
-       * 5️⃣ Error Excel
-       ----------------------------*/
-      let errorReportUrl: string | null = null;
-
-      if (errorRows.length > 0) {
-        const errorSheet = XLSX.utils.json_to_sheet(errorRows);
-        const errorWB = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(errorWB, errorSheet, "Errors");
-
-        const reportsDir = path.join(__dirname, "../../reports");
-        if (!fs.existsSync(reportsDir)) {
-          fs.mkdirSync(reportsDir, { recursive: true });
-        }
-
-        const fileName = `employee-upload-errors-${Date.now()}.xlsx`;
-        const filePath = path.join(reportsDir, fileName);
-
-        XLSX.writeFile(errorWB, filePath);
-        errorReportUrl = `/reports/${fileName}`;
-      }
-
-      return res.json({
-        totalRows: rawRows.length,
-        successCount: createOps.length,
-        failedCount: errorRows.length,
-        errorReport: errorReportUrl,
-        logs,
       });
-    });
-  } catch (e: any) {
-    console.error(e);
-    return res.status(500).json({ error: "Bulk upload failed" });
-  }
-};
 
-function normalizeManagerCode(code: any): string | null {
-  if (!code) return null;
-  const c = String(code).trim().toUpperCase();
-  if (c === "0") return null;
-  return c;
-}
+      // Manager must be an existing employee or another valid row in this file.
+      const fileCodes = new Set(valid.map(v => v.row.data.employeeCode));
+      const externalManagerCodes = [
+        ...new Set(valid.map(v => v.row.managerCode).filter((c): c is string => !!c && !fileCodes.has(c))),
+      ];
+      const dbManagers = externalManagerCodes.length
+        ? await prisma.employee.findMany({
+            where: { employeeCode: { in: externalManagerCodes } },
+            select: { id: true, employeeCode: true },
+          })
+        : [];
+      const managerIdByCode = new Map(dbManagers.map(m => [m.employeeCode.toUpperCase(), m.id] as [string, number]));
+
+      const toSave = valid.filter(v => {
+        const mc = v.row.managerCode;
+        if (mc && !fileCodes.has(mc) && !managerIdByCode.has(mc)) {
+          failed.push({
+            rowNumber: v.rowNumber,
+            employeeCode: v.row.data.employeeCode,
+            error: `reportingManagerCode ${mc} not found (not in the system and not a valid row in this file)`,
+          });
+          return false;
+        }
+        return true;
+      });
+
+      /* ---------- 2. save one by one ---------- */
+      const created: { id: number; rowNumber: number; row: ValidatedImportRow }[] = [];
+      for (const v of toSave) {
+        try {
+          const emp = await prisma.employee.create({ data: v.row.data, select: { id: true } });
+          created.push({ id: emp.id, rowNumber: v.rowNumber, row: v.row });
+          managerIdByCode.set(v.row.data.employeeCode, emp.id);
+        } catch (e: any) {
+          failed.push({ rowNumber: v.rowNumber, employeeCode: v.row.data.employeeCode, error: importSaveError(e) });
+        }
+      }
+
+      /* ---------- 3. link managers ---------- */
+      for (const c of created) {
+        const mc = c.row.managerCode;
+        if (!mc) continue;
+        const managerId = managerIdByCode.get(mc);
+        if (!managerId) {
+          warnings.push(`Row ${c.rowNumber} (${c.row.data.employeeCode}): saved without a manager — manager ${mc}'s row failed`);
+          continue;
+        }
+        try {
+          await prisma.employee.update({ where: { id: c.id }, data: { reportingManager: managerId } });
+        } catch (e) {
+          console.error(`Bulk import: manager link failed for ${c.row.data.employeeCode}`, e);
+          warnings.push(`Row ${c.rowNumber} (${c.row.data.employeeCode}): saved, but linking manager ${mc} failed`);
+        }
+      }
+
+      /* ---------- 4. same follow-up as manual create ---------- */
+      const doLeave = getLeaveStartMode() === "DOJ";
+      for (const c of created) {
+        if (doLeave) {
+          try {
+            await allocateNewJoineeLeave(c.id, c.row.data.dateOfJoining);
+          } catch (e) {
+            console.error(`Bulk import: DOJ leave allocation failed for emp ${c.id}`, e);
+            warnings.push(`Row ${c.rowNumber} (${c.row.data.employeeCode}): saved, but leave allocation failed`);
+          }
+        }
+        syncEmployeeToDirectory(c.row.data).catch(() => { /* non-blocking */ });
+      }
+
+      failed.sort((a, b) => a.rowNumber - b.rowNumber);
+      return res.json({
+        totalRows: rows.length,
+        successCount: created.length,
+        failedCount: failed.length,
+        failed,
+        warnings,
+      });
+    } catch (e) {
+      console.error("Bulk employee import failed", e);
+      if (!res.headersSent) res.status(500).json({ error: "Bulk import failed" });
+    }
+  });
+};
 
 /* ============================================================
    PROGRESS API
@@ -3249,43 +3214,6 @@ export const getBulkUploadProgress = (req: Request, res: Response) => {
   if (!progress) return res.status(404).json({ error: "Invalid uploadId" });
   res.json(progress);
 };
-function normalizeGender(value: any): "MALE" | "FEMALE" | "OTHER" {
-  if (!value) throw new Error("Gender is required");
-
-  const v = String(value)
-    .replace(/\u00A0/g, " ")   // remove non-breaking spaces
-    .trim()
-    .toUpperCase();
-
-  switch (v) {
-    case "MALE":
-    case "M":
-      return "MALE";
-    case "FEMALE":
-    case "F":
-      return "FEMALE";
-    case "OTHER":
-    case "O":
-      return "OTHER";
-    default:
-      throw new Error(`Invalid gender value: "${value}"`);
-  }
-}
-function normalizeEmploymentType(value: any) {
-  const v = String(value).trim().toUpperCase();
-  if (!["PERMANENT", "CONTRACT", "PROBATION"].includes(v)) {
-    throw new Error(`Invalid employmentType: "${value}"`);
-  }
-  return v as any;
-}
-
-function normalizeEmploymentStatus(value: any) {
-  const v = String(value).trim().toUpperCase();
-  if (!["ACTIVE", "TERMINATED", "SUSPENDED", "NOTICE_PERIOD", "RESIGNED"].includes(v)) {
-    throw new Error(`Invalid employmentStatus: "${value}"`);
-  }
-  return v as any;
-}
 // export const bulkUpdateReportingManager = async (req: Request, res: Response) => {
 //   const form = formidable({ multiples: false });
 

@@ -1,6 +1,64 @@
 import { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { createNotification } from "../notifications/notifications.controller";
+import { HOD_ROLE_ID, headedDepartmentIds, isDepartmentHead } from "../../lib/departmentHeads";
+import { isInScope, withEmployeeScope } from "../../lib/dataScope";
+import { MGMT_DASHBOARD_EMPID_ALLOWLIST } from "../../lib/permissions";
+
+// ── Access control ────────────────────────────────────────────────────────────
+// Who is calling, taken from the verified token (never from the request body).
+//
+// Note on `admin.weeklyTracker.view`: that permission is seeded to every role
+// outside the "restricted" tier (see computePermissions → adminSection), i.e. to
+// most employees, so it cannot be used as a "see everyone's reports" gate. It
+// still guards the web overview route; the data rules below decide what rows it
+// shows.
+type Viewer = { empId: number; roleId: number | null; deptId: number | null; isHR: boolean; isMgmt: boolean };
+
+async function getViewer(req: Request): Promise<Viewer | null> {
+  const empId = Number((req as any).user?.empId ?? 0);
+  if (!empId) return null;
+  const me = await prisma.employee.findUnique({ where: { id: empId }, select: { roleId: true, departmentId: true } });
+  if (!me) return null;
+  return {
+    empId,
+    roleId: me.roleId ?? null,
+    deptId: me.departmentId ?? null,
+    // HR = HR Manager role or anyone in the HR department (dept 1), as elsewhere.
+    isHR: me.roleId === 1 || me.departmentId === 1,
+    isMgmt: me.roleId === 4 || MGMT_DASHBOARD_EMPID_ALLOWLIST.includes(empId),
+  };
+}
+
+type ReportOwner = { id: number; reportingManager: number | null; inchargeId: number | null; departmentId: number | null };
+
+/**
+ * May `v` see the weekly reports of employee `emp`?
+ * Owner · their reporting manager · their in-charge · HOD (role 3) heading their
+ * department · HR / Management (within the viewer's branch/department data scope).
+ */
+async function canViewReportsOf(v: Viewer, emp: ReportOwner): Promise<boolean> {
+  if (v.empId === emp.id) return true;
+  if (emp.reportingManager && v.empId === emp.reportingManager) return true;
+  if (emp.inchargeId && v.empId === emp.inchargeId) return true;
+  if (v.roleId === HOD_ROLE_ID && (await isDepartmentHead(v.empId, emp.departmentId))) return true;
+  if (v.isHR || v.isMgmt) return isInScope(v.empId, emp.id);
+  return false;
+}
+
+/** Writes 401/403 and returns null unless the caller owns the report. */
+async function requireOwner(req: Request, res: Response, ownerEmpId: number): Promise<Viewer | null> {
+  const v = await getViewer(req);
+  if (!v) {
+    res.status(401).json({ error: "Sign in as an employee to change weekly reports" });
+    return null;
+  }
+  if (v.empId !== ownerEmpId) {
+    res.status(403).json({ error: "You can only change your own weekly report" });
+    return null;
+  }
+  return v;
+}
 
 // ── Helper: IST day boundaries for date-range filters ─────────────────────────
 // Reports are stored with weekStartDate = the creator's local (IST) Monday
@@ -115,6 +173,8 @@ export const createWeeklyReport = async (req: Request, res: Response) => {
     if (!employeeId || !weekStartDate || !weekEndDate) {
       return res.status(400).json({ error: "employeeId, weekStartDate, weekEndDate are required" });
     }
+    // Employees create only their own report.
+    if (!(await requireOwner(req, res, Number(employeeId)))) return;
 
     const start = new Date(weekStartDate);
     const end = new Date(weekEndDate);
@@ -152,14 +212,17 @@ export const getWeeklyReports = async (req: Request, res: Response) => {
   try {
     const { employeeId, departmentId, status, weekStartDate, weekEndDate, page, limit, inchargeId, reportingManagerId } = req.query;
 
+    const v = await getViewer(req);
+    if (!v) return res.status(401).json({ error: "Sign in as an employee to view weekly reports" });
+    const fullAccess = v.isHR || v.isMgmt;
+
     const where: any = {};
     if (employeeId) where.employeeId = Number(employeeId);
 
-    // Draft visibility: only the employee's own "my tracker" view (which passes
-    // employeeId) may see DRAFT reports. Incharge / reporting manager / HR
-    // manager / management views (no employeeId) must never see other people's
-    // drafts — they only see submitted / approved / rejected reports.
-    const isOwnerView = !!employeeId;
+    // Draft visibility: DRAFT reports are visible only to their owner, through the
+    // owner's own "my tracker" view (employeeId = self). Nobody else — incharge,
+    // manager, HR or management — ever sees another person's drafts.
+    const isOwnerView = !!employeeId && Number(employeeId) === v.empId;
     if (isOwnerView) {
       if (status) where.status = String(status);
     } else if (status && String(status).toUpperCase() !== "DRAFT") {
@@ -168,12 +231,31 @@ export const getWeeklyReports = async (req: Request, res: Response) => {
       where.status = { not: "DRAFT" };
     }
 
-    // Viewer scoping (incharge / reporting manager see only their own team)
+    // Query filters (the web overview passes inchargeId / reportingManagerId for
+    // those roles; the mobile inbox does the same).
     const employeeWhere: any = {};
     if (departmentId) employeeWhere.departmentId = Number(departmentId);
     if (inchargeId) employeeWhere.inchargeId = Number(inchargeId);
     if (reportingManagerId) employeeWhere.reportingManager = Number(reportingManagerId);
-    if (Object.keys(employeeWhere).length) where.employee = employeeWhere;
+
+    if (fullAccess) {
+      // HR / Management: everyone, within their branch/department data scope.
+      const scoped = await withEmployeeScope(v.empId, employeeWhere);
+      if (Object.keys(scoped).length) where.employee = scoped;
+    } else {
+      // Everyone else: only their own reports and the people they look after.
+      if (Object.keys(employeeWhere).length) where.employee = employeeWhere;
+      const mine: any[] = [
+        { employeeId: v.empId },
+        { employee: { reportingManager: v.empId } },
+        { employee: { inchargeId: v.empId } },
+      ];
+      if (v.roleId === HOD_ROLE_ID) {
+        const heads = await headedDepartmentIds(v.empId);
+        if (heads.length) mine.push({ employee: { departmentId: { in: heads } } });
+      }
+      where.AND = [{ OR: mine }];
+    }
     if (weekStartDate || weekEndDate) {
       where.weekStartDate = {};
       if (weekStartDate) where.weekStartDate.gte = istDayStart(String(weekStartDate));
@@ -217,7 +299,8 @@ export const getWeeklyReports = async (req: Request, res: Response) => {
 export const getWeeklyReportById = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
-    const empMap = await getEmployeeMap();
+    const v = await getViewer(req);
+    if (!v) return res.status(401).json({ error: "Sign in as an employee to view weekly reports" });
 
     const report = await prisma.weeklyPerformanceReport.findUnique({
       where: { id },
@@ -238,7 +321,18 @@ export const getWeeklyReportById = async (req: Request, res: Response) => {
     if (!report) {
       return res.status(404).json({ error: "Report not found" });
     }
+    const allowed = await canViewReportsOf(v, {
+      id: report.employeeId,
+      reportingManager: report.employee.reportingManager,
+      inchargeId: report.employee.inchargeId,
+      departmentId: report.employee.departmentId,
+    });
+    // Others' drafts stay private even to people who may see their submitted reports.
+    if (!allowed || (report.status === "DRAFT" && report.employeeId !== v.empId)) {
+      return res.status(403).json({ error: "You don't have access to this weekly report" });
+    }
 
+    const empMap = await getEmployeeMap();
     const tasksWithAssignerName = report.dailyTasks.map(t => ({
       ...t,
       assignedByName: t.assignedById ? (empMap.get(t.assignedById) ?? null) : null,
@@ -265,6 +359,7 @@ export const updateWeeklyReport = async (req: Request, res: Response) => {
     const report = await prisma.weeklyPerformanceReport.findUnique({ where: { id } });
 
     if (!report) return res.status(404).json({ error: "Report not found" });
+    if (!(await requireOwner(req, res, report.employeeId))) return;
     if (!isReportEditable(report)) return res.status(400).json({ error: "This report can no longer be edited (already under or past review)." });
 
     const { employeeSummary, weekStartDate, weekEndDate } = req.body;
@@ -306,6 +401,7 @@ export const submitWeeklyReport = async (req: Request, res: Response) => {
     });
 
     if (!report) return res.status(404).json({ error: "Report not found" });
+    if (!(await requireOwner(req, res, report.employeeId))) return;
     if (!isReportEditable(report)) return res.status(400).json({ error: "This report can no longer be submitted (already under or past review)." });
     if (report._count.dailyTasks === 0) return res.status(400).json({ error: "Add at least one task before submitting" });
 
@@ -347,7 +443,8 @@ export const submitWeeklyReport = async (req: Request, res: Response) => {
 export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
   try {
     const reportId = Number(req.params.id);
-    const { role, status, userId, declineReason, rating, note } = req.body as {
+    // body.userId is still sent by clients but no longer trusted — the actor comes from the token.
+    const { role, status, declineReason, rating, note } = req.body as {
       role: "INCHARGE" | "REPORTING_MANAGER" | "HR_MANAGER" | "MANAGEMENT";
       status: "Approved" | "Declined";
       userId?: number;
@@ -384,6 +481,28 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
     const isHRDept = deptId === 1;
     const hasIncharge = !!emp.inchargeId;
 
+    // ── Who may act ────────────────────────────────────────────────────────
+    // The role string only picks the rung of the ladder; the caller (from the
+    // token, not the body) must actually hold that position for this employee.
+    const v = await getViewer(req);
+    if (!v) return res.status(401).json({ error: "Sign in as an employee to review weekly reports" });
+    if (v.empId === report.employeeId) {
+      return res.status(403).json({ error: "You can't review your own weekly report" });
+    }
+    const headsDept = v.roleId === HOD_ROLE_ID && (await isDepartmentHead(v.empId, deptId));
+    const entitled =
+      role === "INCHARGE" ? !!emp.inchargeId && v.empId === emp.inchargeId
+      : role === "REPORTING_MANAGER" ? v.empId === emp.reportingManager || headsDept
+      // Web sends MANAGEMENT for HOD / in-charge / HR Manager employees; besides
+      // Management itself, the employee's own reporting manager / HOD may act.
+      : role === "MANAGEMENT" ? v.isMgmt || v.empId === emp.reportingManager || headsDept
+      : role === "HR_MANAGER" ? v.roleId === 1 && (await isInScope(v.empId, emp.id))
+      : false;
+    if (!entitled) {
+      return res.status(403).json({ error: "You are not an approver for this employee at this level" });
+    }
+    const actorId = v.empId;
+
     const data: any = {};
 
     // ── INCHARGE LEVEL ─────────────────────────────────────────────────────
@@ -395,7 +514,7 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
 
       if (!approved) {
         data.status = "REJECTED";
-        data.declinedBy = userId ?? null;
+        data.declinedBy = actorId;
         data.declinedDate = new Date();
         data.declineReason = declineReason || null;
       } else {
@@ -439,10 +558,10 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
       data.status = approved ? "APPROVED" : "REJECTED";
 
       if (approved) {
-        data.approvedBy = userId ?? null;
+        data.approvedBy = actorId;
         data.approvedDate = new Date();
       } else {
-        data.declinedBy = userId ?? null;
+        data.declinedBy = actorId;
         data.declinedDate = new Date();
         data.declineReason = declineReason || null;
       }
@@ -462,10 +581,10 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
       data.status = approved ? "APPROVED" : "REJECTED";
 
       if (approved) {
-        data.approvedBy = userId ?? null;
+        data.approvedBy = actorId;
         data.approvedDate = new Date();
       } else {
-        data.declinedBy = userId ?? null;
+        data.declinedBy = actorId;
         data.declinedDate = new Date();
         data.declineReason = declineReason || null;
       }
@@ -481,7 +600,7 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
 
         if (!approved) {
           data.status = "REJECTED";
-          data.declinedBy = userId ?? null;
+          data.declinedBy = actorId;
           data.declinedDate = new Date();
           data.declineReason = declineReason || null;
         }
@@ -496,10 +615,10 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
         data.status = approved ? "APPROVED" : "REJECTED";
 
         if (approved) {
-          data.approvedBy = userId ?? null;
+          data.approvedBy = actorId;
           data.approvedDate = new Date();
         } else {
-          data.declinedBy = userId ?? null;
+          data.declinedBy = actorId;
           data.declinedDate = new Date();
           data.declineReason = declineReason || null;
         }
@@ -518,7 +637,7 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
 
         if (!approved) {
           data.status = "REJECTED";
-          data.declinedBy = userId ?? null;
+          data.declinedBy = actorId;
           data.declinedDate = new Date();
           data.declineReason = declineReason || null;
         }
@@ -533,16 +652,31 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
         data.status = approved ? "APPROVED" : "REJECTED";
 
         if (approved) {
-          data.approvedBy = userId ?? null;
+          data.approvedBy = actorId;
           data.approvedDate = new Date();
         } else {
-          data.declinedBy = userId ?? null;
+          data.declinedBy = actorId;
           data.declinedDate = new Date();
           data.declineReason = declineReason || null;
         }
       } else {
         return res.status(400).json({ error: "Invalid approver for Employee" });
       }
+    }
+
+    // ── Anything else (e.g. Management, roleId 4) ────────────────────────
+    // Same as leaves: there is no approver above Management, so refuse clearly
+    // rather than "approving" with nothing written.
+    else {
+      return res.status(400).json({
+        error: roleId === 4
+          ? "Weekly reports of Management employees have no approval chain (there is no approver above Management)."
+          : `Weekly report approval isn't set up for this employee's role (roleId ${roleId ?? "none"}).`,
+      });
+    }
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: "Nothing to update for this approver at this stage" });
     }
 
     const updated = await prisma.weeklyPerformanceReport.update({
@@ -591,7 +725,7 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
     await logActivity(
       reportId,
       approved ? "APPROVED" : "DECLINED",
-      userId ?? null,
+      actorId,
       `${role}${approved ? (note ? ` — ${note}` : "") : (declineReason ? ` — ${declineReason}` : "")}`
     );
     return res.json(updated);
@@ -609,10 +743,17 @@ export const updateWeeklyReportStatus = async (req: Request, res: Response) => {
 export const acknowledgeWeeklyReport = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
-    const { userId, remark } = req.body as { userId?: number; remark?: string };
+    const { remark } = req.body as { userId?: number; remark?: string };
+
+    const v = await getViewer(req);
+    if (!v) return res.status(401).json({ error: "Sign in as an employee to acknowledge reports" });
+    if (!v.isMgmt) return res.status(403).json({ error: "Only Management can acknowledge weekly reports" });
 
     const report = await prisma.weeklyPerformanceReport.findUnique({ where: { id } });
     if (!report) return res.status(404).json({ error: "Report not found" });
+    if (!(await isInScope(v.empId, report.employeeId))) {
+      return res.status(403).json({ error: "This employee is outside your assigned branch/department" });
+    }
     if (report.status !== "APPROVED") {
       return res.status(400).json({ error: "Only approved reports can be acknowledged" });
     }
@@ -621,13 +762,13 @@ export const acknowledgeWeeklyReport = async (req: Request, res: Response) => {
       where: { id },
       data: {
         mgmtAcknowledgedAt: new Date(),
-        mgmtAcknowledgedBy: userId ?? null,
+        mgmtAcknowledgedBy: v.empId,
         mgmtRemark: remark?.trim() || null,
       },
       include: { employee: { select: { employeeCode: true, firstName: true, lastName: true } }, dailyTasks: true },
     });
 
-    await logActivity(id, "ACKNOWLEDGED", userId ?? null, remark?.trim() ? `Management remark: ${remark.trim()}` : "Acknowledged by management");
+    await logActivity(id, "ACKNOWLEDGED", v.empId, remark?.trim() ? `Management remark: ${remark.trim()}` : "Acknowledged by management");
     return res.json(updated);
   } catch (error: any) {
     console.error("acknowledgeWeeklyReport error:", error);
@@ -644,6 +785,7 @@ export const deleteWeeklyReport = async (req: Request, res: Response) => {
     const report = await prisma.weeklyPerformanceReport.findUnique({ where: { id } });
 
     if (!report) return res.status(404).json({ error: "Report not found" });
+    if (!(await requireOwner(req, res, report.employeeId))) return;
     if (report.status !== "DRAFT") return res.status(400).json({ error: "Can only delete DRAFT reports" });
 
     await prisma.weeklyPerformanceReport.delete({ where: { id } });
@@ -663,6 +805,7 @@ export const addTaskEntry = async (req: Request, res: Response) => {
     const report = await prisma.weeklyPerformanceReport.findUnique({ where: { id: reportId } });
 
     if (!report) return res.status(404).json({ error: "Report not found" });
+    if (!(await requireOwner(req, res, report.employeeId))) return;
     if (!isReportEditable(report)) return res.status(400).json({ error: "Cannot add tasks — this report is under or past review." });
 
     const {
@@ -710,10 +853,12 @@ export const updateTaskEntry = async (req: Request, res: Response) => {
     const taskId = Number(req.params.taskId);
     const task = await prisma.weeklyTaskEntry.findUnique({
       where: { id: taskId },
-      include: { report: { select: { status: true, inChargeDecision: true, hodDecision: true, hrDecision: true } } },
+      include: { report: { select: { employeeId: true, status: true, inChargeDecision: true, hodDecision: true, hrDecision: true } } },
     });
 
     if (!task) return res.status(404).json({ error: "Task not found" });
+    const editor = await requireOwner(req, res, task.report.employeeId);
+    if (!editor) return;
     if (!isReportEditable(task.report)) return res.status(400).json({ error: "Cannot edit tasks — this report is under or past review." });
 
     const {
@@ -740,7 +885,7 @@ export const updateTaskEntry = async (req: Request, res: Response) => {
     if (remarks !== undefined) data.remarks = remarks;
 
     const updated = await prisma.weeklyTaskEntry.update({ where: { id: taskId }, data });
-    await logActivity(task.reportId, "TASK_UPDATED", null, updated.taskDescription);
+    await logActivity(task.reportId, "TASK_UPDATED", editor.empId, updated.taskDescription);
     await notifyApproverOfEdit(task.reportId);
     return res.json(updated);
   } catch (error: any) {
@@ -757,14 +902,16 @@ export const deleteTaskEntry = async (req: Request, res: Response) => {
     const taskId = Number(req.params.taskId);
     const task = await prisma.weeklyTaskEntry.findUnique({
       where: { id: taskId },
-      include: { report: { select: { status: true, inChargeDecision: true, hodDecision: true, hrDecision: true } } },
+      include: { report: { select: { employeeId: true, status: true, inChargeDecision: true, hodDecision: true, hrDecision: true } } },
     });
 
     if (!task) return res.status(404).json({ error: "Task not found" });
+    const editor = await requireOwner(req, res, task.report.employeeId);
+    if (!editor) return;
     if (!isReportEditable(task.report)) return res.status(400).json({ error: "Cannot delete tasks — this report is under or past review." });
 
     await prisma.weeklyTaskEntry.delete({ where: { id: taskId } });
-    await logActivity(task.reportId, "TASK_DELETED", null, task.taskDescription);
+    await logActivity(task.reportId, "TASK_DELETED", editor.empId, task.taskDescription);
     await notifyApproverOfEdit(task.reportId);
     return res.json({ message: "Task deleted" });
   } catch (error: any) {
@@ -858,10 +1005,9 @@ export const carryForwardTasks = async (req: Request, res: Response) => {
     });
 
     if (!fromReport) return res.status(404).json({ error: "Source report not found" });
-    // Ownership: an employee may only carry forward their own tasks.
-    if (userId && Number(userId) !== fromReport.employeeId) {
-      return res.status(403).json({ error: "You can only carry forward your own tasks" });
-    }
+    // Ownership from the verified token — the body's userId is no longer trusted.
+    if (!(await requireOwner(req, res, fromReport.employeeId))) return;
+    void userId; // still accepted for backward compatibility, not used for access
 
     // Get incomplete tasks
     let tasksToCarry = fromReport.dailyTasks.filter(
@@ -907,7 +1053,11 @@ export const carryForwardTasks = async (req: Request, res: Response) => {
       where: { id: targetReportId },
       include: { dailyTasks: { select: { carriedFromEntryId: true } } },
     });
-    if (targetExisting && !isReportEditable(targetExisting)) {
+    if (!targetExisting) return res.status(404).json({ error: "Target report not found" });
+    if (targetExisting.employeeId !== fromReport.employeeId) {
+      return res.status(403).json({ error: "Tasks can only be carried into your own report" });
+    }
+    if (!isReportEditable(targetExisting)) {
       return res.status(400).json({ error: "Next week's report is already under review — cannot add carried tasks." });
     }
     const alreadyCarried = new Set(
@@ -964,8 +1114,18 @@ export const carryForwardTasks = async (req: Request, res: Response) => {
 export const getTaskHistory = async (req: Request, res: Response) => {
   try {
     const taskId = Number(req.params.taskId);
-    const start = await prisma.weeklyTaskEntry.findUnique({ where: { id: taskId } });
+    const start = await prisma.weeklyTaskEntry.findUnique({
+      where: { id: taskId },
+      include: { report: { select: { employeeId: true, status: true, employee: { select: { reportingManager: true, inchargeId: true, departmentId: true } } } } },
+    });
     if (!start) return res.status(404).json({ error: "Task not found" });
+    const v = await getViewer(req);
+    if (!v) return res.status(401).json({ error: "Sign in as an employee to view task history" });
+    const owner = start.report;
+    const allowed = await canViewReportsOf(v, { id: owner.employeeId, ...owner.employee });
+    if (!allowed || (owner.status === "DRAFT" && owner.employeeId !== v.empId)) {
+      return res.status(403).json({ error: "You don't have access to this task" });
+    }
 
     const chain = new Map<number, any>();
 
@@ -1026,16 +1186,37 @@ export const getTrackerDashboard = async (req: Request, res: Response) => {
   try {
     const { employeeId, departmentId } = req.query;
 
+    const v = await getViewer(req);
+    if (!v) return res.status(401).json({ error: "Sign in as an employee to view the tracker dashboard" });
+
     const where: any = {};
     if (employeeId) where.employeeId = Number(employeeId);
-    if (departmentId) where.employee = { departmentId: Number(departmentId) };
+    const employeeWhere: any = departmentId ? { departmentId: Number(departmentId) } : {};
+    if (v.isHR || v.isMgmt) {
+      const scoped = await withEmployeeScope(v.empId, employeeWhere);
+      if (Object.keys(scoped).length) where.employee = scoped;
+    } else {
+      if (Object.keys(employeeWhere).length) where.employee = employeeWhere;
+      const mine: any[] = [
+        { employeeId: v.empId },
+        { employee: { reportingManager: v.empId } },
+        { employee: { inchargeId: v.empId } },
+      ];
+      if (v.roleId === HOD_ROLE_ID) {
+        const heads = await headedDepartmentIds(v.empId);
+        if (heads.length) mine.push({ employee: { departmentId: { in: heads } } });
+      }
+      where.AND = [{ OR: mine }];
+    }
+    // Draft counts only ever include the caller's own drafts.
+    const draftWhere = { ...where, status: "DRAFT", employeeId: v.empId };
 
     const [draft, submitted, approved, rejected, total] = await Promise.all([
-      prisma.weeklyPerformanceReport.count({ where: { ...where, status: "DRAFT" } }),
+      prisma.weeklyPerformanceReport.count({ where: draftWhere }),
       prisma.weeklyPerformanceReport.count({ where: { ...where, status: "SUBMITTED" } }),
       prisma.weeklyPerformanceReport.count({ where: { ...where, status: "APPROVED" } }),
       prisma.weeklyPerformanceReport.count({ where: { ...where, status: "REJECTED" } }),
-      prisma.weeklyPerformanceReport.count({ where }),
+      prisma.weeklyPerformanceReport.count({ where: { ...where, status: { not: "DRAFT" } } }),
     ]);
 
     // Pending reviews (submitted but not fully approved)
